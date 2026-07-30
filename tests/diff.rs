@@ -864,7 +864,9 @@ fn two_hosts_with_their_own_file_must_be_told_whose_wins() {
         "{labels:?}"
     );
     assert!(
-        !labels.iter().any(|l| l.as_str() == "adopt into the manifest"),
+        !labels
+            .iter()
+            .any(|l| l.as_str() == "adopt into the manifest"),
         "an ambiguous default would silently pick one: {labels:?}"
     );
 }
