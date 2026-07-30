@@ -45,6 +45,12 @@ parser = "claude_plugins_v1"
 file = "~/.claude/plugins/known_marketplaces.json"
 parser = "claude_marketplaces_v1"
 
+# What each marketplace offers. Needed because `claude plugin install` fails when
+# no configured marketplace carries the name — a bare id does not resolve.
+[[plugins.catalog]]
+glob = "~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json"
+parser = "marketplace_manifest_v1"
+
 [plugins.install]
 argv = ["plugin", "install", "{id}", "--scope", "user"]
 

@@ -49,6 +49,20 @@ implicit_marketplaces = ["openai-curated", "openai-api-curated"]
 file = "~/.codex/config.toml"
 parser = "codex_plugins_toml_v1"
 
+# `codex plugin add` refuses a bare name ("requires --marketplace unless passed
+# as <plugin>@<marketplace>"), so the marketplace must be resolved from these.
+[[plugins.catalog]]
+glob = "~/.codex/.tmp/marketplaces/*/.claude-plugin/marketplace.json"
+parser = "marketplace_manifest_v1"
+
+[[plugins.catalog]]
+glob = "~/.codex/.tmp/plugins/.agents/plugins/api_marketplace.json"
+parser = "marketplace_manifest_v1"
+
+[[plugins.catalog]]
+glob = "~/.codex/.tmp/plugins/.agents/plugins/marketplace.json"
+parser = "marketplace_manifest_v1"
+
 [plugins.install]
 argv = ["plugin", "add", "{id}"]
 

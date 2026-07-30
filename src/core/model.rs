@@ -1,7 +1,7 @@
 //! The neutral data model. Nothing here knows that Claude Code or Codex exist —
 //! host parsers translate into these types, and the planner translates back out.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::PathBuf;
 
@@ -359,6 +359,15 @@ pub struct HostSnapshot {
     pub plugin_skills: Vec<String>,
     pub plugins: BTreeMap<String, InstalledPlugin>,
     pub marketplaces: BTreeMap<String, MarketplaceSource>,
+    /// What each of this host's marketplaces actually offers: marketplace name ->
+    /// plugin names.
+    ///
+    /// This has to be read rather than assumed. Neither CLI resolves a bare
+    /// plugin id: `codex plugin add superpowers` fails with "requires
+    /// --marketplace unless passed as <plugin>@<marketplace>", and
+    /// `claude plugin install` fails outright when no configured marketplace
+    /// carries the name.
+    pub catalog: BTreeMap<String, BTreeSet<String>>,
     /// Non-fatal problems hit while reading, surfaced by `doctor`.
     pub warnings: Vec<String>,
 }

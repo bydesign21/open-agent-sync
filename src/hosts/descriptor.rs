@@ -142,9 +142,28 @@ impl SkillsSection {
     }
 }
 
+/// Where to find what a marketplace offers.
+///
+/// Necessary because neither CLI resolves a bare plugin name — an install must be
+/// `<plugin>@<marketplace>` — so the marketplace has to be looked up rather than
+/// guessed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CatalogSource {
+    /// Path with `*` wildcards, e.g.
+    /// `~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json`.
+    pub glob: String,
+    pub parser: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginsSection {
     pub read: Vec<ReadSource>,
+    /// Marketplace manifests to read. In addition to these, the manifest of any
+    /// directory-source marketplace this host has configured is read from
+    /// `<dir>/.claude-plugin/marketplace.json`, which is how local marketplaces
+    /// are found without hardcoding where a host caches them.
+    #[serde(default)]
+    pub catalog: Vec<CatalogSource>,
     pub install: Invocation,
     pub remove: Invocation,
     pub marketplace_add: Invocation,

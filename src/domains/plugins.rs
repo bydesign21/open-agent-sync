@@ -186,22 +186,58 @@ fn marketplace_name(row_name: &str) -> &str {
 // Plugins
 // ---------------------------------------------------------------------------
 
-/// Whether `host` can install `name`: it needs the pinned marketplace, or any
-/// marketplace at all when unpinned (bare ids resolve against what it has).
-fn provider(world: &World, host_name: &str, name: &str, pin: Option<&str>) -> Option<String> {
-    let (host, snap) = world.detected().find(|(h, _)| h.name() == host_name)?;
-    host.descriptor.plugins.as_ref()?;
+/// The outcome of resolving `name` to an installable id on one host.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Resolution {
+    /// Exactly one marketplace offers it. This is the id to install.
+    One(String),
+    /// Several offer it. Installing would be a coin flip, so ask for a pin.
+    Ambiguous(Vec<String>),
+    /// Nothing this host has configured offers it.
+    None,
+}
+
+/// Resolve `name` against what `host` actually has.
+///
+/// This must be a lookup, not a guess. Neither CLI resolves a bare plugin id:
+/// `codex plugin add superpowers` exits 1 with "requires --marketplace unless
+/// passed as <plugin>@<marketplace>", and `claude plugin install` exits 1 with
+/// "not found in any configured marketplace".
+fn resolve(world: &World, host_name: &str, name: &str, pin: Option<&str>) -> Resolution {
+    let Some((host, snap)) = world.detected().find(|(h, _)| h.name() == host_name) else {
+        return Resolution::None;
+    };
+    if host.descriptor.plugins.is_none() {
+        return Resolution::None;
+    }
+
+    // Already installed: whatever it came from is the right answer.
+    if let Some(installed) = snap.plugins.get(name)
+        && !installed.marketplace.is_empty()
+    {
+        return Resolution::One(installed.marketplace.clone());
+    }
+
+    let offering: Vec<String> = snap
+        .catalog
+        .iter()
+        .filter(|(_, plugins)| plugins.contains(name))
+        .map(|(market, _)| market.clone())
+        .collect();
 
     if let Some(pin) = pin {
-        let known = snap.marketplaces.contains_key(pin)
-            || host.implicit_marketplaces().iter().any(|m| m == pin);
-        return known.then(|| pin.to_string());
+        return if offering.iter().any(|m| m == pin) {
+            Resolution::One(pin.to_string())
+        } else {
+            Resolution::None
+        };
     }
-    if let Some(installed) = snap.plugins.get(name) {
-        return Some(installed.marketplace.clone());
+
+    match offering.len() {
+        0 => Resolution::None,
+        1 => Resolution::One(offering[0].clone()),
+        _ => Resolution::Ambiguous(offering),
     }
-    // Unpinned and not installed: let the host resolve a bare id.
-    Some(String::new())
 }
 
 fn plugin_rows(world: &World) -> Vec<Row> {
@@ -265,6 +301,48 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
             if hosts.is_empty() {
                 return None;
             }
+
+            // Which other hosts could actually install it. Offering "install in
+            // the others" without checking is what made 17 installs fail: the
+            // curated registries differ, so plenty of plugins exist on only one
+            // side and no id will ever resolve on the other.
+            let installable: Vec<String> = plugin_hosts
+                .iter()
+                .filter(|h| !installed.contains_key(*h))
+                .filter(|h| matches!(resolve(world, h, name, None), Resolution::One(_)))
+                .cloned()
+                .collect();
+
+            if installable.is_empty() {
+                return Some(Row {
+                    domain: Domain::Plugins,
+                    name: name.to_string(),
+                    headline: format!("{}-only; no other host offers it", join_hosts(&hosts)),
+                    detail,
+                    severity: Severity::Blocked,
+                    actions: vec![
+                        Action::new(
+                            format!("adopt as {}-only", join_hosts(&hosts)),
+                            ActionKind::KeepDivergent {
+                                hosts: hosts.clone(),
+                            },
+                        ),
+                        Action::new(
+                            "uninstall everywhere",
+                            ActionKind::Delete {
+                                hosts,
+                                from_manifest: false,
+                                purge: false,
+                            },
+                        ),
+                        Action::new("leave it", ActionKind::Nothing),
+                    ],
+                    chosen: 0,
+                    accepted: false,
+                    key,
+                });
+            }
+
             Some(Row {
                 domain: Domain::Plugins,
                 name: name.to_string(),
@@ -273,7 +351,7 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
                 severity: Severity::Normal,
                 actions: vec![
                     Action::new(
-                        "adopt + install in the others",
+                        format!("adopt + install in {}", join_hosts(&installable)),
                         ActionKind::Adopt {
                             push: true,
                             promote: false,
@@ -315,13 +393,15 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
 
             let mut missing = Vec::new();
             let mut unavailable = Vec::new();
+            let mut ambiguous: Vec<(String, Vec<String>)> = Vec::new();
             for host in &targets {
                 if installed.contains_key(host) {
                     continue;
                 }
-                match provider(world, host, name, pin) {
-                    Some(_) => missing.push(host.clone()),
-                    None => unavailable.push(host.clone()),
+                match resolve(world, host, name, pin) {
+                    Resolution::One(_) => missing.push(host.clone()),
+                    Resolution::Ambiguous(markets) => ambiguous.push((host.clone(), markets)),
+                    Resolution::None => unavailable.push(host.clone()),
                 }
             }
 
@@ -329,9 +409,34 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
             if !unavailable.is_empty() {
                 let pin_note = pin.map(|p| format!(" (pinned to {p})")).unwrap_or_default();
                 detail = format!(
-                    "{detail}   \u{b7}   no provider on {}{pin_note}",
+                    "{detail}   \u{b7}   no marketplace on {} offers it{pin_note}",
                     join_hosts(&unavailable)
                 );
+            }
+
+            // Ambiguity is its own decision, and pinning is the only fix.
+            if let Some((host, markets)) = ambiguous.first() {
+                return Some(Row {
+                    domain: Domain::Plugins,
+                    name: name.to_string(),
+                    headline: format!("{} marketplaces on {host} offer it", markets.len()),
+                    detail: format!("{detail}   \u{b7}   {}", markets.join(", ")),
+                    severity: Severity::Warn,
+                    actions: markets
+                        .iter()
+                        .map(|m| {
+                            Action::new(
+                                format!("pin to {m}"),
+                                ActionKind::PinMarketplace {
+                                    marketplace: m.clone(),
+                                },
+                            )
+                        })
+                        .collect(),
+                    chosen: 0,
+                    accepted: false,
+                    key,
+                });
             }
 
             if missing.is_empty() {
@@ -342,7 +447,7 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
                 return Some(Row {
                     domain: Domain::Plugins,
                     name: name.to_string(),
-                    headline: format!("no provider on {}", join_hosts(&unavailable)),
+                    headline: format!("not available on {}", join_hosts(&unavailable)),
                     detail,
                     severity: Severity::Blocked,
                     actions: vec![
@@ -609,6 +714,23 @@ fn plan_plugin_row(world: &World, row: &Row, plan: &mut Plan) {
             install(world, &name, pin.as_deref(), hosts, plan);
         }
 
+        ActionKind::PinMarketplace { marketplace } => {
+            plan.push(
+                format!("pin {name} to {marketplace}"),
+                Step::Manifest(ManifestOp::UpsertPlugin {
+                    name: name.clone(),
+                    marketplace: Some(marketplace.clone()),
+                }),
+            );
+            // Install where it is still absent, now that the id is unambiguous.
+            let hosts: Vec<String> = world
+                .detected()
+                .filter(|(h, s)| h.descriptor.plugins.is_some() && !s.plugins.contains_key(&name))
+                .map(|(h, _)| h.name().to_string())
+                .collect();
+            install(world, &name, Some(marketplace), &hosts, plan);
+        }
+
         ActionKind::Delete {
             hosts,
             from_manifest,
@@ -677,12 +799,25 @@ fn install(world: &World, name: &str, pin: Option<&str>, hosts: &[String], plan:
         if !hosts.contains(&hname) || host.descriptor.plugins.is_none() {
             continue;
         }
-        let Some(marketplace) = provider(world, &hname, name, pin) else {
-            plan.note(format!(
-                "{name}: skipped {hname} \u{2014} no marketplace provides it{}",
-                pin.map(|p| format!(" (pinned to {p})")).unwrap_or_default()
-            ));
-            continue;
+        // Always resolve to `name@marketplace`. Passing a bare name is what made
+        // 17 installs fail: neither CLI resolves one.
+        let marketplace = match resolve(world, &hname, name, pin) {
+            Resolution::One(m) => m,
+            Resolution::Ambiguous(markets) => {
+                plan.note(format!(
+                    "{name}: skipped {hname} \u{2014} offered by {}; pin one with \
+                     marketplace = \"...\"",
+                    markets.join(", ")
+                ));
+                continue;
+            }
+            Resolution::None => {
+                plan.note(format!(
+                    "{name}: skipped {hname} \u{2014} no configured marketplace offers it{}",
+                    pin.map(|p| format!(" (pinned to {p})")).unwrap_or_default()
+                ));
+                continue;
+            }
         };
         let marketplace = (!marketplace.is_empty()).then_some(marketplace);
         match host.plugin_install_argv(name, marketplace.as_deref()) {

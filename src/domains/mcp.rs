@@ -557,6 +557,14 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
     match &row.action().kind {
         ActionKind::Nothing => {}
 
+        // Plugins-only; reaching it here means a row was built with the wrong
+        // action, so say so rather than doing nothing silently.
+        ActionKind::PinMarketplace { .. } => {
+            plan.note(format!(
+                "{name}: pinning a marketplace does not apply to MCP servers"
+            ));
+        }
+
         ActionKind::Adopt { push, promote } => {
             let Some((source_host, scope, server)) = source_of(world, &name, &row.key) else {
                 plan.note(format!("{name}: no host value to adopt"));

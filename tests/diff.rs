@@ -520,6 +520,168 @@ fn delete_everywhere_removes_from_both_hosts_and_the_manifest() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Plugins: marketplace resolution
+// ---------------------------------------------------------------------------
+
+fn with_plugins(snap: &mut HostSnapshot, installed: &[(&str, &str)], catalog: &[(&str, &[&str])]) {
+    for (name, market) in installed {
+        snap.plugins.insert(
+            name.to_string(),
+            agentsync::core::model::InstalledPlugin {
+                name: name.to_string(),
+                marketplace: market.to_string(),
+            },
+        );
+    }
+    for (market, plugins) in catalog {
+        snap.catalog.insert(
+            market.to_string(),
+            plugins.iter().map(|p| p.to_string()).collect(),
+        );
+    }
+}
+
+fn plugin_row<'a>(rows: &'a [Row], name: &str) -> &'a Row {
+    rows.iter()
+        .find(|r| r.name == name && r.domain == Domain::Plugins)
+        .unwrap_or_else(|| panic!("no plugin row named {name:?} in {:?}", names(rows)))
+}
+
+#[test]
+fn a_plugin_no_other_host_offers_is_blocked_not_installed() {
+    // `atlassian-rovo` exists only in Codex's curated registry. Offering to
+    // "install in the others" made `claude plugin install` fail with
+    // "not found in any configured marketplace".
+    let mut claude = snapshot("claude", &[]);
+    let mut codex = snapshot("codex", &[]);
+    with_plugins(
+        &mut claude,
+        &[],
+        &[("claude-plugins-official", &["superpowers"])],
+    );
+    with_plugins(
+        &mut codex,
+        &[("atlassian-rovo", "openai-curated")],
+        &[("openai-curated", &["atlassian-rovo"])],
+    );
+
+    let w = world(Manifest::default(), claude, codex);
+    let mut rows = w.rows();
+    let row = plugin_row(&rows, "atlassian-rovo");
+
+    assert_eq!(row.severity, Severity::Blocked);
+    assert!(
+        row.headline.contains("no other host offers it"),
+        "headline was {:?}",
+        row.headline
+    );
+
+    // Accepting the default records the divergence and installs nothing.
+    for r in rows.iter_mut() {
+        r.accepted = r.name == "atlassian-rovo" && r.actionable();
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        !plan.steps.iter().any(|s| matches!(&s.step,
+            Step::Host { argv, .. } if argv.iter().any(|a| a == "install" || a == "add"))),
+        "nothing installable, so no install may be attempted: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn installs_always_carry_the_marketplace() {
+    // `codex plugin add superpowers` exits 1: "requires --marketplace unless
+    // passed as <plugin>@<marketplace>". A bare id is never correct.
+    let mut claude = snapshot("claude", &[]);
+    let mut codex = snapshot("codex", &[]);
+    with_plugins(
+        &mut claude,
+        &[("hookify", "claude-plugins-official")],
+        &[("claude-plugins-official", &["hookify"])],
+    );
+    with_plugins(
+        &mut codex,
+        &[],
+        &[("claude-plugins-official", &["hookify"])],
+    );
+
+    let w = world(Manifest::default(), claude, codex);
+    let mut rows = w.rows();
+    for r in rows.iter_mut() {
+        r.accepted = r.name == "hookify" && r.actionable();
+    }
+    let plan = w.plan(&rows);
+
+    let install = plan
+        .steps
+        .iter()
+        .find_map(|s| match &s.step {
+            Step::Host { host, argv, .. } if host == "codex" => Some(argv.clone()),
+            _ => None,
+        })
+        .expect("an install on codex");
+    assert_eq!(
+        install.last().unwrap(),
+        "hookify@claude-plugins-official",
+        "the id must be fully qualified: {install:?}"
+    );
+}
+
+#[test]
+fn an_ambiguous_plugin_asks_for_a_pin_instead_of_guessing() {
+    let mut claude = snapshot("claude", &[]);
+    let mut codex = snapshot("codex", &[]);
+    with_plugins(
+        &mut claude,
+        &[("superpowers", "claude-plugins-official")],
+        &[("claude-plugins-official", &["superpowers"])],
+    );
+    // Three of codex's marketplaces carry the same name.
+    with_plugins(
+        &mut codex,
+        &[],
+        &[
+            ("claude-plugins-official", &["superpowers"]),
+            ("openai-api-curated", &["superpowers"]),
+            ("openai-curated", &["superpowers"]),
+        ],
+    );
+
+    let mut manifest = Manifest::default();
+    manifest
+        .plugins
+        .insert("superpowers".into(), Default::default());
+
+    let w = world(manifest, claude, codex);
+    let mut rows = w.rows();
+    let row = plugin_row(&rows, "superpowers");
+    assert_eq!(row.severity, Severity::Warn);
+    assert!(
+        row.headline.contains("3 marketplaces"),
+        "headline was {:?}",
+        row.headline
+    );
+    assert!(matches!(
+        row.action().kind,
+        ActionKind::PinMarketplace { .. }
+    ));
+
+    for r in rows.iter_mut() {
+        r.accepted = r.name == "superpowers" && r.actionable();
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        plan.steps.iter().any(|s| matches!(&s.step,
+            Step::Manifest(agentsync::core::plan::ManifestOp::UpsertPlugin {
+                marketplace: Some(m), ..
+            }) if m == "claude-plugins-official")),
+        "pinning must be recorded in the manifest: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn an_uninstalled_host_produces_no_rows_and_no_steps() {
     let server = stdio("kicad", "node");

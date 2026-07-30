@@ -193,9 +193,12 @@ hosts = ["claude"]
 
 Plugin ids are derived rather than declared, because the curated registries
 genuinely differ between hosts — `superpowers` is in `claude-plugins-official` on
-Claude Code and `openai-api-curated` on Codex, and plenty of plugins are in only
-one. Both CLIs accept a bare name, so agentsync passes a bare name and only needs
-`marketplace = "..."` when one host offers the same name twice.
+Claude Code and three different marketplaces on Codex, and plenty of plugins are
+in only one. Neither CLI resolves a bare id (`codex plugin add superpowers` exits
+1 with "requires --marketplace unless passed as `<plugin>@<marketplace>`"), so
+agentsync reads each host's marketplace manifests and resolves the id per host.
+A name no marketplace offers is *not available*, not drift. A name several
+marketplaces offer asks you to pin one rather than guessing.
 
 A per-repo `.agentsync.toml` is merged in for that repo, forced to project scope.
 It never shadows the user manifest silently — a name collision is reported.

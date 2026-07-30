@@ -427,7 +427,9 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
         }
 
         // Not meaningful for skills.
-        ActionKind::CollapseScope { .. } | ActionKind::SecretToEnv { .. } => {
+        ActionKind::CollapseScope { .. }
+        | ActionKind::SecretToEnv { .. }
+        | ActionKind::PinMarketplace { .. } => {
             plan.note(format!("{name}: that action does not apply to skills"));
         }
     }

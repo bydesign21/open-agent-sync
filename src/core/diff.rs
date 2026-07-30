@@ -96,6 +96,11 @@ pub enum ActionKind {
 
     /// Replace a literal credential with an environment-variable reference.
     SecretToEnv { var: String },
+
+    /// Plugins only: record which marketplace to install from, when more than
+    /// one of a host's marketplaces offers the same name and installing would
+    /// otherwise be a coin flip.
+    PinMarketplace { marketplace: String },
 }
 
 #[derive(Clone, Debug)]

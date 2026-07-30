@@ -33,6 +33,14 @@ pub struct McpRead {
     pub warnings: Vec<String>,
 }
 
+/// What one marketplace manifest offers.
+#[derive(Debug, Default)]
+pub struct CatalogRead {
+    pub marketplace: String,
+    pub plugins: std::collections::BTreeSet<String>,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct PluginRead {
     pub plugins: BTreeMap<String, InstalledPlugin>,
@@ -55,6 +63,13 @@ pub fn read_plugins(parser: &str, text: &str, ctx: &ParseCtx) -> Result<PluginRe
         "claude_marketplaces_v1" => plugins::claude_marketplaces_v1(text, ctx),
         "codex_plugins_toml_v1" => plugins::codex_plugins_toml_v1(text, ctx),
         other => bail!("unknown plugin parser {other:?} (see `agentsync hosts --parsers`)"),
+    }
+}
+
+pub fn read_catalog(parser: &str, text: &str, ctx: &ParseCtx) -> Result<CatalogRead> {
+    match parser {
+        "marketplace_manifest_v1" => plugins::marketplace_manifest_v1(text, ctx),
+        other => bail!("unknown catalog parser {other:?} (see `agentsync hosts --parsers`)"),
     }
 }
 

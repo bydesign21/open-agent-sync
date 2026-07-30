@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use super::{ParseCtx, PluginRead};
+use super::{CatalogRead, ParseCtx, PluginRead};
 use crate::core::model::{InstalledPlugin, MarketplaceSource};
 
 /// Split `name@marketplace`. A key without `@` has no marketplace, which is
@@ -94,16 +94,81 @@ pub fn claude_marketplaces_v1(text: &str, ctx: &ParseCtx) -> Result<PluginRead> 
     Ok(out)
 }
 
-/// `~/.codex/config.toml` `[plugins."name@marketplace"]`.
+/// A marketplace manifest: `{ "name": ..., "plugins": [{ "name": ... }] }`.
 ///
-/// Codex records no marketplace *sources* in config.toml — its curated
-/// marketplaces are implicit — so this returns plugins only. The descriptor's
-/// `implicit_marketplaces` covers the rest, which keeps us from reporting a
-/// built-in marketplace as missing.
+/// The same shape is used by Claude Code's `.claude-plugin/marketplace.json`,
+/// Codex's cached copies of the same, and Codex's `api_marketplace.json`, so one
+/// parser covers every catalog we read.
+pub fn marketplace_manifest_v1(text: &str, ctx: &ParseCtx) -> Result<CatalogRead> {
+    let root: Value =
+        serde_json::from_str(text).with_context(|| format!("parsing {}", ctx.origin.display()))?;
+
+    let name = root
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        // Fall back to the enclosing directory name, for a manifest that omits
+        // its own.
+        .or_else(|| {
+            ctx.origin
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+        })
+        .context("marketplace manifest has no `name`")?;
+
+    let plugins = root
+        .get("plugins")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.get("name").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(CatalogRead {
+        marketplace: name,
+        plugins,
+        warnings: Vec::new(),
+    })
+}
+
+/// Normalize a clone URL to `owner/repo` so the same marketplace declared as a
+/// GitHub slug on one host and a `.git` URL on another compares equal.
+fn github_slug(source: &str) -> String {
+    let trimmed = source.trim_end_matches(".git");
+    match trimmed.split_once("github.com") {
+        Some((_, rest)) => rest.trim_start_matches([':', '/']).to_string(),
+        None => trimmed.to_string(),
+    }
+}
+
+/// `~/.codex/config.toml`: `[plugins."name@marketplace"]` and `[marketplaces.*]`.
 pub fn codex_plugins_toml_v1(text: &str, ctx: &ParseCtx) -> Result<PluginRead> {
     let root: toml::Value =
         toml::from_str(text).with_context(|| format!("parsing {}", ctx.origin.display()))?;
     let mut out = PluginRead::default();
+
+    // Codex records marketplaces here once `plugin marketplace add` has run.
+    if let Some(markets) = root.get("marketplaces").and_then(toml::Value::as_table) {
+        for (name, entry) in markets {
+            let Some(source) = entry.get("source").and_then(toml::Value::as_str) else {
+                continue;
+            };
+            let kind = entry
+                .get("source_type")
+                .and_then(toml::Value::as_str)
+                .unwrap_or("");
+            let parsed = match kind {
+                "local" => MarketplaceSource::Directory(source.to_string()),
+                _ => MarketplaceSource::GitHub(github_slug(source)),
+            };
+            out.marketplaces.insert(name.clone(), parsed);
+        }
+    }
 
     let Some(plugins) = root.get("plugins").and_then(toml::Value::as_table) else {
         return Ok(out);

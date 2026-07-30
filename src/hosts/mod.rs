@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::core::model::{HostSnapshot, McpServer, Scope, SkillState, Transport};
+use crate::core::model::{
+    HostSnapshot, MarketplaceSource, McpServer, Scope, SkillState, Transport,
+};
 use crate::paths;
 
 use descriptor::{AddStyle, HostDescriptor, ReadSource};
@@ -91,6 +93,54 @@ impl Host {
                     snap.warnings.extend(read.warnings);
                     snap.plugins.extend(read.plugins);
                     snap.marketplaces.extend(read.marketplaces);
+                }
+            }
+
+            // What each marketplace offers. Read *after* the marketplaces
+            // themselves, because a directory-source marketplace tells us where
+            // its own manifest is and so needs no hardcoded cache location.
+            for source in &plugins.catalog {
+                for path in expand_glob(&source.glob) {
+                    let Some(text) = read_if_present(&path)? else {
+                        continue;
+                    };
+                    let ctx = ParseCtx {
+                        repo: None,
+                        origin: path.clone(),
+                    };
+                    match parsers::read_catalog(&source.parser, &text, &ctx) {
+                        Ok(read) => {
+                            snap.catalog
+                                .entry(read.marketplace)
+                                .or_default()
+                                .extend(read.plugins);
+                        }
+                        Err(e) => snap
+                            .warnings
+                            .push(format!("catalog {}: {e:#}", path.display())),
+                    }
+                }
+            }
+
+            for (name, source) in snap.marketplaces.clone() {
+                let MarketplaceSource::Directory(dir) = source else {
+                    continue;
+                };
+                let path = paths::expand(&dir).join(".claude-plugin/marketplace.json");
+                let Some(text) = read_if_present(&path)? else {
+                    continue;
+                };
+                let ctx = ParseCtx {
+                    repo: None,
+                    origin: path.clone(),
+                };
+                match parsers::read_catalog("marketplace_manifest_v1", &text, &ctx) {
+                    // Trust the configured name over the manifest's own, since
+                    // that is the name the CLI will accept.
+                    Ok(read) => snap.catalog.entry(name).or_default().extend(read.plugins),
+                    Err(e) => snap
+                        .warnings
+                        .push(format!("catalog {}: {e:#}", path.display())),
                 }
             }
         }
@@ -313,6 +363,20 @@ impl Host {
             .as_ref()
             .map(|p| p.implicit_marketplaces.as_slice())
             .unwrap_or(&[])
+    }
+}
+
+/// Expand a `*`-containing path. A pattern that matches nothing yields nothing,
+/// which is normal — a host may simply have no marketplaces cached yet.
+fn expand_glob(pattern: &str) -> Vec<PathBuf> {
+    let expanded = paths::expand(pattern);
+    let text = expanded.to_string_lossy();
+    if !text.contains('*') {
+        return vec![expanded];
+    }
+    match glob::glob(&text) {
+        Ok(paths) => paths.filter_map(Result::ok).collect(),
+        Err(_) => Vec::new(),
     }
 }
 
