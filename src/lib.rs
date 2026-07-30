@@ -18,4 +18,5 @@ pub mod domains;
 pub mod hosts;
 pub mod manifest;
 pub mod paths;
+pub mod platform;
 pub mod tui;

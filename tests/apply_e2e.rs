@@ -8,6 +8,12 @@
 //!
 //! Everything lives in one test function because `PATH` and `AGENTSYNC_HOME` are
 //! process-global; splitting it would race.
+//!
+//! Unix only: the fake CLIs are scripts with shebangs, and the executable bit has
+//! no Windows equivalent. The write path itself is platform-neutral — the one
+//! platform-specific piece, symlink creation, lives in `platform.rs` and is
+//! covered by the unit tests.
+#![cfg(unix)]
 
 use std::path::Path;
 

@@ -587,12 +587,12 @@ mod tests {
         std::fs::create_dir_all(&hostdir).unwrap();
 
         // linked
-        std::os::unix::fs::symlink(canonical.join("mine"), hostdir.join("mine")).unwrap();
+        crate::platform::symlink(&canonical.join("mine"), &hostdir.join("mine")).unwrap();
         // foreign symlink
         let elsewhere = tmp.path().join("elsewhere/theirs");
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::fs::write(elsewhere.join("SKILL.md"), "x").unwrap();
-        std::os::unix::fs::symlink(&elsewhere, hostdir.join("theirs")).unwrap();
+        crate::platform::symlink(&elsewhere, &hostdir.join("theirs")).unwrap();
         // real directory
         std::fs::create_dir_all(hostdir.join("local")).unwrap();
         std::fs::write(hostdir.join("local/SKILL.md"), "x").unwrap();

@@ -310,8 +310,7 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
                     std::fs::remove_file(link)?;
                 }
             }
-            std::os::unix::fs::symlink(target, link)
-                .with_context(|| format!("linking {} -> {}", link.display(), target.display()))?;
+            crate::platform::symlink(target, link)?;
             Ok(match backed_up {
                 Some(b) => format!(
                     "linked {} (previous contents backed up to {})",
@@ -387,7 +386,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<()> {
         if ty.is_dir() {
             copy_tree(&entry.path(), &target)?;
         } else if ty.is_symlink() {
-            std::os::unix::fs::symlink(std::fs::read_link(entry.path())?, &target)?;
+            crate::platform::copy_symlink(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;
         }

@@ -119,8 +119,7 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         } else if ty.is_symlink() {
             // Preserve the link rather than following it: a backup that
             // dereferences links would silently duplicate canonical content.
-            let dest = std::fs::read_link(entry.path())?;
-            std::os::unix::fs::symlink(dest, &target)?;
+            crate::platform::copy_symlink(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;
         }

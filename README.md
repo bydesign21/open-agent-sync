@@ -1,5 +1,7 @@
 # agentsync
 
+[![ci](https://github.com/bydesign21/open-agent-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/bydesign21/open-agent-sync/actions/workflows/ci.yml)
+
 Keep your MCP servers, skills, and plugins in sync across agentic coding CLIs.
 
 If you use more than one of Claude Code, Codex, and friends, your configuration
@@ -16,17 +18,23 @@ one keypress at a time.
 
 ## Install
 
-### Prebuilt binary (macOS)
+### Prebuilt binary
 
-One static binary, no runtime dependency. Pick your architecture — `uname -m`
-prints `arm64` on Apple Silicon and `x86_64` on Intel.
+One binary, no runtime dependency. Released for macOS (Apple Silicon and Intel),
+Linux (x86_64 and arm64), and Windows (x86_64).
+
+On macOS or Linux — `uname -m` prints `arm64`/`aarch64` on Apple Silicon and arm,
+`x86_64` elsewhere:
 
 ```sh
 VERSION=v0.0.1
 REPO=https://github.com/bydesign21/open-agent-sync
-case "$(uname -m)" in
-  arm64)  TARGET=aarch64-apple-darwin ;;
-  x86_64) TARGET=x86_64-apple-darwin  ;;
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64)   TARGET=aarch64-apple-darwin ;;
+  Darwin-x86_64)  TARGET=x86_64-apple-darwin ;;
+  Linux-aarch64)  TARGET=aarch64-unknown-linux-gnu ;;
+  Linux-x86_64)   TARGET=x86_64-unknown-linux-gnu ;;
 esac
 ASSET="agentsync-$VERSION-$TARGET.tar.gz"
 
@@ -53,9 +61,21 @@ macOS may quarantine a downloaded binary. If it refuses to run:
 xattr -d com.apple.quarantine ~/.local/bin/agentsync
 ```
 
+On Windows, download `agentsync-<version>-x86_64-pc-windows-msvc.zip` from the
+[releases page](https://github.com/bydesign21/open-agent-sync/releases), extract
+`agentsync.exe`, and put it somewhere on your `PATH`.
+
+**Windows and symlinks:** the skills domain works by symlinking a canonical
+directory into each host's skills directory, and creating a symlink on Windows
+needs either Developer Mode (Settings → Privacy & security → For developers) or an
+elevated terminal. Without one of those, skill rows will fail with a message
+saying so; the MCP and plugin domains are unaffected.
+
 ### From source with cargo
 
-Needs Rust 1.85 or newer (edition 2024). `rustup` is the easy way to get it.
+Needs Rust 1.88 or newer — the code uses let-chains, which are stable from 1.88 in
+edition 2024. CI checks that against the `rust-version` in `Cargo.toml`, so it is
+not a guess. `rustup` is the easy way to get it.
 
 ```sh
 cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.1
@@ -78,17 +98,17 @@ cargo build --release          # ./target/release/agentsync
 cargo run -- plan              # run it in place, with arguments after --
 ```
 
-To reproduce the release artifacts, including the other Mac architecture:
+To reproduce a release artifact for another target:
 
 ```sh
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-cargo build --release --target aarch64-apple-darwin
+rustup target add x86_64-apple-darwin
 cargo build --release --target x86_64-apple-darwin
 ```
 
-Linux builds are not published yet, but nothing in the code is macOS-specific
-except the symlink handling in the skills domain, which uses `std::os::unix` and
-works on Linux too. `cargo build --release` on Linux should just work.
+The only platform-specific code is symlink creation, isolated in
+`src/platform.rs`. Everything else — config paths, CLI invocation, the manifest —
+is identical everywhere, because `dirs::home_dir` resolves `~` per platform and
+both host CLIs take the same arguments.
 
 ## Use
 
@@ -344,13 +364,16 @@ the differ testable without a machine to test against.
 
 ## Development
 
-The full gate, which is what CI would run:
+The full gate, which is exactly what CI runs — on macOS, Linux, and Windows:
 
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
 ```
+
+CI additionally checks that the code really does build with the `rust-version`
+declared in `Cargo.toml`, so the MSRV is a measurement rather than a claim.
 
 `tests/diff.rs` builds synthetic worlds and asserts on row wording and planner
 output. `tests/apply_e2e.rs` stands up a fake host CLI on a temporary `PATH` — it
@@ -368,15 +391,16 @@ agentsync plan          # every step prints the exact command it will run
 
 ### Cutting a release
 
+Set `version` in `Cargo.toml` equal to the tag — so `agentsync --version` and the
+release you downloaded agree — then push the tag:
+
 ```sh
-cargo build --release --target aarch64-apple-darwin
-cargo build --release --target x86_64-apple-darwin
-# tar each binary as agentsync-<tag>-<target>.tar.gz, write SHA256SUMS,
-# then: gh release create <tag> <assets> --notes-file <notes>
+git tag v0.0.2 && git push origin v0.0.2
 ```
 
-Keep `version` in `Cargo.toml` equal to the tag, so `agentsync --version` and the
-release you downloaded agree.
+`.github/workflows/release.yml` builds all five targets, packages them, writes
+`SHA256SUMS`, and publishes. It is idempotent: re-running a tag replaces its
+assets. `workflow_dispatch` rehearses the build without publishing.
 
 ## Status
 
@@ -398,7 +422,9 @@ Known gaps:
   opposed to a project `.mcp.json`) is unverified. If it does not, a bearer token
   moved to an environment variable will be sent literally. Check with
   `claude mcp list` after applying such a change.
-- No CI yet, and no Linux or Windows release artifacts.
+- Only tested by hand against the real Claude Code and Codex on macOS. CI proves
+  the code builds and its own tests pass on all three platforms, but the host
+  descriptors' paths and capabilities are verified against the macOS CLIs.
 
 ## License
 
