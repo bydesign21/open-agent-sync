@@ -1,0 +1,493 @@
+//! The canonical manifest: what you have decided should exist, as opposed to
+//! what any given host happens to contain right now.
+
+pub mod secrets;
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+
+use crate::core::model::{
+    Cap, HttpServer, MarketplaceSource, McpServer, Scope, ScopeKind, StdioServer, Transport,
+};
+use crate::paths;
+
+use secrets::SecretFinding;
+
+const HEADER: &str = "\
+# agentsync manifest
+#
+# This file is the source of truth for MCP servers, skills, and plugins across
+# your agentic coding CLIs. It is safe to commit: values that look like live
+# credentials are rejected on save. Reference secrets by environment variable
+# name instead (bearer_token_env, env_from, or ${VAR} inside headers).
+";
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Manifest {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp: BTreeMap<String, McpEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub skills: BTreeMap<String, SkillEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub marketplaces: BTreeMap<String, MarketplaceEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, PluginEntry>,
+}
+
+fn default_scope() -> ScopeKind {
+    ScopeKind::User
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpEntry {
+    /// `"stdio"` or `"http"`.
+    pub transport: String,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_from: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bearer_token_env: Option<String>,
+
+    #[serde(default = "default_scope")]
+    pub scope: ScopeKind,
+    /// Repos this entry applies to. Only meaningful for local/project scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+
+    /// When present, restrict this entry to these hosts. This is how
+    /// intentional divergence is *recorded*, so it stops being reported as
+    /// drift on every run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
+}
+
+impl McpEntry {
+    pub fn from_server(server: &McpServer, scope: ScopeKind, repos: Vec<String>) -> Self {
+        let mut entry = McpEntry {
+            transport: String::new(),
+            command: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            env_from: Vec::new(),
+            url: None,
+            headers: BTreeMap::new(),
+            bearer_token_env: None,
+            scope,
+            repos,
+            hosts: None,
+        };
+        match &server.transport {
+            Transport::Stdio(s) => {
+                entry.transport = "stdio".into();
+                entry.command = Some(s.command.clone());
+                entry.args = s.args.clone();
+                entry.env = s.env.clone();
+                entry.env_from = s.env_from.clone();
+            }
+            Transport::Http(h) => {
+                entry.transport = "http".into();
+                entry.url = Some(h.url.clone());
+                entry.headers = h.headers.clone();
+                entry.bearer_token_env = h.bearer_token_env.clone();
+            }
+        }
+        entry
+    }
+
+    pub fn to_server(&self, name: &str) -> Result<McpServer> {
+        let transport = match self.transport.as_str() {
+            "stdio" => {
+                let command = self
+                    .command
+                    .clone()
+                    .with_context(|| format!("mcp.{name}: stdio transport requires `command`"))?;
+                Transport::Stdio(StdioServer {
+                    command,
+                    args: self.args.clone(),
+                    env: self.env.clone(),
+                    env_from: self.env_from.clone(),
+                })
+            }
+            "http" | "sse" => {
+                let url = self
+                    .url
+                    .clone()
+                    .with_context(|| format!("mcp.{name}: http transport requires `url`"))?;
+                Transport::Http(HttpServer {
+                    url,
+                    headers: self.headers.clone(),
+                    bearer_token_env: self.bearer_token_env.clone(),
+                })
+            }
+            other => bail!("mcp.{name}: unknown transport {other:?} (expected stdio or http)"),
+        };
+        Ok(McpServer {
+            name: name.to_string(),
+            transport,
+        })
+    }
+
+    /// Every scope this entry occupies. A local/project entry with three repos
+    /// occupies three scopes.
+    pub fn scopes(&self) -> Vec<Scope> {
+        match self.scope {
+            ScopeKind::User => vec![Scope::User],
+            ScopeKind::Local => self.repos.iter().cloned().map(Scope::Local).collect(),
+            ScopeKind::Project => self.repos.iter().cloned().map(Scope::Project).collect(),
+        }
+    }
+
+    pub fn targets_host(&self, host: &str) -> bool {
+        match &self.hosts {
+            None => true,
+            Some(list) => list.iter().any(|h| h == host),
+        }
+    }
+
+    /// `true` when this entry pins an absolute interpreter path, which will not
+    /// survive being carried to another machine.
+    pub fn non_portable_command(&self) -> Option<&str> {
+        let cmd = self.command.as_deref()?;
+        if cmd.starts_with('/') {
+            Some(cmd)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SkillEntry {
+    /// Path to the canonical skill directory, relative to the manifest's
+    /// directory (or absolute / `~`-prefixed).
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
+}
+
+impl SkillEntry {
+    pub fn resolve(&self, manifest_dir: &Path) -> PathBuf {
+        let expanded = paths::expand(&self.source);
+        if expanded.is_absolute() {
+            expanded
+        } else {
+            manifest_dir.join(expanded)
+        }
+    }
+
+    pub fn targets_host(&self, host: &str) -> bool {
+        match &self.hosts {
+            None => true,
+            Some(list) => list.iter().any(|h| h == host),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MarketplaceEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
+}
+
+impl MarketplaceEntry {
+    pub fn source(&self) -> Option<MarketplaceSource> {
+        if let Some(v) = &self.github {
+            return Some(MarketplaceSource::GitHub(v.clone()));
+        }
+        if let Some(v) = &self.directory {
+            return Some(MarketplaceSource::Directory(v.clone()));
+        }
+        self.url.clone().map(MarketplaceSource::Url)
+    }
+
+    pub fn targets_host(&self, host: &str) -> bool {
+        match &self.hosts {
+            None => true,
+            Some(list) => list.iter().any(|h| h == host),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PluginEntry {
+    /// Pin the marketplace. Omit it and the marketplace is *derived* per host,
+    /// because the curated registries genuinely differ between hosts and one
+    /// hardcoded id would produce phantom drift on the other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub marketplace: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
+}
+
+impl PluginEntry {
+    pub fn targets_host(&self, host: &str) -> bool {
+        match &self.hosts {
+            None => true,
+            Some(list) => list.iter().any(|h| h == host),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Load / save
+// ---------------------------------------------------------------------------
+
+impl Manifest {
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Manifest::default());
+        }
+        let text = std::fs::read_to_string(path)
+            .with_context(|| format!("reading manifest {}", path.display()))?;
+        let manifest: Manifest = toml::from_str(&text)
+            .with_context(|| format!("parsing manifest {}", path.display()))?;
+        Ok(manifest)
+    }
+
+    /// Validate, back up the previous file, then write.
+    ///
+    /// Validation is a gate: a manifest containing a literal credential is not
+    /// written at all.
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let findings = self.audit_secrets();
+        if !findings.is_empty() {
+            let detail = findings
+                .iter()
+                .map(|f| format!("  {} — {}", f.location, f.reason))
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!(
+                "refusing to write a manifest containing literal credentials:\n{detail}\n\n\
+                 Replace the value with an environment variable reference \
+                 (bearer_token_env = \"NAME\", env_from = [\"NAME\"], or ${{NAME}} in headers)."
+            );
+        }
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        paths::backup(path)?;
+
+        let body = toml::to_string_pretty(self).context("serializing manifest")?;
+        std::fs::write(path, format!("{HEADER}\n{body}"))
+            .with_context(|| format!("writing manifest {}", path.display()))?;
+        Ok(())
+    }
+
+    /// Every value in the manifest that looks like a live credential.
+    pub fn audit_secrets(&self) -> Vec<SecretFinding> {
+        let mut out = Vec::new();
+        for (name, entry) in &self.mcp {
+            for (k, v) in &entry.env {
+                secrets::check(&format!("mcp.{name}.env.{k}"), v, &mut out);
+            }
+            for (k, v) in &entry.headers {
+                secrets::check(&format!("mcp.{name}.headers.{k}"), v, &mut out);
+            }
+            if let Some(url) = &entry.url {
+                secrets::check(&format!("mcp.{name}.url"), url, &mut out);
+            }
+            for (i, arg) in entry.args.iter().enumerate() {
+                secrets::check(&format!("mcp.{name}.args[{i}]"), arg, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Entries whose `command` is an absolute path. Not an error — just a thing
+    /// that will break on a different machine, so `doctor` says so.
+    pub fn non_portable(&self) -> Vec<(String, String)> {
+        self.mcp
+            .iter()
+            .filter_map(|(name, e)| {
+                e.non_portable_command()
+                    .map(|c| (name.clone(), c.to_string()))
+            })
+            .collect()
+    }
+
+    /// Environment variables the manifest depends on but which are not set.
+    pub fn missing_env(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (name, entry) in &self.mcp {
+            let mut needed: Vec<String> = entry.env_from.clone();
+            if let Some(var) = &entry.bearer_token_env {
+                needed.push(var.clone());
+            }
+            for value in entry.headers.values() {
+                needed.extend(referenced_vars(value));
+            }
+            for var in needed {
+                if std::env::var_os(&var).is_none() {
+                    out.push((name.clone(), var));
+                }
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Which capabilities `name` needs, for gating against a host's `caps`.
+    pub fn required_caps(&self, name: &str) -> Vec<Cap> {
+        match self.mcp.get(name) {
+            Some(entry) => entry
+                .to_server(name)
+                .map(|s| s.required_caps())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+}
+
+/// Extract `VAR` from every `${VAR}` in a string.
+pub fn referenced_vars(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            Some(end) => {
+                out.push(after[..end].to_string());
+                rest = &after[end + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn round_trips_a_stdio_entry() {
+        let text = r#"
+[mcp.kicad]
+transport = "stdio"
+command = "node"
+args = ["~/repos/kicad/dist/index.js"]
+env_from = ["KICAD_PYTHON", "PYTHONPATH"]
+env = { LOG_LEVEL = "info" }
+"#;
+        let m: Manifest = toml::from_str(text).unwrap();
+        let entry = &m.mcp["kicad"];
+        assert_eq!(entry.scope, ScopeKind::User);
+        let server = entry.to_server("kicad").unwrap();
+        assert!(server.required_caps().contains(&Cap::EnvFrom));
+        assert!(server.required_caps().contains(&Cap::Env));
+    }
+
+    #[test]
+    fn save_refuses_a_literal_credential() {
+        let mut m = Manifest::default();
+        m.mcp.insert(
+            "knowledge".into(),
+            McpEntry {
+                transport: "http".into(),
+                command: None,
+                args: vec![],
+                env: BTreeMap::new(),
+                env_from: vec![],
+                url: Some("https://api.example.test/mcp".into()),
+                headers: BTreeMap::from([(
+                    "Authorization".to_string(),
+                    "Bearer f0a6ab6e38d15c1541fe6ed1e67ba64c78ccbe02505d358d58c30020aa5340ae"
+                        .to_string(),
+                )]),
+                bearer_token_env: None,
+                scope: ScopeKind::User,
+                repos: vec![],
+                hosts: None,
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let err = m.save(&dir.path().join("manifest.toml")).unwrap_err();
+        assert!(err.to_string().contains("literal credentials"), "{err}");
+        assert!(!dir.path().join("manifest.toml").exists());
+    }
+
+    #[test]
+    fn save_accepts_an_env_reference() {
+        let mut m = Manifest::default();
+        m.mcp.insert(
+            "knowledge".into(),
+            McpEntry {
+                transport: "http".into(),
+                command: None,
+                args: vec![],
+                env: BTreeMap::new(),
+                env_from: vec![],
+                url: Some("https://api.example.test/mcp".into()),
+                headers: BTreeMap::new(),
+                bearer_token_env: Some("KNOWLEDGE_TOKEN".into()),
+                scope: ScopeKind::User,
+                repos: vec![],
+                hosts: None,
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.toml");
+        m.save(&path).unwrap();
+        let reloaded = Manifest::load(&path).unwrap();
+        assert_eq!(
+            reloaded.mcp["knowledge"].bearer_token_env.as_deref(),
+            Some("KNOWLEDGE_TOKEN")
+        );
+    }
+
+    #[test]
+    fn local_scope_expands_to_one_scope_per_repo() {
+        let text = r#"
+[mcp.vanta]
+transport = "stdio"
+command = "vanta-mcp"
+scope = "local"
+repos = ["/a/one", "/b/two", "/c/three"]
+"#;
+        let m: Manifest = toml::from_str(text).unwrap();
+        assert_eq!(m.mcp["vanta"].scopes().len(), 3);
+    }
+
+    #[test]
+    fn extracts_referenced_vars() {
+        assert_eq!(referenced_vars("Bearer ${A} and ${B}"), vec!["A", "B"]);
+        assert!(referenced_vars("nothing here").is_empty());
+    }
+
+    #[test]
+    fn hosts_list_records_intentional_divergence() {
+        let text = r#"
+[mcp.unityMCP]
+transport = "http"
+url = "http://127.0.0.1:8080/mcp"
+hosts = ["codex"]
+"#;
+        let m: Manifest = toml::from_str(text).unwrap();
+        assert!(m.mcp["unityMCP"].targets_host("codex"));
+        assert!(!m.mcp["unityMCP"].targets_host("claude"));
+    }
+}

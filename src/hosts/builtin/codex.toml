@@ -1,0 +1,62 @@
+# Codex CLI — https://developers.openai.com/codex/cli
+#
+# Read path: ~/.codex/config.toml. That file also holds project trust levels,
+# notice flags, model preferences and per-tool approval modes, so we never write
+# it ourselves — every mutation goes through `codex mcp` / `codex plugin`.
+#
+# Capability notes, both verified against `codex mcp add --help` (0.146.0):
+#
+#   * no `--header`   -> arbitrary HTTP headers cannot be expressed, so the
+#                        `headers` capability is absent and a server needing it
+#                        is reported as blocked instead of being pushed lossily.
+#   * no ambient env forwarding -> `--env` only takes literal KEY=VALUE, so the
+#                        `env_from` capability is absent. (config.toml has an
+#                        `env_vars` key for this, but no CLI flag reaches it.)
+#
+# Skills: dirs[0] is the link target. ~/.codex/skills is read-only here because
+# it is where Codex installs its own system skills.
+
+name = "codex"
+display = "Codex CLI"
+detect = { bin = "codex" }
+
+[mcp]
+scopes = ["user"]
+caps = ["stdio", "http", "env", "bearer_env"]
+
+[[mcp.read]]
+file = "~/.codex/config.toml"
+parser = "codex_toml_v1"
+
+[mcp.add]
+style = "flags"
+argv_stdio = ["mcp", "add", "{name}", "{env_flags...}", "--", "{command}", "{args...}"]
+argv_http = ["mcp", "add", "{name}", "--url", "{url}", "{bearer_flags...}"]
+env_flag = "--env"
+env_format = "{key}={value}"
+bearer_env_flag = "--bearer-token-env-var"
+
+[mcp.remove]
+argv = ["mcp", "remove", "{name}"]
+
+[skills]
+dirs = ["~/.agents/skills", "~/.codex/skills"]
+
+[plugins]
+implicit_marketplaces = ["openai-curated", "openai-api-curated"]
+
+[[plugins.read]]
+file = "~/.codex/config.toml"
+parser = "codex_plugins_toml_v1"
+
+[plugins.install]
+argv = ["plugin", "add", "{id}"]
+
+[plugins.remove]
+argv = ["plugin", "remove", "{id}"]
+
+[plugins.marketplace_add]
+argv = ["plugin", "marketplace", "add", "{source}"]
+
+[plugins.marketplace_remove]
+argv = ["plugin", "marketplace", "remove", "{name}"]

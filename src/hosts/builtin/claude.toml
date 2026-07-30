@@ -1,0 +1,58 @@
+# Claude Code — https://claude.com/claude-code
+#
+# Read path: ~/.claude.json holds both the user-scope `mcpServers` map and a
+# per-repo `projects["<path>"].mcpServers` map (the "local" scope). Committed
+# project servers live in <repo>/.mcp.json.
+#
+# Note that `claude mcp add` defaults to --scope local, which is why ad-hoc adds
+# end up pinned to one repo without the user intending it.
+
+name = "claude"
+display = "Claude Code"
+detect = { bin = "claude" }
+
+[mcp]
+scopes = ["user", "local", "project"]
+caps = ["stdio", "http", "env", "env_from", "headers", "bearer_env"]
+
+[[mcp.read]]
+file = "~/.claude.json"
+parser = "claude_json_v1"
+
+[[mcp.read]]
+file = "{repo}/.mcp.json"
+parser = "mcp_json_v1"
+scope = "project"
+
+[mcp.add]
+style = "json"
+json_serializer = "claude_json_v1"
+argv = ["mcp", "add-json", "{name}", "{json}", "--scope", "{scope}"]
+
+[mcp.remove]
+argv = ["mcp", "remove", "{name}", "--scope", "{scope}"]
+
+[skills]
+dirs = ["~/.claude/skills"]
+
+[plugins]
+
+[[plugins.read]]
+file = "~/.claude/plugins/installed_plugins.json"
+parser = "claude_plugins_v1"
+
+[[plugins.read]]
+file = "~/.claude/plugins/known_marketplaces.json"
+parser = "claude_marketplaces_v1"
+
+[plugins.install]
+argv = ["plugin", "install", "{id}", "--scope", "user"]
+
+[plugins.remove]
+argv = ["plugin", "uninstall", "{name}"]
+
+[plugins.marketplace_add]
+argv = ["plugin", "marketplace", "add", "{source}"]
+
+[plugins.marketplace_remove]
+argv = ["plugin", "marketplace", "remove", "{name}"]
