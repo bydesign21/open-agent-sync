@@ -1,11 +1,11 @@
 [package]
 name = "agentsync"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 rust-version = "1.85"
 description = "Reconcile MCP servers, skills, and plugins across agentic coding CLIs"
 license = "MIT"
-repository = "https://github.com/lvasquezdev/agentsync"
+repository = "https://github.com/bydesign21/open-agent-sync"
 readme = "README.md"
 keywords = ["mcp", "tui", "claude-code", "codex", "agents"]
 categories = ["command-line-utilities", "development-tools"]

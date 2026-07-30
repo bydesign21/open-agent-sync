@@ -33,9 +33,79 @@ hosts: claude ●  codex ●
 
 ## Install
 
+### Prebuilt binary (macOS)
+
+One static binary, no runtime dependency. Pick your architecture — `uname -m`
+prints `arm64` on Apple Silicon and `x86_64` on Intel.
+
 ```sh
+VERSION=v0.0.1
+case "$(uname -m)" in
+  arm64)  TARGET=aarch64-apple-darwin ;;
+  x86_64) TARGET=x86_64-apple-darwin  ;;
+esac
+
+curl -fsSL -o agentsync.tar.gz \
+  "https://github.com/bydesign21/open-agent-sync/releases/download/$VERSION/agentsync-$VERSION-$TARGET.tar.gz"
+tar -xzf agentsync.tar.gz
+mkdir -p ~/.local/bin && mv agentsync ~/.local/bin/ && rm agentsync.tar.gz
+```
+
+Make sure `~/.local/bin` is on your `PATH`, then check it:
+
+```sh
+agentsync --version
+```
+
+macOS may quarantine a downloaded binary. If it refuses to run:
+
+```sh
+xattr -d com.apple.quarantine ~/.local/bin/agentsync
+```
+
+Verify the download against the checksums published with the release:
+
+```sh
+curl -fsSLO "https://github.com/bydesign21/open-agent-sync/releases/download/$VERSION/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS --ignore-missing
+```
+
+### From source with cargo
+
+Needs Rust 1.85 or newer (edition 2024). `rustup` is the easy way to get it.
+
+```sh
+cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.1
+```
+
+Or from a clone, which is what you want if you plan to change anything:
+
+```sh
+git clone https://github.com/bydesign21/open-agent-sync
+cd open-agent-sync
 cargo install --path .
 ```
+
+`cargo install` puts the binary in `~/.cargo/bin`.
+
+### Building without installing
+
+```sh
+cargo build --release          # ./target/release/agentsync
+cargo run -- plan              # run it in place, with arguments after --
+```
+
+To reproduce the release artifacts, including the other Mac architecture:
+
+```sh
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+```
+
+Linux builds are not published yet, but nothing in the code is macOS-specific
+except the symlink handling in the skills domain, which uses `std::os::unix` and
+works on Linux too. `cargo build --release` on Linux should just work.
 
 ## Use
 
@@ -252,10 +322,12 @@ the differ testable without a machine to test against.
 
 ## Development
 
+The full gate, which is what CI would run:
+
 ```sh
-cargo test                  # unit + integration
+cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo fmt
+cargo test
 ```
 
 `tests/diff.rs` builds synthetic worlds and asserts on row wording and planner
@@ -264,19 +336,47 @@ records the argv it receives and maintains a real config file — so the write p
 is verified without touching the machine running the tests, including that a
 second pass converges.
 
+`cargo test` alone is not enough to trust a change here, because most of the risk
+is in what gets handed to another program's CLI. When touching a host descriptor,
+also check the argv it produces:
+
+```sh
+agentsync plan          # every step prints the exact command it will run
+```
+
+### Cutting a release
+
+```sh
+cargo build --release --target aarch64-apple-darwin
+cargo build --release --target x86_64-apple-darwin
+# tar each binary as agentsync-<tag>-<target>.tar.gz, write SHA256SUMS,
+# then: gh release create <tag> <assets> --notes-file <notes>
+```
+
+Keep `version` in `Cargo.toml` equal to the tag, so `agentsync --version` and the
+release you downloaded agree.
+
 ## Status
 
-Early. Verified against Claude Code 2.1.220 and Codex CLI 0.146.0 on macOS.
+Early. Verified against Claude Code 2.1.220 and Codex CLI 0.146.0 on macOS
+(Apple Silicon). Every capability claim in the built-in descriptors was checked
+against the CLIs' own `--help` output rather than assumed — see the comments in
+`src/hosts/builtin/*.toml`.
 
-Two things are worth knowing:
+Known gaps:
 
-- Codex's project-scoped `.mcp.json` support is inferred from its loader, not
-  confirmed; its descriptor declares `scopes = ["user"]` until it is. Claude
+- Codex's project-scoped `.mcp.json` support is inferred from its loader strings,
+  not confirmed; its descriptor declares `scopes = ["user"]` until it is. Claude
   Code's three scopes are confirmed against `claude mcp add --help`.
-- `agentsync doctor --fix` for rewriting a literal secret out of a host's own
-  config file is not implemented. Today, moving a token to an environment
-  variable rewrites the manifest and re-pushes the corrected definition; the old
-  literal remains in the backup.
+- `agentsync doctor --fix`, to rewrite a literal secret out of a host's own config
+  file, is not implemented. Today, moving a token to an environment variable
+  rewrites the manifest and re-pushes the corrected definition; the old literal
+  survives in the backup.
+- Whether Claude Code expands `${VAR}` inside `headers` at **user** scope (as
+  opposed to a project `.mcp.json`) is unverified. If it does not, a bearer token
+  moved to an environment variable will be sent literally. Check with
+  `claude mcp list` after applying such a change.
+- No CI yet, and no Linux or Windows release artifacts.
 
 ## License
 
