@@ -258,6 +258,80 @@ fn promoting_does_not_churn_a_host_that_already_holds_it_globally() {
 }
 
 #[test]
+fn overwriting_an_existing_definition_removes_it_first() {
+    // `claude mcp add-json` is NOT an upsert — it exits 1 with "already exists in
+    // user config". So pushing a changed value must remove before it adds, or the
+    // push always fails against a host that already has the name.
+    let mut manifest = Manifest::default();
+    let wanted = http("knowledge", "https://new.example.test/mcp");
+    manifest.mcp.insert(
+        "knowledge".into(),
+        McpEntry::from_server(&wanted, ScopeKind::User, vec![]),
+    );
+
+    let stale = http("knowledge", "https://old.example.test/mcp");
+    let w = world(
+        manifest,
+        snapshot("claude", &[(Scope::User, stale)]),
+        snapshot("codex", &[]),
+    );
+
+    let mut rows = w.rows();
+    let row = find(&rows, "knowledge");
+    assert_eq!(row.headline, "differs on claude");
+
+    accept(&mut rows, "knowledge");
+    let plan = w.plan(&rows);
+
+    let claude: Vec<Vec<String>> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match &s.step {
+            Step::Host { host, argv, .. } if host == "claude" => Some(argv.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let remove = claude
+        .iter()
+        .position(|a| a.contains(&"remove".to_string()))
+        .unwrap_or_else(|| panic!("expected a remove before the add: {claude:?}"));
+    let add = claude
+        .iter()
+        .position(|a| a.contains(&"add-json".to_string()))
+        .unwrap_or_else(|| panic!("expected an add: {claude:?}"));
+    assert!(remove < add, "remove must come first: {claude:?}");
+}
+
+#[test]
+fn an_identical_definition_is_left_completely_alone() {
+    let mut manifest = Manifest::default();
+    let server = http("same", "https://example.test/mcp");
+    manifest.mcp.insert(
+        "same".into(),
+        McpEntry::from_server(&server, ScopeKind::User, vec![]),
+    );
+    let w = world(
+        manifest,
+        snapshot("claude", &[(Scope::User, server.clone())]),
+        snapshot("codex", &[(Scope::User, server)]),
+    );
+    let mut rows = w.rows();
+    assert_eq!(find(&rows, "same").severity, Severity::Synced);
+
+    // Even if forced, there is nothing to do — no remove, no add.
+    for row in rows.iter_mut() {
+        row.accepted = true;
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        plan.steps.is_empty(),
+        "an in-sync server must produce no churn: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn a_local_scoped_server_is_reported_as_blocked_for_a_user_only_host() {
     let server = http("pulumi", "https://mcp.ai.pulumi.com/mcp");
     let w = world(

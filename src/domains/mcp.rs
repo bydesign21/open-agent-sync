@@ -810,9 +810,11 @@ fn push_entry(world: &World, name: &str, entry: &McpEntry, plan: &mut Plan, repl
 
 /// Emit `add` steps for each target host at each manifest scope.
 ///
-/// `replace` decides whether hosts that already hold the server are re-issued
-/// the add (both CLIs treat add as upsert), which is what makes "push the
-/// manifest value" actually converge.
+/// `replace` decides whether a host that already holds a *different* definition
+/// gets overwritten. Overwriting is done as remove-then-add, because `add` is not
+/// an upsert: `claude mcp add-json` exits 1 with "already exists in user config".
+/// The removal lands first via [`Plan::finalize`], which orders removals ahead of
+/// adds.
 fn push_entry_to(
     world: &World,
     name: &str,
@@ -844,9 +846,28 @@ fn push_entry_to(
                 plan.note(format!("{name}: skipped {hname} \u{2014} {why}"));
                 continue;
             }
-            let already = snap.mcp_at(scope, name).is_some_and(|s| *s == server);
-            if already || (!replace && snap.mcp_at(scope, name).is_some()) {
+            let existing = snap.mcp_at(scope, name);
+            if existing.is_some_and(|s| *s == server) {
                 continue;
+            }
+            if existing.is_some() {
+                if !replace {
+                    continue;
+                }
+                // `add` refuses to overwrite, so clear the old definition first.
+                match host.mcp_remove_argv(name, scope) {
+                    Ok(argv) => plan.push(
+                        format!("replace {name} on {hname} ({scope}): remove the old definition"),
+                        Step::Host {
+                            host: hname.clone(),
+                            argv,
+                            cwd: cwd_for(scope),
+                        },
+                    ),
+                    Err(e) => plan.note(format!(
+                        "{name}: cannot build {hname} removal \u{2014} {e:#}"
+                    )),
+                }
             }
             match host.mcp_add_argv(&server, scope) {
                 Ok(argv) => plan.push(
