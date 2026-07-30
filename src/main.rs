@@ -4,12 +4,13 @@
 //! With no subcommand this opens the review TUI. The subcommands exist so the
 //! same core is scriptable and so the plan can be inspected without a terminal.
 
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use agentsync::core::apply::{self, Outcome};
+use agentsync::core::apply::{self, Outcome, Progress};
 use agentsync::core::diff::{Domain, Row, Severity};
 use agentsync::core::plan::{FsOp, Step};
 use agentsync::domains::World;
@@ -290,15 +291,24 @@ fn run_plan(world: World, rows: &[Row]) -> Result<()> {
         &mut manifest,
         &world.manifest_path,
         &world.hosts,
-        |result| {
-            let mark = match result.outcome {
-                Outcome::Done => "\u{2713}",
-                Outcome::Failed => "\u{2717}",
-                Outcome::Skipped => "\u{2013}",
-            };
-            println!(" {mark} {}", result.label);
-            if result.outcome != Outcome::Done && !result.message.is_empty() {
-                println!("     {}", result.message);
+        |progress| match progress {
+            // Print the label before the step runs, and flush, so a slow step
+            // shows what is in flight instead of looking stalled.
+            Progress::Started { index, label } => {
+                print!(" \u{2026} [{}/{}] {label}", index + 1, plan.steps.len());
+                let _ = io::stdout().flush();
+            }
+            Progress::Finished(result) => {
+                let mark = match result.outcome {
+                    Outcome::Done => "\u{2713}",
+                    Outcome::Failed => "\u{2717}",
+                    Outcome::Skipped => "\u{2013}",
+                };
+                // Overwrite the in-flight line.
+                println!("\r\u{1b}[2K {mark} {}", result.label);
+                if result.outcome != Outcome::Done && !result.message.is_empty() {
+                    println!("     {}", result.message);
+                }
             }
         },
     );

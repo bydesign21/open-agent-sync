@@ -80,6 +80,112 @@ pub fn draw_plan(app: &App, frame: &mut Frame) {
     );
 }
 
+/// Live state while the plan is executing.
+///
+/// Held locally by the runner rather than on `App`, so the worker thread can
+/// borrow the host list while this is being mutated for drawing.
+pub struct RunState {
+    pub total: usize,
+    pub done: Vec<crate::core::apply::StepResult>,
+    /// The step currently in flight, if any.
+    pub current: Option<(usize, String)>,
+    /// Advances once per repaint to animate the spinner.
+    pub frame: usize,
+}
+
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+impl RunState {
+    pub fn new(total: usize) -> Self {
+        RunState {
+            total,
+            done: Vec::new(),
+            current: None,
+            frame: 0,
+        }
+    }
+
+    pub fn spinner(&self) -> &'static str {
+        SPINNER[self.frame % SPINNER.len()]
+    }
+}
+
+/// The in-progress screen: completed steps with their marks, the step currently
+/// running, and a count. Without this the UI simply stops repainting until the
+/// whole plan finishes, which is indistinguishable from a freeze.
+pub fn draw_running(state: &RunState, frame: &mut Frame) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(frame.area());
+
+    let finished = state.done.len();
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(state.spinner(), Style::new().fg(Color::Cyan)),
+                Span::raw(" "),
+                "Running".bold(),
+                Span::raw(format!("   {finished} of {} steps", state.total)),
+            ]),
+            Line::from(match &state.current {
+                Some((_, label)) => Span::styled(
+                    format!("  {label}"),
+                    Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                None => Span::raw(""),
+            }),
+        ]),
+        chunks[0],
+    );
+
+    // Show the tail, so the newest lines stay visible on a long plan.
+    let height = chunks[1].height.saturating_sub(1) as usize;
+    let skip = state.done.len().saturating_sub(height);
+    let mut lines: Vec<Line> = Vec::new();
+    for result in state.done.iter().skip(skip) {
+        let (mark, style) = mark_for(result.outcome);
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(mark, style),
+            Span::raw(" "),
+            Span::raw(result.label.clone()),
+        ]));
+    }
+    if let Some((_, label)) = &state.current {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(state.spinner(), Style::new().fg(Color::Cyan)),
+            Span::raw(" "),
+            Span::styled(label.clone(), Style::new().fg(Color::Cyan)),
+        ]));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::new().fg(Color::DarkGray)),
+        ),
+        chunks[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(" keys are ignored while running".dim())),
+        chunks[2],
+    );
+}
+
+fn mark_for(outcome: Outcome) -> (&'static str, Style) {
+    match outcome {
+        Outcome::Done => ("\u{2713}", Style::new().fg(Color::Green)),
+        Outcome::Failed => ("\u{2717}", Style::new().fg(Color::Red)),
+        Outcome::Skipped => ("\u{2013}", Style::new().fg(Color::DarkGray)),
+    }
+}
+
 pub fn draw_result(app: &App, frame: &mut Frame) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
@@ -120,11 +226,7 @@ pub fn draw_result(app: &App, frame: &mut Frame) {
 
     let mut lines: Vec<Line> = Vec::new();
     for result in &report.results {
-        let (mark, style) = match result.outcome {
-            Outcome::Done => ("\u{2713}", Style::new().fg(Color::Green)),
-            Outcome::Failed => ("\u{2717}", Style::new().fg(Color::Red)),
-            Outcome::Skipped => ("\u{2013}", Style::new().fg(Color::DarkGray)),
-        };
+        let (mark, style) = mark_for(result.outcome);
         lines.push(Line::from(vec![
             Span::raw("  "),
             Span::styled(mark, style),

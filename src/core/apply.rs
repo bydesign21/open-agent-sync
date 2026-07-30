@@ -64,19 +64,38 @@ impl Report {
     }
 }
 
+/// A progress notification.
+///
+/// `Started` exists because some steps are slow — a plugin install clones a
+/// repository — and a caller that only hears about *finished* steps has nothing
+/// to display while one is in flight, which reads as a hang.
+#[derive(Clone, Copy, Debug)]
+pub enum Progress<'a> {
+    Started {
+        /// Zero-based index into `plan.steps`.
+        index: usize,
+        label: &'a str,
+    },
+    Finished(&'a StepResult),
+}
+
 /// Run every step, then persist the manifest if its ops all succeeded.
 pub fn run(
     plan: &Plan,
     manifest: &mut Manifest,
     manifest_path: &Path,
     hosts: &[Host],
-    mut progress: impl FnMut(&StepResult),
+    mut progress: impl FnMut(Progress<'_>),
 ) -> Report {
     let mut report = Report::default();
     let mut manifest_dirty = false;
     let mut manifest_ops_ok = true;
 
-    for planned in &plan.steps {
+    for (index, planned) in plan.steps.iter().enumerate() {
+        progress(Progress::Started {
+            index,
+            label: &planned.label,
+        });
         let result = match &planned.step {
             Step::Manifest(op) => {
                 let r = apply_manifest_op(manifest, op);
@@ -166,7 +185,7 @@ pub fn run(
             },
         };
 
-        progress(&result);
+        progress(Progress::Finished(&result));
         report.results.push(result);
     }
 

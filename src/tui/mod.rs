@@ -28,6 +28,9 @@ enum Screen {
     Review,
     /// Confirming a plan.
     Run,
+    /// Executing. Entered by the key handler, acted on by the event loop, which
+    /// is what keeps `handle_key` free of terminal plumbing and testable.
+    Running,
     /// Showing what happened.
     Result,
 }
@@ -55,6 +58,79 @@ pub struct App {
     flash: Option<String>,
     manifest_path: PathBuf,
     repos: Vec<String>,
+}
+
+/// Execute a plan on a worker thread while repainting a live progress screen.
+///
+/// A synchronous run inside the event loop cannot repaint, so a plan containing
+/// anything slow — a plugin install clones a repository — looks like a freeze.
+/// The work runs in a scoped thread and reports through a channel; this loop
+/// drains it, redraws, and discards keystrokes so nothing typed during the run is
+/// replayed into the review screen afterwards.
+fn run_with_progress(
+    plan: &Plan,
+    mut manifest: crate::manifest::Manifest,
+    manifest_path: &std::path::Path,
+    hosts: &[crate::hosts::Host],
+    terminal: &mut ratatui::DefaultTerminal,
+) -> Result<Report> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    enum Message {
+        Started(usize, String),
+        Finished(apply::StepResult),
+    }
+
+    let (tx, rx) = mpsc::channel::<Message>();
+    let mut state = run::RunState::new(plan.steps.len());
+
+    std::thread::scope(|scope| -> Result<Report> {
+        let worker = scope.spawn(move || {
+            apply::run(plan, &mut manifest, manifest_path, hosts, |progress| {
+                let message = match progress {
+                    apply::Progress::Started { index, label } => {
+                        Message::Started(index, label.to_string())
+                    }
+                    apply::Progress::Finished(result) => Message::Finished(result.clone()),
+                };
+                // A send failure means the UI went away; the work still finishes.
+                let _ = tx.send(message);
+            })
+        });
+
+        loop {
+            let mut drained_any = false;
+            while let Ok(message) = rx.try_recv() {
+                drained_any = true;
+                match message {
+                    Message::Started(index, label) => state.current = Some((index, label)),
+                    Message::Finished(result) => {
+                        state.done.push(result);
+                        state.current = None;
+                    }
+                }
+            }
+
+            state.frame += 1;
+            terminal.draw(|frame| run::draw_running(&state, frame))?;
+
+            // Swallow input so a keypress during the run does not act on the
+            // review screen the moment it reappears.
+            while event::poll(Duration::ZERO)? {
+                let _ = event::read()?;
+            }
+
+            if worker.is_finished() && !drained_any && rx.try_recv().is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(60));
+        }
+
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("the apply worker panicked"))
+    })
 }
 
 pub fn run(world: World, rows: Vec<Row>) -> Result<()> {
@@ -252,17 +328,15 @@ impl App {
         Ok(path)
     }
 
-    fn execute(&mut self) {
-        let mut manifest = self.world.manifest.clone();
-        let report = apply::run(
-            &self.plan,
-            &mut manifest,
-            &self.world.manifest_path,
-            &self.world.hosts,
-            |_| {},
-        );
+    fn execute(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        let manifest = self.world.manifest.clone();
+        let path = self.world.manifest_path.clone();
+        // Immutable reborrows; the runner never touches `self`, which is what
+        // lets the worker thread hold the host list while we redraw.
+        let report = run_with_progress(&self.plan, manifest, &path, &self.world.hosts, terminal)?;
         self.report = Some(report);
         self.screen = Screen::Result;
+        Ok(())
     }
 
     // -----------------------------------------------------------------
@@ -271,10 +345,15 @@ impl App {
 
     fn event_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         loop {
+            if self.screen == Screen::Running {
+                self.execute(terminal)?;
+                continue;
+            }
+
             terminal.draw(|frame| match self.screen {
                 Screen::Review => review::draw(self, frame),
                 Screen::Run => run::draw_plan(self, frame),
-                Screen::Result => run::draw_result(self, frame),
+                Screen::Result | Screen::Running => run::draw_result(self, frame),
             })?;
 
             let Event::Key(key) = event::read()? else {
@@ -325,9 +404,12 @@ impl App {
                     self.screen = Screen::Review
                 }
                 KeyCode::Char('c') => self.write_script(),
-                KeyCode::Char('y') => self.execute(),
+                KeyCode::Char('y') => self.screen = Screen::Running,
                 _ => {}
             },
+
+            // The event loop drives this screen; no keys are read while it is up.
+            Screen::Running => {}
 
             Screen::Result => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
@@ -451,6 +533,28 @@ mod tests {
         app.toggle_selected();
         app.handle_key(KeyEvent::from(KeyCode::Enter)).unwrap();
         assert!(matches!(app.screen, Screen::Run));
+    }
+
+    #[test]
+    fn y_hands_execution_to_the_event_loop_rather_than_running_inline() {
+        // The key handler must not execute the plan itself: it has no terminal to
+        // repaint with, which is exactly what made the UI look frozen.
+        let mut app = app_with(vec![row(Domain::Mcp, "a", Severity::Normal)]);
+        app.screen = Screen::Run;
+        let quit = app.handle_key(KeyEvent::from(KeyCode::Char('y'))).unwrap();
+        assert!(!quit);
+        assert!(matches!(app.screen, Screen::Running));
+    }
+
+    #[test]
+    fn keys_are_ignored_while_running() {
+        let mut app = app_with(vec![row(Domain::Mcp, "a", Severity::Normal)]);
+        app.screen = Screen::Running;
+        app.handle_key(KeyEvent::from(KeyCode::Char('q'))).unwrap();
+        assert!(
+            matches!(app.screen, Screen::Running),
+            "a stray keypress must not leave the running screen"
+        );
     }
 
     #[test]

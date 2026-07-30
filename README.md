@@ -80,6 +80,13 @@ rejected on save — a hard gate, not a lint, because the failure mode is a toke
 git history. When agentsync finds a literal token in a host's config it offers to
 move it to an environment variable rather than copying it.
 
+**The run reports itself as it goes.** Executing a plan streams progress: a
+spinner on the step in flight, a running count, and completed steps marked as they
+land. Some steps are genuinely slow — a plugin install clones a repository — and a
+UI that only repaints when everything is finished is indistinguishable from a
+hang. Keystrokes during a run are discarded rather than queued, so nothing you
+typed while waiting fires the moment the review screen returns.
+
 **Failures don't abort the run.** Steps run in order; a failed step is recorded
 and the run continues, then the summary says what was done, what failed with the
 host's own stderr, and what was skipped. Stopping halfway would leave you unable
