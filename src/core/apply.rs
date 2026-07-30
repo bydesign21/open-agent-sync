@@ -399,30 +399,10 @@ mod tests {
     use super::*;
     use crate::core::plan::Plan;
 
-    /// `AGENTSYNC_HOME` is process-global, so two tests setting it concurrently
-    /// will point each other's backup directory at a `TempDir` that is about to
-    /// be dropped. Every test that redirects it holds this lock for its whole
-    /// body, which serializes them.
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct TmpHome {
-        dir: tempfile::TempDir,
-        _guard: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl TmpHome {
-        fn path(&self) -> &std::path::Path {
-            self.dir.path()
-        }
-    }
+    use crate::testutil::TmpHome;
 
     fn tmp_home() -> TmpHome {
-        // Poisoning only means an earlier test panicked; the lock is still ours.
-        let guard = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        // Keep backups inside the temp tree.
-        unsafe { std::env::set_var("AGENTSYNC_HOME", dir.path()) };
-        TmpHome { dir, _guard: guard }
+        TmpHome::new()
     }
 
     #[test]

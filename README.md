@@ -27,7 +27,7 @@ On macOS or Linux — `uname -m` prints `arm64`/`aarch64` on Apple Silicon and a
 `x86_64` elsewhere:
 
 ```sh
-VERSION=v0.0.3
+VERSION=v0.0.4
 REPO=https://github.com/bydesign21/open-agent-sync
 
 case "$(uname -s)-$(uname -m)" in
@@ -61,7 +61,7 @@ macOS may quarantine a downloaded binary. If it refuses to run:
 xattr -d com.apple.quarantine ~/.local/bin/agentsync
 ```
 
-On Windows, download `agentsync-v0.0.3-x86_64-pc-windows-msvc.zip` from the
+On Windows, download `agentsync-v0.0.4-x86_64-pc-windows-msvc.zip` from the
 [releases page](https://github.com/bydesign21/open-agent-sync/releases), extract
 `agentsync.exe`, and put it somewhere on your `PATH`.
 
@@ -78,7 +78,7 @@ edition 2024. CI checks that against the `rust-version` in `Cargo.toml`, so it i
 not a guess. `rustup` is the easy way to get it.
 
 ```sh
-cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.3
+cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.4
 ```
 
 Or from a clone, which is what you want if you plan to change anything:
@@ -117,7 +117,7 @@ agentsync              # the review TUI
 agentsync plan         # print the differences and the plan the defaults would produce
 agentsync apply --yes  # accept every default and run it
 agentsync doctor       # problems that aren't differences: secrets, unset vars,
-                       # dead paths, and servers configured but not logged in
+                       # dead paths, servers not logged in, and new releases
 agentsync hosts        # what agentsync knows about each CLI
 ```
 
@@ -186,6 +186,14 @@ is why the list converges to empty instead of training you to ignore it.
 **Capabilities are enforced, not assumed.** `codex mcp add` has no `--header`, so
 a server carrying custom HTTP headers is reported as *blocked* for Codex rather
 than pushed with the headers silently dropped. Every skipped host prints why.
+
+**It tells you when it is out of date, without ever waiting on the network.**
+`doctor` asks GitHub for the newest release and prints the upgrade command; the
+review screen shows only what that last check found, so it never makes a request
+and never adds latency. A failed check reports as *unknown*, not as "up to date".
+Set `AGENTSYNC_OFFLINE=1` to skip it entirely. The check shells out to `curl`
+rather than linking a TLS stack — a version comparison is not worth an HTTP client
+and the cross-compilation it complicates.
 
 **A configured server is not a working server.** OAuth credentials are per-host and
 do not travel with a definition, so pushing an OAuth-backed MCP server writes a
@@ -404,7 +412,7 @@ Set `version` in `Cargo.toml` equal to the tag — so `agentsync --version` and 
 release you downloaded agree — then push the tag:
 
 ```sh
-git tag v0.0.4 && git push origin v0.0.4
+git tag v0.0.5 && git push origin v0.0.5
 ```
 
 `.github/workflows/release.yml` builds all five targets, packages them, writes

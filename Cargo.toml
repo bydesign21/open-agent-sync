@@ -1,6 +1,6 @@
 [package]
 name = "agentsync"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 rust-version = "1.88"
 description = "Reconcile MCP servers, skills, and plugins across agentic coding CLIs"

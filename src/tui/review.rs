@@ -206,6 +206,17 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
         ])
     };
 
+    // Cache only. The review screen must never wait on the network, so it shows
+    // what the last `doctor` run observed and nothing more.
+    if let Some(crate::update::Status::Newer { latest }) = crate::update::cached_status() {
+        hosts.push("   update: ".dim());
+        hosts.push(Span::styled(
+            latest,
+            Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        hosts.push(" available".dim());
+    }
+
     frame.render_widget(Paragraph::new(vec![counts, Line::from(hosts)]), area);
 }
 

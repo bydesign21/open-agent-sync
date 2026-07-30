@@ -16,6 +16,7 @@ use agentsync::core::plan::{FsOp, Step};
 use agentsync::domains::World;
 use agentsync::hosts::{parsers, runner};
 use agentsync::paths;
+use agentsync::update;
 
 #[derive(Parser)]
 #[command(
@@ -451,6 +452,30 @@ fn doctor(world: &World) -> Result<()> {
             println!("  \u{2013} {f}");
         }
         println!();
+    }
+
+    match update::check() {
+        update::Status::Current => println!(
+            "agentsync {} is the newest release.\n",
+            update::current_version()
+        ),
+        update::Status::Newer { latest } => {
+            println!("UPDATE AVAILABLE");
+            println!(
+                "  {} \u{2192} {latest}   {}\n",
+                update::current_version(),
+                update::upgrade_hint(&latest)
+            );
+        }
+        update::Status::Ahead { latest } => println!(
+            "agentsync {} is newer than the latest release ({latest}) \u{2014} a local build.\n",
+            update::current_version()
+        ),
+        // Not a problem to fix, but not silence either: a failed check must not
+        // read as "you are up to date".
+        update::Status::Unknown { reason } => {
+            println!("Could not check for updates: {reason}\n")
+        }
     }
 
     if problems == 0 {

@@ -19,4 +19,7 @@ pub mod hosts;
 pub mod manifest;
 pub mod paths;
 pub mod platform;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod tui;
+pub mod update;
