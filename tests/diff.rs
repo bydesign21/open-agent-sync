@@ -521,6 +521,148 @@ fn delete_everywhere_removes_from_both_hosts_and_the_manifest() {
 }
 
 // ---------------------------------------------------------------------------
+// Removal
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_in_sync_row_can_be_removed_but_never_by_accepting_everything() {
+    let server = http("shared", "https://example.test/mcp");
+    let mut manifest = Manifest::default();
+    manifest.mcp.insert(
+        "shared".into(),
+        McpEntry::from_server(&server, ScopeKind::User, vec![]),
+    );
+    let w = world(
+        manifest,
+        snapshot("claude", &[(Scope::User, server.clone())]),
+        snapshot("codex", &[(Scope::User, server)]),
+    );
+    let mut rows = w.rows();
+    let row = find(&rows, "shared");
+
+    assert_eq!(row.severity, Severity::Synced);
+    // Removal must be reachable: otherwise the only way to delete something is
+    // to break it first.
+    assert!(
+        row.actions
+            .iter()
+            .any(|a| matches!(a.kind, ActionKind::Delete { .. })),
+        "{:?}",
+        row.actions.iter().map(|a| &a.label).collect::<Vec<_>>()
+    );
+    // ...but the default must be inert, so `A` / `--yes` cannot delete anything.
+    assert_eq!(row.action().kind, ActionKind::Nothing);
+    assert!(!row.actionable());
+
+    for r in rows.iter_mut() {
+        r.accepted = r.actionable();
+    }
+    assert!(
+        w.plan(&rows).is_empty(),
+        "accepting every default must not remove an in-sync entry"
+    );
+}
+
+#[test]
+fn removing_from_one_host_narrows_the_manifest_instead_of_dropping_it() {
+    let server = http("shared", "https://example.test/mcp");
+    let mut manifest = Manifest::default();
+    manifest.mcp.insert(
+        "shared".into(),
+        McpEntry::from_server(&server, ScopeKind::User, vec![]),
+    );
+    let w = world(
+        manifest,
+        snapshot("claude", &[(Scope::User, server.clone())]),
+        snapshot("codex", &[(Scope::User, server)]),
+    );
+
+    let mut rows = w.rows();
+    for row in rows.iter_mut() {
+        if row.name != "shared" {
+            continue;
+        }
+        let pos = row
+            .actions
+            .iter()
+            .position(|a| a.label.contains("codex only"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a codex-only removal in {:?}",
+                    row.actions.iter().map(|a| &a.label).collect::<Vec<_>>()
+                )
+            });
+        row.chosen = pos;
+        row.accepted = true;
+    }
+    let plan = w.plan(&rows);
+
+    assert!(
+        plan.steps.iter().any(|s| matches!(&s.step,
+            Step::Host { host, argv, .. } if host == "codex" && argv.contains(&"remove".to_string()))),
+        "codex must actually have it removed"
+    );
+    // Leaving the manifest wanting it everywhere would report it as missing on
+    // the very next run and offer to put it straight back.
+    let narrowed = plan.steps.iter().find_map(|s| match &s.step {
+        Step::Manifest(agentsync::core::plan::ManifestOp::SetMcpHosts { hosts, .. }) => {
+            hosts.clone()
+        }
+        _ => None,
+    });
+    assert_eq!(
+        narrowed,
+        Some(vec!["claude".to_string()]),
+        "the manifest must be narrowed to the hosts that keep it: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert!(
+        !plan.steps.iter().any(|s| matches!(
+            &s.step,
+            Step::Manifest(agentsync::core::plan::ManifestOp::RemoveMcp(_))
+        )),
+        "a partial removal must not drop the entry entirely"
+    );
+}
+
+#[test]
+fn a_skill_removal_says_when_it_destroys_the_only_copy() {
+    let mut claude = snapshot("claude", &[]);
+    let mut codex = snapshot("codex", &[]);
+    // codex owns the content; claude merely links somewhere else.
+    codex
+        .skills
+        .insert("mine".into(), agentsync::core::model::SkillState::RealDir);
+    claude.skills.insert(
+        "mine".into(),
+        agentsync::core::model::SkillState::Foreign(PathBuf::from("/elsewhere/mine")),
+    );
+
+    let w = world(Manifest::default(), claude, codex);
+    let rows = w.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.name == "mine" && r.domain == Domain::Skills)
+        .expect("a skills row");
+
+    let labels: Vec<&String> = row.actions.iter().map(|a| &a.label).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("destroys the only copy")),
+        "the all-hosts removal must say what it destroys: {labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("unlink from claude only")),
+        "removing a mere link must not be called a delete: {labels:?}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("delete the only copy on codex")),
+        "removing the content must say so: {labels:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Plugins: marketplace resolution
 // ---------------------------------------------------------------------------
 

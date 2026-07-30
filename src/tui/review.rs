@@ -70,6 +70,82 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
     draw_footer(app, frame, chunks[3]);
 }
 
+/// The project picker.
+///
+/// Repos are discovered from the manifest and from each host's per-repo config.
+/// A repo that has no agent configuration yet cannot be discovered, so it is
+/// added with `agentsync --repo <path>` rather than typed in here — a text field
+/// would be the only place in the UI that takes free input.
+pub fn draw_projects(app: &App, frame: &mut Frame) {
+    let chunks = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(1),
+    ])
+    .split(frame.area());
+
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec!["Focus a project".bold()]),
+            Line::from("Per-repo rows are limited to the choice; global ones always show.".dim()),
+        ]),
+        chunks[0],
+    );
+
+    let mut lines = vec![entry_line("all projects", app.project_cursor == 0, None)];
+    for (index, repo) in app.projects.iter().enumerate() {
+        let count = app
+            .rows
+            .iter()
+            .filter(|r| {
+                r.key
+                    .host_scopes
+                    .iter()
+                    .any(|s| s.repo() == Some(repo.as_str()))
+            })
+            .count();
+        lines.push(entry_line(
+            &crate::core::model::short_repo(repo),
+            app.project_cursor == index + 1,
+            Some(count),
+        ));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::TOP)
+                .border_style(Style::new().fg(Color::DarkGray)),
+        ),
+        chunks[1],
+    );
+
+    let mut spans = vec![Span::raw(" ")];
+    for (key, what) in [("\u{23ce}", "focus"), ("q", "back")] {
+        spans.push(Span::styled(key, Style::new().fg(Color::Cyan)));
+        spans.push(Span::raw(format!(" {what}   ")));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), chunks[2]);
+}
+
+fn entry_line<'a>(label: &str, selected: bool, count: Option<usize>) -> Line<'a> {
+    let cursor = if selected { "\u{25b8}" } else { " " };
+    let mut spans = vec![
+        Span::raw(format!(" {cursor} ")),
+        Span::raw(label.to_string()),
+    ];
+    if let Some(count) = count {
+        spans.push(Span::raw("   "));
+        spans.push(format!("{count} per-repo row(s)").dim());
+    }
+    let line = Line::from(spans);
+    if selected {
+        line.style(Style::new().add_modifier(Modifier::REVERSED))
+    } else {
+        line
+    }
+}
+
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     let accepted = app.accepted_count();
     let todo = app.todo_count();
@@ -82,6 +158,13 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     for host in app.world.missing_hosts() {
         hosts.push(host.name().to_string().dim());
         hosts.push(" \u{25cb}  ".dim());
+    }
+    if let Some(project) = &app.project_filter {
+        hosts.push("   project: ".dim());
+        hosts.push(Span::styled(
+            crate::core::model::short_repo(project),
+            Style::new().fg(Color::Magenta),
+        ));
     }
 
     let counts = if accepted > 0 {
@@ -255,12 +338,13 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let keys: [(&str, &str); 7] = [
+    let keys: [(&str, &str); 8] = [
         ("space", "accept"),
         ("e", "change"),
         ("A", "accept section"),
-        ("d", "delete"),
+        ("d", "remove"),
         ("v", "show synced"),
+        ("p", "project"),
         ("r", "rescan"),
         ("\u{23ce}", "run"),
     ];

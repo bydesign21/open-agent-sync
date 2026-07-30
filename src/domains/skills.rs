@@ -27,6 +27,78 @@ use crate::paths;
 
 use super::World;
 
+/// Hosts that currently have this skill in any form.
+fn present_hosts(states: &BTreeMap<String, SkillState>) -> Vec<String> {
+    states
+        .iter()
+        .filter(|(_, s)| s.present())
+        .map(|(h, _)| h.clone())
+        .collect()
+}
+
+/// Removal actions whose labels say what will actually be destroyed.
+///
+/// The generic helper would label every one of these "delete", but for skills the
+/// difference is enormous: removing a symlink is trivially reversible, while
+/// removing a host's real directory when nothing else holds the content destroys
+/// the only copy. A row that says "delete everywhere" when it means "delete the
+/// only copy" is how work gets lost, so the two are named differently.
+fn skill_removals(
+    states: &BTreeMap<String, SkillState>,
+    canonical_exists: bool,
+    from_manifest: bool,
+) -> Vec<Action> {
+    let present = present_hosts(states);
+    if present.is_empty() {
+        return Vec::new();
+    }
+
+    let destroys =
+        |host: &str| !canonical_exists && matches!(states.get(host), Some(SkillState::RealDir));
+    let verb_for = |host: &str| {
+        if destroys(host) {
+            "delete the only copy on"
+        } else {
+            "unlink from"
+        }
+    };
+
+    let any_destroys = present.iter().any(|h| destroys(h));
+    let mut out = vec![Action::new(
+        if any_destroys {
+            format!(
+                "delete from {} \u{2014} destroys the only copy (backed up)",
+                join_hosts(&present)
+            )
+        } else {
+            format!("unlink from {}", join_hosts(&present))
+        },
+        ActionKind::Delete {
+            hosts: present.clone(),
+            from_manifest,
+            purge: false,
+        },
+    )];
+
+    if present.len() > 1 {
+        for host in &present {
+            out.push(Action::new(
+                if destroys(host) {
+                    format!("{} {host} (backed up)", verb_for(host))
+                } else {
+                    format!("{} {host} only", verb_for(host))
+                },
+                ActionKind::Delete {
+                    hosts: vec![host.clone()],
+                    from_manifest: false,
+                    purge: false,
+                },
+            ));
+        }
+    }
+    out
+}
+
 /// Where a skill's canonical content lives, honouring a manifest override.
 fn canonical_path(world: &World, name: &str) -> PathBuf {
     match world.manifest.skills.get(name) {
@@ -176,15 +248,10 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
                             hosts: real_dirs.clone(),
                         },
                     ),
-                    Action::new(
-                        "delete everywhere",
-                        ActionKind::Delete {
-                            hosts: states.keys().cloned().collect(),
-                            from_manifest: false,
-                            purge: false,
-                        },
-                    ),
-                ],
+                ]
+                .into_iter()
+                .chain(skill_removals(&states, canonical.exists(), false))
+                .collect(),
                 chosen: 0,
                 accepted: false,
                 key: RowKey {
@@ -308,22 +375,22 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
                                 hosts: linked.clone(),
                             },
                         ),
-                        Action::new(
-                            "delete everywhere",
-                            ActionKind::Delete {
-                                hosts: states.keys().cloned().collect(),
-                                from_manifest: true,
-                                purge: false,
-                            },
-                        ),
-                    ],
+                    ]
+                    .into_iter()
+                    .chain(skill_removals(&states, canonical.exists(), true))
+                    .collect(),
                     chosen: 0,
                     accepted: false,
                     key: RowKey::default(),
                 });
             }
 
-            Some(Row::synced(Domain::Skills, name, detail))
+            Some(Row::synced_removable(
+                Domain::Skills,
+                name,
+                detail,
+                skill_removals(&states, canonical.exists(), true),
+            ))
         }
     }
 }
@@ -385,11 +452,33 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                     _ => {}
                 }
             }
-            if *from_manifest {
-                plan.push(
-                    format!("drop {name} from the manifest"),
-                    Step::Manifest(ManifestOp::RemoveSkill(name.clone())),
-                );
+            // Unlinking from one host while the manifest still wants it
+            // everywhere just re-links it next run.
+            if let Some(entry) = world.manifest.skills.get(&name) {
+                let targeted: Vec<String> = world
+                    .detected()
+                    .filter(|(h, _)| h.descriptor.skills.is_some() && entry.targets_host(h.name()))
+                    .map(|(h, _)| h.name().to_string())
+                    .collect();
+                let remaining: Vec<String> = targeted
+                    .iter()
+                    .filter(|h| !hosts.contains(h))
+                    .cloned()
+                    .collect();
+                if *from_manifest || remaining.is_empty() {
+                    plan.push(
+                        format!("drop {name} from the manifest"),
+                        Step::Manifest(ManifestOp::RemoveSkill(name.clone())),
+                    );
+                } else if remaining.len() < targeted.len() {
+                    plan.push(
+                        format!("narrow {name} to {}", join_hosts(&remaining)),
+                        Step::Manifest(ManifestOp::SetSkillHosts {
+                            name: name.clone(),
+                            hosts: Some(remaining),
+                        }),
+                    );
+                }
             }
             if *purge {
                 plan.push(

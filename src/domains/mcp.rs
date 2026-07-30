@@ -3,7 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use crate::core::diff::{Action, ActionKind, Domain, Row, RowKey, Severity, join_hosts};
+use crate::core::diff::{
+    Action, ActionKind, Domain, Row, RowKey, Severity, join_hosts, removal_actions,
+};
 use crate::core::model::{Cap, McpServer, Scope, ScopeKind, Transport, short_repo};
 use crate::core::plan::{ManifestOp, Plan, Step};
 use crate::hosts::Host;
@@ -157,14 +159,7 @@ fn unmanaged_row(
             format!("adopt with the token moved to ${var}"),
             ActionKind::SecretToEnv { var },
         ));
-        actions.push(Action::new(
-            "delete everywhere",
-            ActionKind::Delete {
-                hosts: present.clone(),
-                from_manifest: false,
-                purge: false,
-            },
-        ));
+        actions.extend(removal_actions(&present, "delete", false));
     } else if let Some((host, scopes)) = shadowing.first() {
         severity = Severity::Warn;
         headline = format!("defined at {} scopes on {host}", scopes.len());
@@ -241,14 +236,7 @@ fn unmanaged_row(
                 },
             ));
         }
-        actions.push(Action::new(
-            "delete everywhere",
-            ActionKind::Delete {
-                hosts: present.clone(),
-                from_manifest: false,
-                purge: false,
-            },
-        ));
+        actions.extend(removal_actions(&present, "delete", false));
     }
 
     if !extra.is_empty() {
@@ -465,15 +453,14 @@ fn managed_row(
                         hosts: present_of(&capable, &missing),
                     },
                 ),
-                Action::new(
-                    "delete everywhere",
-                    ActionKind::Delete {
-                        hosts: host_entries.keys().cloned().collect(),
-                        from_manifest: true,
-                        purge: false,
-                    },
-                ),
-            ],
+            ]
+            .into_iter()
+            .chain(removal_actions(
+                &host_entries.keys().cloned().collect::<Vec<_>>(),
+                "delete",
+                true,
+            ))
+            .collect(),
         )
     } else if capable.is_empty() && !blocked.is_empty() {
         // Nothing can hold it. Recording the divergence is the only honest fix.
@@ -511,7 +498,16 @@ fn managed_row(
         if !extra.is_empty() {
             detail = format!("{detail}   \u{b7}   {}", extra.join("   \u{b7}   "));
         }
-        let mut row = Row::synced(Domain::Mcp, name, detail);
+        let mut row = Row::synced_removable(
+            Domain::Mcp,
+            name,
+            detail,
+            removal_actions(
+                &host_entries.keys().cloned().collect::<Vec<_>>(),
+                "delete",
+                true,
+            ),
+        );
         row.key = key;
         return Some(row);
     };
@@ -670,12 +666,7 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                     }
                 }
             }
-            if *from_manifest {
-                plan.push(
-                    format!("drop {name} from the manifest"),
-                    Step::Manifest(ManifestOp::RemoveMcp(name.clone())),
-                );
-            }
+            record_narrowing(world, &name, hosts, *from_manifest, plan);
         }
 
         ActionKind::KeepDivergent { hosts } => {
@@ -764,6 +755,50 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                 )),
             );
         }
+    }
+}
+
+/// After removing from `removed`, make the manifest agree.
+///
+/// Removing from one host while the manifest still wants it everywhere is futile
+/// — the next run reports it as missing and offers to put it back. So a partial
+/// removal narrows `hosts = [...]` to what remains, and a total removal drops the
+/// entry.
+fn record_narrowing(
+    world: &World,
+    name: &str,
+    removed: &[String],
+    from_manifest: bool,
+    plan: &mut Plan,
+) {
+    let Some(entry) = world.manifest.mcp.get(name) else {
+        return;
+    };
+
+    let targeted: Vec<String> = world
+        .detected()
+        .filter(|(h, _)| h.descriptor.mcp.is_some() && entry.targets_host(h.name()))
+        .map(|(h, _)| h.name().to_string())
+        .collect();
+    let remaining: Vec<String> = targeted
+        .iter()
+        .filter(|h| !removed.contains(h))
+        .cloned()
+        .collect();
+
+    if from_manifest || remaining.is_empty() {
+        plan.push(
+            format!("drop {name} from the manifest"),
+            Step::Manifest(ManifestOp::RemoveMcp(name.to_string())),
+        );
+    } else if remaining.len() < targeted.len() {
+        plan.push(
+            format!("narrow {name} to {}", join_hosts(&remaining)),
+            Step::Manifest(ManifestOp::SetMcpHosts {
+                name: name.to_string(),
+                hosts: Some(remaining),
+            }),
+        );
     }
 }
 

@@ -111,9 +111,35 @@ bug — one silently wins.
 
 agentsync shows every scope in one list rather than making you switch between
 them, collapses a name that appears in several repos into one row, and defaults a
-shadowed entry to a single global definition. `>` promote / demote is expressed as
-the `adopt + make global` action, which removes the per-repo copies before the
-global one lands so the name is never at two scopes at once.
+shadowed entry to a single global definition. Promotion is the `adopt + make
+global` action, which removes the per-repo copies before the global one lands so
+the name is never at two scopes at once.
+
+`p` focuses one project: per-repo rows are limited to it, while rows that are
+global by nature (skills, plugins, user-scope servers) always stay visible —
+hiding those would make the filter look like data loss. The picker offers every
+repo under consideration: the manifest's, the current directory, anything
+discovered in a host's per-repo config, and any passed with `--repo <path>`. A
+repo with no agent configuration yet can only come from `--repo`, since there is
+nothing to discover it by.
+
+## Removing things
+
+Every row can be removed, including rows that are in sync — otherwise the only way
+to delete something would be to break it first. Press `d` to cycle the removal
+options: all hosts, then each host individually.
+
+Removing from *some* hosts narrows `hosts = [...]` in the manifest to whatever
+remains. Without that the next run would report the entry as missing and offer to
+put it straight back.
+
+The default action on an in-sync row is always "nothing to do", so `A` and
+`apply --yes` can never delete anything.
+
+For skills the labels distinguish what is actually destroyed: unlinking a symlink
+is trivially reversible, whereas removing a host's real directory when nothing
+else holds the content destroys the only copy, and the action says so. Either way
+the content is copied to `~/.config/agentsync/backups/` first.
 
 ## Adding another CLI
 

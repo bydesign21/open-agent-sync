@@ -5,17 +5,19 @@
 //! `openai-api-curated` under different marketplace names, and plenty of plugins
 //! exist in only one. So:
 //!
-//! * The manifest stores a **plugin name**, not a `name@marketplace` id. Both
-//!   CLIs accept a bare name and resolve it against whatever marketplaces the
-//!   host has, so the id is derived per host rather than declared.
-//! * `marketplace = "..."` is an optional pin, for when a host offers the same
-//!   name from two marketplaces.
-//! * A host with no provider for a name is **unavailable**, not drifted. Treating
-//!   it as drift would nag forever about something that cannot be fixed.
+//! * The manifest stores a **plugin name**, not a `name@marketplace` id, and the
+//!   id is resolved per host from that host's marketplace manifests. Neither CLI
+//!   resolves a bare name, so the marketplace must be looked up, never assumed.
+//! * `marketplace = "..."` is an optional pin, for when several of one host's
+//!   marketplaces offer the same name.
+//! * A name no configured marketplace offers is **not available**, not drift.
+//!   Treating it as drift would nag forever about something that cannot be fixed.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::core::diff::{Action, ActionKind, Domain, Row, RowKey, Severity, join_hosts};
+use crate::core::diff::{
+    Action, ActionKind, Domain, Row, RowKey, Severity, join_hosts, removal_actions,
+};
 use crate::core::model::MarketplaceSource;
 use crate::core::plan::{ManifestOp, Plan, Step};
 use crate::manifest::MarketplaceEntry;
@@ -138,10 +140,11 @@ fn marketplace_row(world: &World, name: &str) -> Option<Row> {
                 .cloned()
                 .collect();
             if missing.is_empty() {
-                return Some(Row::synced(
+                return Some(Row::synced_removable(
                     Domain::Plugins,
                     format!("marketplace {name}"),
                     source.to_string(),
+                    removal_actions(&present.keys().cloned().collect::<Vec<_>>(), "remove", true),
                 ));
             }
             let kept: Vec<String> = present.keys().cloned().collect();
@@ -160,15 +163,14 @@ fn marketplace_row(world: &World, name: &str) -> Option<Row> {
                         format!("keep {}-only", join_hosts(&kept)),
                         ActionKind::KeepDivergent { hosts: kept },
                     ),
-                    Action::new(
-                        "delete everywhere",
-                        ActionKind::Delete {
-                            hosts: present.keys().cloned().collect(),
-                            from_manifest: true,
-                            purge: false,
-                        },
-                    ),
-                ],
+                ]
+                .into_iter()
+                .chain(removal_actions(
+                    &present.keys().cloned().collect::<Vec<_>>(),
+                    "remove",
+                    true,
+                ))
+                .collect(),
                 chosen: 0,
                 accepted: false,
                 key,
@@ -327,16 +329,11 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
                                 hosts: hosts.clone(),
                             },
                         ),
-                        Action::new(
-                            "uninstall everywhere",
-                            ActionKind::Delete {
-                                hosts,
-                                from_manifest: false,
-                                purge: false,
-                            },
-                        ),
                         Action::new("leave it", ActionKind::Nothing),
-                    ],
+                    ]
+                    .into_iter()
+                    .chain(removal_actions(&hosts, "uninstall", false))
+                    .collect(),
                     chosen: 0,
                     accepted: false,
                     key,
@@ -370,15 +367,10 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
                             hosts: hosts.clone(),
                         },
                     ),
-                    Action::new(
-                        "uninstall everywhere",
-                        ActionKind::Delete {
-                            hosts,
-                            from_manifest: false,
-                            purge: false,
-                        },
-                    ),
-                ],
+                ]
+                .into_iter()
+                .chain(removal_actions(&hosts, "uninstall", false))
+                .collect(),
                 chosen: 0,
                 accepted: false,
                 key,
@@ -441,7 +433,16 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
 
             if missing.is_empty() {
                 if unavailable.is_empty() {
-                    return Some(Row::synced(Domain::Plugins, name, detail));
+                    return Some(Row::synced_removable(
+                        Domain::Plugins,
+                        name,
+                        detail,
+                        removal_actions(
+                            &installed.keys().cloned().collect::<Vec<_>>(),
+                            "uninstall",
+                            true,
+                        ),
+                    ));
                 }
                 let kept: Vec<String> = installed.keys().cloned().collect();
                 return Some(Row {
@@ -481,15 +482,10 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
                             hosts: kept.clone(),
                         },
                     ),
-                    Action::new(
-                        "uninstall everywhere",
-                        ActionKind::Delete {
-                            hosts: kept,
-                            from_manifest: true,
-                            purge: false,
-                        },
-                    ),
-                ],
+                ]
+                .into_iter()
+                .chain(removal_actions(&kept, "uninstall", true))
+                .collect(),
                 chosen: 0,
                 accepted: false,
                 key,
@@ -754,11 +750,31 @@ fn plan_plugin_row(world: &World, row: &Row, plan: &mut Plan) {
                     Err(e) => plan.note(format!("{name}: {hname} \u{2014} {e:#}")),
                 }
             }
-            if *from_manifest {
-                plan.push(
-                    format!("drop {name} from the manifest"),
-                    Step::Manifest(ManifestOp::RemovePlugin(name.clone())),
-                );
+            if let Some(entry) = world.manifest.plugins.get(&name) {
+                let targeted: Vec<String> = world
+                    .detected()
+                    .filter(|(h, _)| h.descriptor.plugins.is_some() && entry.targets_host(h.name()))
+                    .map(|(h, _)| h.name().to_string())
+                    .collect();
+                let remaining: Vec<String> = targeted
+                    .iter()
+                    .filter(|h| !hosts.contains(h))
+                    .cloned()
+                    .collect();
+                if *from_manifest || remaining.is_empty() {
+                    plan.push(
+                        format!("drop {name} from the manifest"),
+                        Step::Manifest(ManifestOp::RemovePlugin(name.clone())),
+                    );
+                } else if remaining.len() < targeted.len() {
+                    plan.push(
+                        format!("narrow {name} to {}", join_hosts(&remaining)),
+                        Step::Manifest(ManifestOp::SetPluginHosts {
+                            name: name.clone(),
+                            hosts: Some(remaining),
+                        }),
+                    );
+                }
             }
         }
 

@@ -31,6 +31,8 @@ enum Screen {
     /// Executing. Entered by the key handler, acted on by the event loop, which
     /// is what keeps `handle_key` free of terminal plumbing and testable.
     Running,
+    /// Choosing which repo's per-repo configuration to focus on.
+    Projects,
     /// Showing what happened.
     Result,
 }
@@ -58,6 +60,14 @@ pub struct App {
     flash: Option<String>,
     manifest_path: PathBuf,
     repos: Vec<String>,
+
+    /// When set, per-repo rows are limited to this repo. Rows that are global by
+    /// nature (skills, plugins, user-scope servers) are always shown, because
+    /// hiding them would make the filter look like data loss.
+    project_filter: Option<String>,
+    /// Repos offered by the picker; index 0 is "all projects".
+    projects: Vec<String>,
+    project_cursor: usize,
 }
 
 /// Execute a plan on a worker thread while repainting a live progress screen.
@@ -158,9 +168,58 @@ impl App {
             flash: None,
             manifest_path,
             repos,
+            project_filter: None,
+            projects: Vec::new(),
+            project_cursor: 0,
         };
+        app.rebuild_projects();
         app.rebuild_items();
         app
+    }
+
+    /// Every repo under consideration, for the picker.
+    ///
+    /// This is `world.repos` — the manifest's repos, the current directory, any
+    /// `--repo` flags, and anything discovered in a host's per-repo config — not
+    /// merely the repos that already have entries. A repo with nothing in it yet
+    /// is exactly the one you want to focus in order to put something there.
+    fn rebuild_projects(&mut self) {
+        let mut projects = self.world.repos.clone();
+        for repo in crate::domains::repos_in_use(&self.world) {
+            if !projects.contains(&repo) {
+                projects.push(repo);
+            }
+        }
+        projects.sort();
+        self.projects = projects;
+        self.project_cursor = match &self.project_filter {
+            Some(active) => self
+                .projects
+                .iter()
+                .position(|p| p == active)
+                .map(|i| i + 1)
+                .unwrap_or(0),
+            None => 0,
+        };
+    }
+
+    /// Does this row belong to the focused project?
+    ///
+    /// A row with no repo at all is global and always shown.
+    fn in_focus(&self, row: &Row) -> bool {
+        let Some(focus) = &self.project_filter else {
+            return true;
+        };
+        let repos: Vec<&str> = row
+            .key
+            .host_scopes
+            .iter()
+            .filter_map(|s| s.repo())
+            .collect();
+        if repos.is_empty() {
+            return true;
+        }
+        repos.contains(&focus.as_str())
     }
 
     /// Recompute the visible line list, keeping the cursor on a row.
@@ -172,7 +231,9 @@ impl App {
                 .iter()
                 .enumerate()
                 .filter(|(_, r)| {
-                    r.domain == domain && (self.show_synced || r.severity != Severity::Synced)
+                    r.domain == domain
+                        && (self.show_synced || r.severity != Severity::Synced)
+                        && self.in_focus(r)
                 })
                 .map(|(i, _)| i)
                 .collect();
@@ -265,22 +326,63 @@ impl App {
         self.flash = Some(format!("accepted {n} in {}", domain.title().to_lowercase()));
     }
 
-    /// Jump the selected row to its delete action, if it has one.
+    /// Cycle the selected row through its removal actions.
+    ///
+    /// Cycling rather than jumping is what makes per-host removal reachable:
+    /// press `d` again to go from "delete from both" to "delete from codex only".
     fn choose_delete(&mut self) {
         let Some(i) = self.selected() else { return };
         let row = &mut self.rows[i];
-        match row
+        let removals: Vec<usize> = row
             .actions
             .iter()
-            .position(|a| matches!(a.kind, ActionKind::Delete { .. }))
-        {
-            Some(pos) => {
-                row.chosen = pos;
-                row.accepted = true;
-                self.flash = Some(format!("{}: {}", row.name, row.action().label));
-            }
-            None => self.flash = Some(format!("{} has no delete action", row.name)),
+            .enumerate()
+            .filter(|(_, a)| matches!(a.kind, ActionKind::Delete { .. }))
+            .map(|(n, _)| n)
+            .collect();
+        if removals.is_empty() {
+            self.flash = Some(format!("{} cannot be removed from here", row.name));
+            return;
         }
+        // Advance to the next removal after the current selection, wrapping.
+        let next = removals
+            .iter()
+            .find(|n| **n > row.chosen)
+            .copied()
+            .unwrap_or(removals[0]);
+        row.chosen = next;
+        row.accepted = true;
+        self.flash = Some(format!(
+            "{}: {}   ({} of {} removal options)",
+            row.name,
+            row.action().label,
+            removals.iter().position(|n| *n == next).unwrap() + 1,
+            removals.len()
+        ));
+    }
+
+    fn open_projects(&mut self) {
+        self.rebuild_projects();
+        if self.projects.is_empty() {
+            self.flash =
+                Some("no per-repo configuration found; pass --repo <path> to add one".into());
+            return;
+        }
+        self.screen = Screen::Projects;
+    }
+
+    fn choose_project(&mut self) {
+        self.project_filter = if self.project_cursor == 0 {
+            None
+        } else {
+            self.projects.get(self.project_cursor - 1).cloned()
+        };
+        self.rebuild_items();
+        self.screen = Screen::Review;
+        self.flash = Some(match &self.project_filter {
+            Some(p) => format!("focused on {}", crate::core::model::short_repo(p)),
+            None => "showing all projects".into(),
+        });
     }
 
     fn toggle_synced(&mut self) {
@@ -353,6 +455,7 @@ impl App {
             terminal.draw(|frame| match self.screen {
                 Screen::Review => review::draw(self, frame),
                 Screen::Run => run::draw_plan(self, frame),
+                Screen::Projects => review::draw_projects(self, frame),
                 Screen::Result | Screen::Running => run::draw_result(self, frame),
             })?;
 
@@ -386,6 +489,7 @@ impl App {
                 KeyCode::Char('A') => self.accept_section(),
                 KeyCode::Char('d') => self.choose_delete(),
                 KeyCode::Char('v') => self.toggle_synced(),
+                KeyCode::Char('p') => self.open_projects(),
                 KeyCode::Char('r') => self.rescan()?,
                 KeyCode::Enter => {
                     if self.accepted_count() == 0 {
@@ -405,6 +509,18 @@ impl App {
                 }
                 KeyCode::Char('c') => self.write_script(),
                 KeyCode::Char('y') => self.screen = Screen::Running,
+                _ => {}
+            },
+
+            Screen::Projects => match key.code {
+                KeyCode::Char('q') | KeyCode::Esc => self.screen = Screen::Review,
+                KeyCode::Char('j') | KeyCode::Down => {
+                    self.project_cursor = (self.project_cursor + 1).min(self.projects.len());
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    self.project_cursor = self.project_cursor.saturating_sub(1);
+                }
+                KeyCode::Enter => self.choose_project(),
                 _ => {}
             },
 

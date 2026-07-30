@@ -164,6 +164,23 @@ impl Row {
         }
     }
 
+    /// An in-sync row that can still be removed.
+    ///
+    /// Removal has to be reachable from a row that is *not* a difference —
+    /// otherwise the only way to delete something is to break it first. The
+    /// default stays [`ActionKind::Nothing`] so "accept everything" can never
+    /// delete anything.
+    pub fn synced_removable(
+        domain: Domain,
+        name: impl Into<String>,
+        detail: impl Into<String>,
+        removals: Vec<Action>,
+    ) -> Self {
+        let mut row = Row::synced(domain, name, detail);
+        row.actions.extend(removals);
+        row
+    }
+
     pub fn action(&self) -> &Action {
         &self.actions[self.chosen.min(self.actions.len() - 1)]
     }
@@ -193,6 +210,46 @@ impl fmt::Display for Row {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} \u{2014} {}", self.name, self.headline)
     }
+}
+
+/// Removal actions for something present on `hosts`: all of them, then one per
+/// host.
+///
+/// Per-host removal is the point: "get this out of Codex but keep it in Claude"
+/// is a normal thing to want, and doing it by hand means remembering to also
+/// narrow the manifest or it comes straight back as drift. The planner adds that
+/// narrowing automatically.
+pub fn removal_actions(hosts: &[String], verb: &str, from_manifest: bool) -> Vec<Action> {
+    if hosts.is_empty() {
+        return Vec::new();
+    }
+    let mut out = vec![Action::new(
+        if hosts.len() > 1 {
+            format!("{verb} from {}", join_hosts(hosts))
+        } else {
+            format!("{verb} from {}", hosts[0])
+        },
+        ActionKind::Delete {
+            hosts: hosts.to_vec(),
+            from_manifest,
+            purge: false,
+        },
+    )];
+    if hosts.len() > 1 {
+        for host in hosts {
+            out.push(Action::new(
+                format!("{verb} from {host} only"),
+                ActionKind::Delete {
+                    hosts: vec![host.clone()],
+                    // Narrowing, not removing: the planner records which hosts
+                    // remain so this does not reappear as drift.
+                    from_manifest: false,
+                    purge: false,
+                },
+            ));
+        }
+    }
+    out
 }
 
 /// Join host names for a headline: `claude`, `claude and codex`,
