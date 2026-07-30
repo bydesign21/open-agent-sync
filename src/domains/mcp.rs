@@ -437,30 +437,32 @@ fn managed_row(
             ],
         )
     } else if !missing.is_empty() {
+        let mut actions = vec![Action::new(
+            format!("add to {}", join_hosts(&missing)),
+            ActionKind::Push {
+                hosts: missing.clone(),
+            },
+        )];
+        // Only offer recorded divergence when some host actually keeps it:
+        // "keep nothing-only" is not a thing.
+        let keeping = present_of(&capable, &missing);
+        if !keeping.is_empty() {
+            actions.push(Action::new(
+                format!("keep {}-only", join_hosts(&keeping)),
+                ActionKind::KeepDivergent {
+                    hosts: keeping.clone(),
+                },
+            ));
+        }
+        actions.extend(removal_actions(
+            &host_entries.keys().cloned().collect::<Vec<_>>(),
+            "delete",
+            true,
+        ));
         (
             Severity::Normal,
             format!("missing from {}", join_hosts(&missing)),
-            vec![
-                Action::new(
-                    format!("add to {}", join_hosts(&missing)),
-                    ActionKind::Push {
-                        hosts: missing.clone(),
-                    },
-                ),
-                Action::new(
-                    format!("keep {}-only", join_hosts(&present_of(&capable, &missing))),
-                    ActionKind::KeepDivergent {
-                        hosts: present_of(&capable, &missing),
-                    },
-                ),
-            ]
-            .into_iter()
-            .chain(removal_actions(
-                &host_entries.keys().cloned().collect::<Vec<_>>(),
-                "delete",
-                true,
-            ))
-            .collect(),
+            actions,
         )
     } else if capable.is_empty() && !blocked.is_empty() {
         // Nothing can hold it. Recording the divergence is the only honest fix.

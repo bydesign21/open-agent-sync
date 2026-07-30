@@ -564,6 +564,62 @@ fn an_in_sync_row_can_be_removed_but_never_by_accepting_everything() {
 }
 
 #[test]
+fn a_manifest_entry_on_no_host_can_still_be_dropped() {
+    // Nothing to uninstall, but the entry itself has to be removable — otherwise
+    // a server that never installed anywhere is reported forever with no way out.
+    let mut manifest = Manifest::default();
+    let server = http("linear", "https://mcp.linear.app/mcp");
+    manifest.mcp.insert(
+        "linear".into(),
+        McpEntry::from_server(&server, ScopeKind::User, vec![]),
+    );
+    let w = world(manifest, snapshot("claude", &[]), snapshot("codex", &[]));
+
+    let mut rows = w.rows();
+    let row = find(&rows, "linear");
+    assert_eq!(row.headline, "missing from claude and codex");
+    // "keep nothing-only" is not a thing.
+    assert!(
+        !row.actions.iter().any(|a| a.label.contains("nothing-only")),
+        "{:?}",
+        row.actions.iter().map(|a| &a.label).collect::<Vec<_>>()
+    );
+
+    let pos = row
+        .actions
+        .iter()
+        .position(|a| a.label.contains("drop it from the manifest"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a manifest-drop action in {:?}",
+                row.actions.iter().map(|a| &a.label).collect::<Vec<_>>()
+            )
+        });
+    for r in rows.iter_mut() {
+        if r.name == "linear" {
+            r.chosen = pos;
+            r.accepted = true;
+        }
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        plan.steps.iter().any(|s| matches!(
+            &s.step,
+            Step::Manifest(agentsync::core::plan::ManifestOp::RemoveMcp(n)) if n == "linear"
+        )),
+        "{:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert!(
+        !plan
+            .steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::Host { .. })),
+        "there is nothing installed, so no host command should run"
+    );
+}
+
+#[test]
 fn removing_from_one_host_narrows_the_manifest_instead_of_dropping_it() {
     let server = http("shared", "https://example.test/mcp");
     let mut manifest = Manifest::default();

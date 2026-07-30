@@ -11,25 +11,8 @@ Tokens end up sitting in plaintext in a JSON file.
 `agentsync` shows you a to-do list of those differences and lets you resolve them
 one keypress at a time.
 
-```
-agentsync     12 to review   ·   4 accepted
-hosts: claude ●  codex ●
- MCP SERVERS
- ▸ ✓ atlassian_rovo        only in codex                  adopt + add to the others
-   ✓ kicad                 only in claude                 adopt + add to the others
-     pulumi                only in claude, 1 repo          adopt + make global
-   ! tradingview           defined at 2 scopes on claude   adopt + make global (drops the duplicates)
-   ! upskillai-knowledge   credential in the clear         adopt with the token moved to $UPSKILLAI_KNOWLEDGE_TOKEN
- SKILLS
-   ✓ sentry-workflow       only in codex                   adopt + link into the others
- PLUGINS
-     superpowers           only in claude                  adopt + install in the others
-     everything-evenhub    no provider on codex            —
-─────────────────────────────────────────────────────────────────────────────────────
- atlassian_rovo  —  http · https://mcp.atlassian.com/v1/mcp
- e cycles to: adopt only, don't push  ·  keep codex-only  ·  delete everywhere
- space accept   e change   A accept section   d delete   v show synced   r rescan   ⏎ run
-```
+<img src="docs/screens/review.svg" alt="the review list" width="100%">
+
 
 ## Install
 
@@ -40,18 +23,25 @@ prints `arm64` on Apple Silicon and `x86_64` on Intel.
 
 ```sh
 VERSION=v0.0.1
+REPO=https://github.com/bydesign21/open-agent-sync
 case "$(uname -m)" in
   arm64)  TARGET=aarch64-apple-darwin ;;
   x86_64) TARGET=x86_64-apple-darwin  ;;
 esac
+ASSET="agentsync-$VERSION-$TARGET.tar.gz"
 
-curl -fsSL -o agentsync.tar.gz \
-  "https://github.com/bydesign21/open-agent-sync/releases/download/$VERSION/agentsync-$VERSION-$TARGET.tar.gz"
-tar -xzf agentsync.tar.gz
-mkdir -p ~/.local/bin && mv agentsync ~/.local/bin/ && rm agentsync.tar.gz
+# Keep the published filename: SHA256SUMS refers to it by name, and renaming the
+# download makes `shasum -c --ignore-missing` verify nothing and still exit 0.
+curl -fsSLO "$REPO/releases/download/$VERSION/$ASSET"
+curl -fsSLO "$REPO/releases/download/$VERSION/SHA256SUMS"
+shasum -a 256 -c SHA256SUMS --ignore-missing
+
+tar -xzf "$ASSET"
+mkdir -p ~/.local/bin && mv agentsync ~/.local/bin/ && rm "$ASSET" SHA256SUMS
 ```
 
-Make sure `~/.local/bin` is on your `PATH`, then check it:
+That should print `...tar.gz: OK`. Make sure `~/.local/bin` is on your `PATH`,
+then check it:
 
 ```sh
 agentsync --version
@@ -61,13 +51,6 @@ macOS may quarantine a downloaded binary. If it refuses to run:
 
 ```sh
 xattr -d com.apple.quarantine ~/.local/bin/agentsync
-```
-
-Verify the download against the checksums published with the release:
-
-```sh
-curl -fsSLO "https://github.com/bydesign21/open-agent-sync/releases/download/$VERSION/SHA256SUMS"
-shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
 ### From source with cargo
@@ -121,6 +104,45 @@ Rows that are already in sync are hidden — press `v` to see them. Nothing is
 modified until you press `⏎`, review the exact commands, and confirm with `y`.
 `c` on that screen writes the plan out as a shell script if you would rather run
 it yourself.
+
+## The screens
+
+Every image below is a real run, captured from a terminal. They use a demo
+fixture — see [`docs/screenshots/`](docs/screenshots/) — so they stay stable and
+cover the interesting states rather than whatever happens to be on one machine.
+
+**Accepting rows.** `space` accepts one, `A` accepts a whole section, `e` cycles
+the action. The count in the header tracks what is staged; nothing has run yet.
+
+<img src="docs/screens/review-accepted.svg" alt="rows accepted, with the staged count in the header" width="100%">
+
+**Removing things.** `v` reveals the rows that are in sync — dimmed, defaulting to
+"nothing to do" so accept-all can never delete. `d` cycles the removal options,
+and the detail line lists the per-host alternatives.
+
+<img src="docs/screens/removal.svg" alt="in-sync rows revealed, with per-host removal options" width="100%">
+
+**Focusing a project.** `p` limits per-repo rows to one repo. Rows that are global
+by nature stay visible.
+
+<img src="docs/screens/projects.svg" alt="the project picker" width="100%">
+
+**The plan gate.** `⏎` shows every step with the exact command it will run,
+including the working directory for repo-scoped operations. Nothing has been
+modified at this point. `c` exports it as a shell script.
+
+<img src="docs/screens/plan.svg" alt="the plan, showing the exact command for every step" width="100%">
+
+**Running.** Progress streams as it goes: a spinner on the step in flight, a
+count, and completed steps marked as they land. Keystrokes are discarded so
+nothing typed while waiting fires afterwards.
+
+<img src="docs/screens/running.svg" alt="streaming progress during a run" width="100%">
+
+**The result.** What was done, what failed with the host's own stderr, and what was
+skipped — including steps you have to finish yourself, like exporting a token.
+
+<img src="docs/screens/result.svg" alt="the result screen" width="100%">
 
 ## How it works
 

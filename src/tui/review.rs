@@ -17,6 +17,10 @@ const SEPARATORS: usize = 4;
 /// happen, so it is the last thing that should be truncated.
 const MIN_ACTION_W: usize = 24;
 
+/// Row highlight. A dark neutral so the per-column colours stay readable on top
+/// of it, which `Modifier::REVERSED` cannot do.
+pub(super) const SELECTED_BG: Color = Color::Indexed(237);
+
 /// Column widths sized to the content, then shrunk to fit the terminal.
 ///
 /// Fixed widths truncated real names like `sentry-setup-ai-monitoring` and
@@ -92,7 +96,13 @@ pub fn draw_projects(app: &App, frame: &mut Frame) {
         chunks[0],
     );
 
-    let mut lines = vec![entry_line("all projects", app.project_cursor == 0, None)];
+    let width = chunks[1].width as usize;
+    let mut lines = vec![entry_line(
+        "all projects",
+        app.project_cursor == 0,
+        None,
+        width,
+    )];
     for (index, repo) in app.projects.iter().enumerate() {
         let count = app
             .rows
@@ -108,6 +118,7 @@ pub fn draw_projects(app: &App, frame: &mut Frame) {
             &crate::core::model::short_repo(repo),
             app.project_cursor == index + 1,
             Some(count),
+            width,
         ));
     }
 
@@ -128,19 +139,28 @@ pub fn draw_projects(app: &App, frame: &mut Frame) {
     frame.render_widget(Paragraph::new(Line::from(spans)), chunks[2]);
 }
 
-fn entry_line<'a>(label: &str, selected: bool, count: Option<usize>) -> Line<'a> {
+fn entry_line<'a>(label: &str, selected: bool, count: Option<usize>, width: usize) -> Line<'a> {
     let cursor = if selected { "\u{25b8}" } else { " " };
+    // Pad to the full width so the highlight reads as a row rather than a pill.
     let mut spans = vec![
         Span::raw(format!(" {cursor} ")),
-        Span::raw(label.to_string()),
+        Span::raw(pad(label, 26.min(width.saturating_sub(4)))),
     ];
     if let Some(count) = count {
-        spans.push(Span::raw("   "));
-        spans.push(format!("{count} per-repo row(s)").dim());
+        spans.push(Span::raw("  "));
+        spans.push(
+            pad(
+                &format!("{count} per-repo row(s)"),
+                width.saturating_sub(32),
+            )
+            .dim(),
+        );
+    } else {
+        spans.push(Span::raw(" ".repeat(width.saturating_sub(32))));
     }
     let line = Line::from(spans);
     if selected {
-        line.style(Style::new().add_modifier(Modifier::REVERSED))
+        line.style(Style::new().bg(SELECTED_BG))
     } else {
         line
     }
@@ -258,9 +278,12 @@ fn draw_list(app: &mut App, frame: &mut Frame, area: Rect) {
                     Span::styled(pad(&row.action().label, action_w), action_style),
                 ]);
 
+                // A single background for the whole row, not REVERSED: reversing
+                // swaps each span's own colours, so a row made of differently
+                // coloured columns turns into mismatched bands.
                 let mut line = line;
                 if selected {
-                    line = line.style(Style::new().add_modifier(Modifier::REVERSED));
+                    line = line.style(Style::new().bg(SELECTED_BG));
                 }
                 lines.push(line);
             }

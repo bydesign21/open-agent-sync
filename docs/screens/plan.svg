@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="928" height="564" viewBox="0 0 928 564" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12.5">
+<rect width="928" height="564" rx="8" fill="#12141a"/>
+<circle cx="22" cy="17" r="5.5" fill="#ff5f57"/>
+<circle cx="37" cy="17" r="5.5" fill="#febc2e"/>
+<circle cx="52" cy="17" r="5.5" fill="#28c840"/>
+<text x="464" y="21" fill="#6b7280" text-anchor="middle" font-size="11">agentsync</text>
+<text x="16.0" y="52.5" fill="#d6dae2" font-weight="600" xml:space="preserve">Run</text>
+<text x="48.0" y="52.5" fill="#98c379" font-weight="600" xml:space="preserve">21</text>
+<text x="72.0" y="52.5" fill="#d6dae2" font-weight="600" xml:space="preserve">changes?</text>
+<text x="16.0" y="69.5" fill="#d6dae2" opacity="0.62" xml:space="preserve">Nothing has been modified yet.</text>
+<text x="16.0" y="86.5" fill="#5c6370" xml:space="preserve">────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
+<text x="32.0" y="103.5" fill="#d6dae2" xml:space="preserve">remove playwright from claude (project ▸ repos/webapp)</text>
+<text x="64.0" y="120.5" fill="#5c6370" xml:space="preserve">claude mcp remove playwright    (in ~/repos/webapp)</text>
+<text x="32.0" y="137.5" fill="#d6dae2" xml:space="preserve">remove playwright from codex (project ▸ repos/webapp)</text>
+<text x="64.0" y="154.5" fill="#5c6370" xml:space="preserve">codex mcp remove playwright    (in ~/repos/webapp)</text>
+<text x="32.0" y="171.5" fill="#d6dae2" xml:space="preserve">replace pulumi on claude (project ▸ repos/infra): remove the old definition</text>
+<text x="64.0" y="188.5" fill="#5c6370" xml:space="preserve">claude mcp remove pulumi    (in ~/repos/infra)</text>
+<text x="32.0" y="205.5" fill="#d6dae2" xml:space="preserve">replace pulumi on codex (project ▸ repos/infra): remove the old definition</text>
+<text x="64.0" y="222.5" fill="#5c6370" xml:space="preserve">codex mcp remove pulumi    (in ~/repos/infra)</text>
+<text x="32.0" y="239.5" fill="#d6dae2" xml:space="preserve">replace upskillai-knowledge on claude (user): remove the old definition</text>
+<text x="64.0" y="256.5" fill="#5c6370" xml:space="preserve">claude mcp remove upskillai-knowledge</text>
+<text x="32.0" y="273.5" fill="#d6dae2" xml:space="preserve">adopt atlassian_rovo from codex</text>
+<text x="64.0" y="290.5" fill="#5c6370" xml:space="preserve">manifest: set mcp.atlassian_rovo</text>
+<text x="32.0" y="307.5" fill="#d6dae2" xml:space="preserve">add atlassian_rovo to claude (user)</text>
+<text x="64.0" y="324.5" fill="#5c6370" xml:space="preserve">claude mcp add atlassian_rovo --url &#x27;https://mcp.atlassian.com/v1/mcp&#x27;</text>
+<text x="32.0" y="341.5" fill="#d6dae2" xml:space="preserve">add kicad to codex (user)</text>
+<text x="64.0" y="358.5" fill="#5c6370" xml:space="preserve">codex mcp add kicad -- node /Users/you/repos/kicad-mcp/dist/index.js</text>
+<text x="32.0" y="375.5" fill="#d6dae2" xml:space="preserve">add linear to claude (user)</text>
+<text x="64.0" y="392.5" fill="#5c6370" xml:space="preserve">claude mcp add linear --url &#x27;https://mcp.linear.app/mcp&#x27;</text>
+<text x="32.0" y="409.5" fill="#d6dae2" xml:space="preserve">add linear to codex (user)</text>
+<text x="64.0" y="426.5" fill="#5c6370" xml:space="preserve">codex mcp add linear --url &#x27;https://mcp.linear.app/mcp&#x27;</text>
+<text x="32.0" y="443.5" fill="#d6dae2" xml:space="preserve">adopt playwright from claude</text>
+<text x="64.0" y="460.5" fill="#5c6370" xml:space="preserve">manifest: set mcp.playwright</text>
+<text x="32.0" y="477.5" fill="#d6dae2" xml:space="preserve">add playwright to claude (user)</text>
+<text x="64.0" y="494.5" fill="#5c6370" xml:space="preserve">claude mcp add playwright -- npx -y &#x27;@playwright/mcp&#x27;</text>
+<text x="32.0" y="511.5" fill="#d6dae2" xml:space="preserve">add playwright to codex (user)</text>
+<text x="64.0" y="528.5" fill="#5c6370" xml:space="preserve">codex mcp add playwright -- npx -y &#x27;@playwright/mcp&#x27;</text>
+<text x="24.0" y="545.5" fill="#56b6c2" xml:space="preserve">y</text>
+<text x="40.0" y="545.5" fill="#d6dae2" xml:space="preserve">run</text>
+<text x="88.0" y="545.5" fill="#56b6c2" xml:space="preserve">n</text>
+<text x="104.0" y="545.5" fill="#d6dae2" xml:space="preserve">back</text>
+<text x="160.0" y="545.5" fill="#56b6c2" xml:space="preserve">c</text>
+<text x="176.0" y="545.5" fill="#d6dae2" xml:space="preserve">copy as shell script</text>
+</svg>

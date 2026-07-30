@@ -221,6 +221,19 @@ impl fmt::Display for Row {
 /// narrowing automatically.
 pub fn removal_actions(hosts: &[String], verb: &str, from_manifest: bool) -> Vec<Action> {
     if hosts.is_empty() {
+        // In the manifest but on no host. There is nothing to uninstall, but the
+        // manifest entry itself still has to be removable, or an entry that never
+        // installed anywhere would be reported forever with no way to drop it.
+        if from_manifest {
+            return vec![Action::new(
+                "drop it from the manifest",
+                ActionKind::Delete {
+                    hosts: Vec::new(),
+                    from_manifest: true,
+                    purge: false,
+                },
+            )];
+        }
         return Vec::new();
     }
     let mut out = vec![Action::new(
