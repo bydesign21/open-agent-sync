@@ -706,8 +706,14 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
         ActionKind::SecretToEnv { var } => {
             // Land a corrected definition in the manifest, then push it so the
             // host's own config stops holding the literal too.
+            //
+            // Where the literal lives *right now*, so the manual step can say
+            // where to copy it from. It is deliberately never echoed into the
+            // plan: the plan is printable and exportable as a shell script.
+            let holder;
             let entry = match world.manifest.mcp.get(&name) {
                 Some(existing) => {
+                    holder = "the manifest".to_string();
                     plan.push(
                         format!("point {name} at ${var}"),
                         Step::Manifest(ManifestOp::SetMcpBearerEnv {
@@ -727,6 +733,7 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                         plan.note(format!("{name}: no host value to adopt"));
                         return;
                     };
+                    holder = format!("{source_host}'s own config");
                     let mut e = McpEntry::from_server(
                         &server,
                         scope.kind(),
@@ -748,12 +755,17 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
             };
 
             push_entry(world, &name, &entry, plan, true);
+            // Not "it is in the backup": the manifest's secret gate means the
+            // literal is never written there, and host config files are never
+            // backed up because we do not own them. The only copy is the one
+            // this plan is about to overwrite, so say that.
             plan.push(
                 format!("set ${var} in your shell profile"),
                 Step::Manual(format!(
-                    "export {var}=<the token that was in the config>  \
-                     \u{2014} the old literal is in the backup under {}",
-                    crate::paths::contract(&crate::paths::backups_dir())
+                    "copy the token out of {holder} FIRST, then \
+                     export {var}=<that value> \u{2014} running this plan replaces \
+                     the literal with a ${{{var}}} reference, and nothing keeps a \
+                     copy of it"
                 )),
             );
         }

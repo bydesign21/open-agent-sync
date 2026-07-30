@@ -27,7 +27,7 @@ On macOS or Linux — `uname -m` prints `arm64`/`aarch64` on Apple Silicon and a
 `x86_64` elsewhere:
 
 ```sh
-VERSION=v0.0.4
+VERSION=v0.0.5
 REPO=https://github.com/bydesign21/open-agent-sync
 
 case "$(uname -s)-$(uname -m)" in
@@ -61,7 +61,7 @@ macOS may quarantine a downloaded binary. If it refuses to run:
 xattr -d com.apple.quarantine ~/.local/bin/agentsync
 ```
 
-On Windows, download `agentsync-v0.0.4-x86_64-pc-windows-msvc.zip` from the
+On Windows, download `agentsync-v0.0.5-x86_64-pc-windows-msvc.zip` from the
 [releases page](https://github.com/bydesign21/open-agent-sync/releases), extract
 `agentsync.exe`, and put it somewhere on your `PATH`.
 
@@ -78,7 +78,7 @@ edition 2024. CI checks that against the `rust-version` in `Cargo.toml`, so it i
 not a guess. `rustup` is the easy way to get it.
 
 ```sh
-cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.4
+cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.5
 ```
 
 Or from a clone, which is what you want if you plan to change anything:
@@ -412,7 +412,7 @@ Set `version` in `Cargo.toml` equal to the tag — so `agentsync --version` and 
 release you downloaded agree — then push the tag:
 
 ```sh
-git tag v0.0.5 && git push origin v0.0.5
+git tag v0.0.6 && git push origin v0.0.6
 ```
 
 `.github/workflows/release.yml` builds all five targets, packages them, writes

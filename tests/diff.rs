@@ -484,11 +484,25 @@ fn a_literal_credential_becomes_a_warning_that_moves_it_to_an_env_var() {
     );
 
     // And the user must be told to set the variable, as an explicit manual step.
+    let manual = plan
+        .steps
+        .iter()
+        .find_map(|s| match &s.step {
+            Step::Manual(t) if t.contains("UPSKILLAI_KNOWLEDGE_TOKEN") => Some(t.clone()),
+            _ => None,
+        })
+        .expect("expected a manual step naming the variable");
+
+    // It must not promise a copy that does not exist. The manifest's secret gate
+    // means the literal is never written there, and host config files are never
+    // backed up — so the only copy is the one this plan overwrites.
     assert!(
-        plan.steps
-            .iter()
-            .any(|s| matches!(&s.step, Step::Manual(t) if t.contains("UPSKILLAI_KNOWLEDGE_TOKEN"))),
-        "expected a manual step naming the variable"
+        !manual.contains("backup"),
+        "the manual step must not claim the literal is recoverable from a backup: {manual:?}"
+    );
+    assert!(
+        manual.contains("FIRST") && manual.contains("claude"),
+        "it must say to copy the value out of the host that holds it, first: {manual:?}"
     );
 
     // Lifting the token out also makes it representable on codex.
