@@ -33,6 +33,17 @@ pub enum ManifestOp {
         name: String,
         hosts: Option<Vec<String>>,
     },
+    UpsertInstruction {
+        name: String,
+        source: String,
+        scope: crate::core::model::ScopeKind,
+        repos: Vec<String>,
+    },
+    RemoveInstruction(String),
+    SetInstructionHosts {
+        name: String,
+        hosts: Option<Vec<String>>,
+    },
     UpsertPlugin {
         name: String,
         marketplace: Option<String>,
@@ -81,6 +92,13 @@ impl ManifestOp {
             ManifestOp::RemoveSkill(name) => format!("remove skills.{name}"),
             ManifestOp::SetSkillHosts { name, hosts: h } => {
                 format!("set skills.{name}.hosts = [{}]", hosts(h))
+            }
+            ManifestOp::UpsertInstruction { name, source, .. } => {
+                format!("set instructions.{name}.source = \"{source}\"")
+            }
+            ManifestOp::RemoveInstruction(name) => format!("remove instructions.{name}"),
+            ManifestOp::SetInstructionHosts { name, hosts: h } => {
+                format!("set instructions.{name}.hosts = [{}]", hosts(h))
             }
             ManifestOp::UpsertPlugin { name, marketplace } => match marketplace {
                 Some(m) => format!("set plugins.{name}.marketplace = \"{m}\""),

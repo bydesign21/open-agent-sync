@@ -2,7 +2,8 @@
 
 [![ci](https://github.com/bydesign21/open-agent-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/bydesign21/open-agent-sync/actions/workflows/ci.yml)
 
-Keep your MCP servers, skills, and plugins in sync across agentic coding CLIs.
+Keep your MCP servers, skills, instruction files, and plugins in sync across
+agentic coding CLIs.
 
 If you use more than one of Claude Code, Codex, and friends, your configuration
 drifts. You add an MCP server in one and forget the other. `claude mcp add`
@@ -132,6 +133,7 @@ both host CLIs take the same arguments.
 agentsync              # the review TUI
 agentsync plan         # print the differences and the plan the defaults would produce
 agentsync apply --yes  # accept every default and run it
+agentsync plan --only instructions   # or mcp, skills, plugins
 agentsync doctor       # problems that aren't differences: secrets, unset vars,
                        # dead paths, servers not logged in, and new releases
 agentsync hosts        # what agentsync knows about each CLI
@@ -195,6 +197,31 @@ CLIs hide behind the working directory. But every *change* is made by invoking t
 host's own CLI, because those files hold state that is none of our business —
 Codex's project trust levels, notice flags, model preferences — and a tool that
 takes ownership of the whole file destroys it.
+
+**Instruction files are shared by default.** `CLAUDE.md` and `AGENTS.md` are both
+plain markdown, so one canonical file in `~/.config/agentsync/prompts/` symlinks
+into both — at user, project, and local scope. Shared is the default because most
+of what goes in these files is about the *repo* (package manager, deploy gate,
+conventions) rather than the tool; `hosts = [...]` is the opt-out for the parts
+that genuinely name one CLI.
+
+Two things it will not do. A scope a host has no location for — Codex has no
+counterpart to `CLAUDE.local.md` — is reported, not given an invented path. And
+when two hosts each already wrote their own file, there is no default: every offer
+names whose version becomes canonical, because picking one silently discards the
+other's wording.
+
+**Memories are reported, never synced.** Claude Code keeps per-project notes under
+a directory keyed by an encoded project path; Codex keeps its own in SQLite. There
+is no file-level correspondence, so `doctor` says what exists and stops:
+
+```
+MEMORIES (reported, never synced)
+  – claude: 64 note(s) across 8 project(s) under ~/.claude/projects — keyed by
+    project path, so they do not transfer
+  – codex: ~/.codex/memories_1.sqlite (40 KB) — SQLite, with no file-level
+    counterpart on the other side
+```
 
 **A canonical manifest, adopted from either side.** `~/.config/agentsync/manifest.toml`
 records what you decided should exist. Symlink it into your dotfiles to version
@@ -368,6 +395,20 @@ hosts = ["codex"]                    # intentional divergence, recorded
 [skills.code-review]
 source = "skills/code-review"        # relative to the manifest
 
+[instructions.user]
+source = "prompts/user.md"           # → ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md
+
+[instructions.core-infra]
+source = "prompts/core-infra.md"
+scope = "project"                    # → <repo>/CLAUDE.md and <repo>/AGENTS.md
+repos = ["/Users/me/repos/core/infra"]
+
+[instructions."core-infra.local"]
+source = "prompts/core-infra.local.md"
+scope = "local"
+repos = ["/Users/me/repos/core/infra"]
+hosts = ["claude"]                   # Codex has no CLAUDE.local.md equivalent
+
 [marketplaces.claude-plugins-official]
 github = "anthropics/claude-plugins-official"
 hosts = ["claude"]
@@ -392,7 +433,7 @@ It never shadows the user manifest silently — a name collision is reported.
 ```
 tui/        review + run screens
 core/       model, differ, planner, applier — no host knowledge
-domains/    mcp, skills, plugins
+domains/    mcp, skills, instructions, plugins
 hosts/      descriptor loader, parser registry, CLI runner
 manifest/   canonical file + secret gate
 ```

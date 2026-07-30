@@ -6,7 +6,7 @@
 //! the usual fate of "the same" output written twice.
 
 use crate::core::diff::{Domain, Row, Severity};
-use crate::core::model::SkillState;
+use crate::core::model::LinkState;
 use crate::core::plan::{FsOp, ManifestOp, Step};
 use crate::domains::World;
 use crate::hosts::{Host, runner};
@@ -216,7 +216,7 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
             s.skills
                 .iter()
                 .filter_map(move |(name, state)| match state {
-                    SkillState::Foreign(target) => Some(Line::new(
+                    LinkState::Foreign(target) => Some(Line::new(
                         Mark::Info,
                         format!("{}: {name} -> {}", h.name(), paths::contract(target)),
                     )),
@@ -225,6 +225,8 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
         })
         .collect();
     report.push("SKILLS LINKED OUTSIDE agentsync (left alone)", foreign);
+
+    report.push("MEMORIES (reported, never synced)", memories());
 
     if probe_network {
         let line = match update::check() {
@@ -260,6 +262,64 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
     }
 
     report
+}
+
+/// What each host stores as "memory", and why none of it is synced.
+///
+/// Claude Code keeps per-project markdown under a directory keyed by an encoded
+/// project path; Codex keeps its own in SQLite. There is no file-level
+/// correspondence between them, so agentsync reports what exists and stops there.
+/// Claiming to sync these would be inventing a mapping.
+fn memories() -> Vec<Line> {
+    let mut out = Vec::new();
+
+    let claude_root = paths::expand("~/.claude/projects");
+    if claude_root.is_dir() {
+        let mut projects = 0usize;
+        let mut files = 0usize;
+        if let Ok(entries) = std::fs::read_dir(&claude_root) {
+            for entry in entries.filter_map(Result::ok) {
+                let dir = entry.path().join("memory");
+                if !dir.is_dir() {
+                    continue;
+                }
+                projects += 1;
+                files += std::fs::read_dir(&dir)
+                    .map(|d| {
+                        d.filter_map(Result::ok)
+                            .filter(|e| e.path().extension().is_some_and(|x| x == "md"))
+                            .count()
+                    })
+                    .unwrap_or(0);
+            }
+        }
+        if projects > 0 {
+            out.push(Line::new(
+                Mark::Info,
+                format!(
+                    "claude: {files} note(s) across {projects} project(s) under {} \u{2014} \
+                     keyed by project path, so they do not transfer",
+                    paths::contract(&claude_root)
+                ),
+            ));
+        }
+    }
+
+    let codex_db = paths::expand("~/.codex/memories_1.sqlite");
+    if codex_db.is_file() {
+        let size = std::fs::metadata(&codex_db).map(|m| m.len()).unwrap_or(0);
+        out.push(Line::new(
+            Mark::Info,
+            format!(
+                "codex: {} ({} KB) \u{2014} SQLite, with no file-level counterpart on the \
+                 other side",
+                paths::contract(&codex_db),
+                size / 1024
+            ),
+        ));
+    }
+
+    out
 }
 
 // ---------------------------------------------------------------------------

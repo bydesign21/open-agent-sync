@@ -32,6 +32,8 @@ pub struct Manifest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub skills: BTreeMap<String, SkillEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub instructions: BTreeMap<String, InstructionEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub marketplaces: BTreeMap<String, MarketplaceEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugins: BTreeMap<String, PluginEntry>,
@@ -189,6 +191,49 @@ impl SkillEntry {
         }
     }
 
+    pub fn targets_host(&self, host: &str) -> bool {
+        match &self.hosts {
+            None => true,
+            Some(list) => list.iter().any(|h| h == host),
+        }
+    }
+}
+
+/// A shared instruction file: one canonical markdown file linked into each host.
+///
+/// Shared by default because most of what goes in these files is about the repo,
+/// not the tool — package manager, deploy gate, conventions. `hosts = [...]` is
+/// the opt-out for the parts that genuinely name one CLI.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstructionEntry {
+    /// Path to the canonical file, relative to the manifest's directory (or
+    /// absolute / `~`-prefixed).
+    pub source: String,
+    #[serde(default = "default_scope")]
+    pub scope: ScopeKind,
+    /// Repos this applies to. Only meaningful for project/local scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hosts: Option<Vec<String>>,
+}
+
+impl InstructionEntry {
+    pub fn resolve(&self, manifest_dir: &Path) -> PathBuf {
+        let expanded = paths::expand(&self.source);
+        if expanded.is_absolute() {
+            expanded
+        } else {
+            manifest_dir.join(expanded)
+        }
+    }
+    pub fn scopes(&self) -> Vec<Scope> {
+        match self.scope {
+            ScopeKind::User => vec![Scope::User],
+            ScopeKind::Local => self.repos.iter().cloned().map(Scope::Local).collect(),
+            ScopeKind::Project => self.repos.iter().cloned().map(Scope::Project).collect(),
+        }
+    }
     pub fn targets_host(&self, host: &str) -> bool {
         match &self.hosts {
             None => true,

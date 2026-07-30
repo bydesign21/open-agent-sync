@@ -266,6 +266,32 @@ fn apply_manifest_op(manifest: &mut Manifest, op: &ManifestOp) -> Result<()> {
                 .with_context(|| format!("marketplaces.{name} is not in the manifest"))?
                 .hosts = hosts.clone();
         }
+        ManifestOp::UpsertInstruction {
+            name,
+            source,
+            scope,
+            repos,
+        } => {
+            manifest.instructions.insert(
+                name.clone(),
+                crate::manifest::InstructionEntry {
+                    source: source.clone(),
+                    scope: *scope,
+                    repos: repos.clone(),
+                    hosts: None,
+                },
+            );
+        }
+        ManifestOp::RemoveInstruction(name) => {
+            manifest.instructions.remove(name);
+        }
+        ManifestOp::SetInstructionHosts { name, hosts } => {
+            manifest
+                .instructions
+                .get_mut(name)
+                .with_context(|| format!("instructions.{name} is not in the manifest"))?
+                .hosts = hosts.clone();
+        }
         ManifestOp::UpsertPlugin { name, marketplace } => {
             manifest.plugins.insert(
                 name.clone(),
@@ -330,7 +356,7 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
                         // Refuse to silently delete real content behind an
                         // "unlink" label. Purging is a separate, explicit op.
                         anyhow::bail!(
-                            "{} is a real directory, not a link; use a purge action to delete it",
+                            "{} is real content, not a link; use a removal action to delete it",
                             path.display()
                         );
                     }
@@ -349,7 +375,7 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
                 std::fs::create_dir_all(parent)?;
             }
             paths::backup(from)?;
-            move_dir(from, to)?;
+            move_path(from, to)?;
             Ok(format!(
                 "moved {} into {}",
                 paths::contract(from),
@@ -361,19 +387,31 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
                 return Ok(format!("{} was already absent", paths::contract(path)));
             }
             paths::backup(path)?;
-            std::fs::remove_dir_all(path)?;
+            if path.is_dir() {
+                std::fs::remove_dir_all(path)?;
+            } else {
+                std::fs::remove_file(path)?;
+            }
             Ok(format!("removed {} (backed up)", paths::contract(path)))
         }
     }
 }
 
 /// Rename, falling back to copy+delete across filesystems.
-fn move_dir(from: &Path, to: &PathBuf) -> Result<()> {
+///
+/// Handles a file as well as a directory: skills are directories, instruction
+/// files are files, and both are adopted the same way.
+fn move_path(from: &Path, to: &PathBuf) -> Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
     }
-    copy_tree(from, to)?;
-    std::fs::remove_dir_all(from)?;
+    if from.is_dir() {
+        copy_tree(from, to)?;
+        std::fs::remove_dir_all(from)?;
+    } else {
+        std::fs::copy(from, to)?;
+        std::fs::remove_file(from)?;
+    }
     Ok(())
 }
 
@@ -502,12 +540,22 @@ mod tests {
     }
 
     #[test]
-    fn unlink_refuses_to_delete_a_real_directory() {
+    fn unlink_refuses_to_delete_real_content() {
         let home = tmp_home();
-        let real = home.path().join("real");
-        std::fs::create_dir_all(&real).unwrap();
-        let err = apply_fs_op(&FsOp::Unlink(real)).unwrap_err();
-        assert!(err.to_string().contains("real directory"), "{err}");
+        // A directory (a skill) and a file (an instruction file) are both real
+        // content: "unlink" must never be the thing that deletes them.
+        let dir = home.path().join("real-dir");
+        std::fs::create_dir_all(&dir).unwrap();
+        let err = apply_fs_op(&FsOp::Unlink(dir)).unwrap_err();
+        assert!(err.to_string().contains("real content"), "{err}");
+
+        let file = home.path().join("CLAUDE.md");
+        std::fs::write(&file, "# instructions").unwrap();
+        // A plain file is removable by unlink, because a host-owned instruction
+        // file that we are replacing with a link has to be cleared first.
+        let message = apply_fs_op(&FsOp::Unlink(file.clone())).unwrap();
+        assert!(message.contains("unlinked"), "{message}");
+        assert!(!file.exists());
     }
 
     #[test]

@@ -21,14 +21,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::core::diff::{Action, ActionKind, Domain, Row, RowKey, Severity, join_hosts};
-use crate::core::model::SkillState;
+use crate::core::model::LinkState;
 use crate::core::plan::{FsOp, ManifestOp, Plan, Step};
 use crate::paths;
 
 use super::World;
 
 /// Hosts that currently have this skill in any form.
-fn present_hosts(states: &BTreeMap<String, SkillState>) -> Vec<String> {
+fn present_hosts(states: &BTreeMap<String, LinkState>) -> Vec<String> {
     states
         .iter()
         .filter(|(_, s)| s.present())
@@ -44,7 +44,7 @@ fn present_hosts(states: &BTreeMap<String, SkillState>) -> Vec<String> {
 /// the only copy. A row that says "delete everywhere" when it means "delete the
 /// only copy" is how work gets lost, so the two are named differently.
 fn skill_removals(
-    states: &BTreeMap<String, SkillState>,
+    states: &BTreeMap<String, LinkState>,
     canonical_exists: bool,
     from_manifest: bool,
 ) -> Vec<Action> {
@@ -54,7 +54,7 @@ fn skill_removals(
     }
 
     let destroys =
-        |host: &str| !canonical_exists && matches!(states.get(host), Some(SkillState::RealDir));
+        |host: &str| !canonical_exists && matches!(states.get(host), Some(LinkState::Owned));
     let verb_for = |host: &str| {
         if destroys(host) {
             "delete the only copy on"
@@ -137,7 +137,7 @@ pub(super) fn rows(world: &World) -> Vec<Row> {
 }
 
 fn row_for(world: &World, name: &str) -> Option<Row> {
-    let mut states: BTreeMap<String, SkillState> = BTreeMap::new();
+    let mut states: BTreeMap<String, LinkState> = BTreeMap::new();
     for (host, snap) in world.detected() {
         if host.descriptor.skills.is_none() {
             continue;
@@ -147,7 +147,7 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
         }
         states.insert(
             host.name().to_string(),
-            snap.skills.get(name).cloned().unwrap_or(SkillState::Absent),
+            snap.skills.get(name).cloned().unwrap_or(LinkState::Absent),
         );
     }
 
@@ -156,17 +156,17 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
 
     let real_dirs: Vec<String> = states
         .iter()
-        .filter(|(_, s)| matches!(s, SkillState::RealDir))
+        .filter(|(_, s)| matches!(s, LinkState::Owned))
         .map(|(h, _)| h.clone())
         .collect();
     let foreign: Vec<String> = states
         .iter()
-        .filter(|(_, s)| matches!(s, SkillState::Foreign(_)))
+        .filter(|(_, s)| matches!(s, LinkState::Foreign(_)))
         .map(|(h, _)| h.clone())
         .collect();
     let linked: Vec<String> = states
         .iter()
-        .filter(|(_, s)| matches!(s, SkillState::Linked))
+        .filter(|(_, s)| matches!(s, LinkState::Linked))
         .map(|(h, _)| h.clone())
         .collect();
 
@@ -181,7 +181,7 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
                 let targets: Vec<String> = states
                     .values()
                     .filter_map(|s| match s {
-                        SkillState::Foreign(p) => Some(paths::contract(p)),
+                        LinkState::Foreign(p) => Some(paths::contract(p)),
                         _ => None,
                     })
                     .collect();
@@ -294,7 +294,7 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
                 .collect();
             let missing: Vec<String> = targets
                 .iter()
-                .filter(|h| matches!(states.get(*h), Some(SkillState::Absent)))
+                .filter(|h| matches!(states.get(*h), Some(LinkState::Absent)))
                 .cloned()
                 .collect();
             let clobber: Vec<String> = targets
@@ -302,7 +302,7 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
                 .filter(|h| {
                     matches!(
                         states.get(*h),
-                        Some(SkillState::RealDir) | Some(SkillState::Foreign(_))
+                        Some(LinkState::Owned) | Some(LinkState::Foreign(_))
                     )
                 })
                 .cloned()
@@ -313,7 +313,7 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
             if !clobber.is_empty() {
                 let host = clobber[0].clone();
                 let kind = match states.get(&host) {
-                    Some(SkillState::RealDir) => "an unlinked copy",
+                    Some(LinkState::Owned) => "an unlinked copy",
                     _ => "a link elsewhere",
                 };
                 return Some(Row {
@@ -441,11 +441,11 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                 };
                 let path = dir.join(&name);
                 match snap.skills.get(&name) {
-                    Some(SkillState::Linked) | Some(SkillState::Foreign(_)) => plan.push(
+                    Some(LinkState::Linked) | Some(LinkState::Foreign(_)) => plan.push(
                         format!("unlink {name} from {hname}"),
                         Step::Fs(FsOp::Unlink(path)),
                     ),
-                    Some(SkillState::RealDir) => plan.push(
+                    Some(LinkState::Owned) => plan.push(
                         format!("remove {name} from {hname} (backed up)"),
                         Step::Fs(FsOp::RemoveTree(path)),
                     ),
@@ -580,7 +580,7 @@ fn link_into(world: &World, name: &str, canonical: &Path, hosts: &[String], plan
         let Some(dir) = host.skills_link_dir() else {
             continue;
         };
-        if matches!(snap.skills.get(name), Some(SkillState::Linked)) {
+        if matches!(snap.skills.get(name), Some(LinkState::Linked)) {
             continue;
         }
         plan.push(

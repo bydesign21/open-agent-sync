@@ -18,6 +18,8 @@ use crate::core::model::Scope;
 pub enum Domain {
     Mcp,
     Skills,
+    /// Instruction files: CLAUDE.md, AGENTS.md, and their per-repo counterparts.
+    Instructions,
     Plugins,
 }
 
@@ -26,10 +28,16 @@ impl Domain {
         match self {
             Domain::Mcp => "MCP SERVERS",
             Domain::Skills => "SKILLS",
+            Domain::Instructions => "INSTRUCTIONS",
             Domain::Plugins => "PLUGINS",
         }
     }
-    pub const ALL: [Domain; 3] = [Domain::Mcp, Domain::Skills, Domain::Plugins];
+    pub const ALL: [Domain; 4] = [
+        Domain::Mcp,
+        Domain::Skills,
+        Domain::Instructions,
+        Domain::Plugins,
+    ];
 }
 
 /// How a row is marked. Three visible marks, not six glyphs.

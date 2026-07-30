@@ -39,6 +39,11 @@ argv = ["mcp", "login", "{name}"]
 # no machine-readable auth status to read. Omitting `auth_status` makes `doctor`
 # say so rather than imply everything is authenticated.
 
+[instructions]
+user = "~/.claude/CLAUDE.md"
+project = "{repo}/CLAUDE.md"
+local = "{repo}/CLAUDE.local.md"
+
 [skills]
 dirs = ["~/.claude/skills"]
 

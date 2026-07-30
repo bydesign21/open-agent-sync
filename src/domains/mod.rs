@@ -4,6 +4,7 @@
 //! plan from a chosen action — so the TUI treats them identically and a fourth
 //! domain is a new module rather than a UI change.
 
+pub mod instructions;
 pub mod mcp;
 pub mod plugins;
 pub mod skills;
@@ -133,6 +134,7 @@ impl World {
             out.extend(match domain {
                 Domain::Mcp => mcp::rows(self),
                 Domain::Skills => skills::rows(self),
+                Domain::Instructions => instructions::rows(self),
                 Domain::Plugins => plugins::rows(self),
             });
         }
@@ -146,6 +148,7 @@ impl World {
             match row.domain {
                 Domain::Mcp => mcp::plan_row(self, row, &mut plan),
                 Domain::Skills => skills::plan_row(self, row, &mut plan),
+                Domain::Instructions => instructions::plan_row(self, row, &mut plan),
                 Domain::Plugins => plugins::plan_row(self, row, &mut plan),
             }
         }
@@ -190,6 +193,9 @@ fn merge_project(manifest: &mut Manifest, project: Manifest, repo: &str) -> Vec<
         entry.scope = crate::core::model::ScopeKind::Project;
         entry.repos = vec![repo.to_string()];
         manifest.mcp.insert(name, entry);
+    }
+    for (name, entry) in project.instructions {
+        manifest.instructions.entry(name).or_insert(entry);
     }
     for (name, entry) in project.skills {
         manifest.skills.entry(name).or_insert(entry);

@@ -337,24 +337,41 @@ impl fmt::Display for AuthStatus {
 // Skills
 // ---------------------------------------------------------------------------
 
-/// How a skill currently exists inside one host's skills directory.
+/// How a linked thing currently exists inside one host's directory.
+///
+/// Shared by skills and instruction files, because the states and their
+/// consequences are identical: a symlink into canonical storage is synced, a real
+/// file or directory is content the host owns and must not be silently
+/// overwritten, and a symlink elsewhere belongs to something else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SkillState {
-    /// Symlink pointing at our canonical directory. Synced.
+pub enum LinkState {
+    /// Symlink pointing at our canonical path. Synced.
     Linked,
     /// Symlink pointing somewhere else — typically another tool's install.
     /// Reported, never rewritten.
     Foreign(PathBuf),
-    /// A real directory the host owns. Adopting it moves it into canonical.
-    RealDir,
+    /// Real content the host owns. Adopting it moves it into canonical.
+    Owned,
     /// Not present.
     Absent,
 }
 
-impl SkillState {
+impl LinkState {
     pub fn present(&self) -> bool {
-        !matches!(self, SkillState::Absent)
+        !matches!(self, LinkState::Absent)
     }
+}
+
+// ---------------------------------------------------------------------------
+// Instruction files
+// ---------------------------------------------------------------------------
+
+/// One host's instruction file for one scope — `CLAUDE.md`, `AGENTS.md`, and so on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstructionFile {
+    /// Where this host expects the file.
+    pub path: PathBuf,
+    pub state: LinkState,
 }
 
 // ---------------------------------------------------------------------------
@@ -409,10 +426,12 @@ pub struct HostSnapshot {
     pub detected: bool,
     pub mcp: BTreeMap<(Scope, String), McpServer>,
     /// Skill name -> state, per skills directory this host reads.
-    pub skills: BTreeMap<String, SkillState>,
+    pub skills: BTreeMap<String, LinkState>,
     /// Skill names provided by installed plugins. These belong to the plugin
     /// manager, so the skills domain must ignore them entirely.
     pub plugin_skills: Vec<String>,
+    /// Instruction files, keyed by the scope they apply to.
+    pub instructions: BTreeMap<Scope, InstructionFile>,
     pub plugins: BTreeMap<String, InstalledPlugin>,
     pub marketplaces: BTreeMap<String, MarketplaceSource>,
     /// What each of this host's marketplaces actually offers: marketplace name ->

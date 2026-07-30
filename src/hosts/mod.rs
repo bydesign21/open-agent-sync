@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::core::model::{
-    AuthStatus, HostSnapshot, MarketplaceSource, McpServer, Scope, SkillState, Transport,
+    AuthStatus, HostSnapshot, InstructionFile, LinkState, MarketplaceSource, McpServer, Scope,
+    ScopeKind, Transport,
 };
 use crate::paths;
 
@@ -147,7 +148,7 @@ impl Host {
 
         if let Some(skills) = &self.descriptor.skills {
             let canonical = paths::skills_dir();
-            let mut states: BTreeMap<String, SkillState> = BTreeMap::new();
+            let mut states: BTreeMap<String, LinkState> = BTreeMap::new();
             let mut plugin_dirs = Vec::new();
 
             for (index, dir) in skills.dirs.iter().enumerate() {
@@ -161,8 +162,8 @@ impl Host {
                         states.insert(name, state);
                     } else {
                         states.entry(name).or_insert(match state {
-                            SkillState::Absent => SkillState::Absent,
-                            _ => SkillState::Foreign(dir.clone()),
+                            LinkState::Absent => LinkState::Absent,
+                            _ => LinkState::Foreign(dir.clone()),
                         });
                     }
                 }
@@ -171,7 +172,48 @@ impl Host {
             snap.plugin_skills = plugin_dirs;
         }
 
+        if let Some(instructions) = &self.descriptor.instructions {
+            for kind in instructions.scopes() {
+                let template = instructions.path_for(&kind).cloned().unwrap_or_default();
+                let targets: Vec<(Scope, PathBuf)> = if template.contains("{repo}") {
+                    repos
+                        .iter()
+                        .map(|repo| {
+                            let scope = match kind {
+                                ScopeKind::Project => Scope::Project(repo.clone()),
+                                _ => Scope::Local(repo.clone()),
+                            };
+                            (scope, paths::expand(&template.replace("{repo}", repo)))
+                        })
+                        .collect()
+                } else {
+                    vec![(Scope::User, paths::expand(&template))]
+                };
+
+                for (scope, path) in targets {
+                    let canonical = crate::domains::instructions::canonical_for(&scope);
+                    snap.instructions.insert(
+                        scope,
+                        InstructionFile {
+                            state: classify_link(&path, &canonical),
+                            path,
+                        },
+                    );
+                }
+            }
+        }
+
         Ok(snap)
+    }
+
+    /// Where this host keeps its instructions for `scope`, if it has a location.
+    pub fn instruction_path(&self, scope: &Scope) -> Option<PathBuf> {
+        let section = self.descriptor.instructions.as_ref()?;
+        let template = section.path_for(&scope.kind())?;
+        Some(match scope.repo() {
+            Some(repo) => paths::expand(&template.replace("{repo}", repo)),
+            None => paths::expand(template),
+        })
     }
 
     /// Expand one read source into concrete paths. A `{repo}` path yields one
@@ -426,6 +468,35 @@ fn expand_glob(pattern: &str) -> Vec<PathBuf> {
     }
 }
 
+/// How `path` relates to `canonical`: our link, someone else's link, real
+/// content the host owns, or nothing.
+pub fn classify_link(path: &Path, canonical: &Path) -> LinkState {
+    let Ok(meta) = path.symlink_metadata() else {
+        return LinkState::Absent;
+    };
+    if meta.file_type().is_symlink() {
+        let Ok(target) = std::fs::read_link(path) else {
+            return LinkState::Foreign(path.to_path_buf());
+        };
+        let resolved = if target.is_absolute() {
+            target
+        } else {
+            path.parent().unwrap_or(Path::new("")).join(&target)
+        };
+        let same = std::fs::canonicalize(&resolved)
+            .ok()
+            .zip(std::fs::canonicalize(canonical).ok())
+            .map(|(a, b)| a == b)
+            .unwrap_or(false);
+        return if same {
+            LinkState::Linked
+        } else {
+            LinkState::Foreign(resolved)
+        };
+    }
+    LinkState::Owned
+}
+
 fn read_if_present(path: &Path) -> Result<Option<String>> {
     if !path.is_file() {
         return Ok(None);
@@ -445,7 +516,7 @@ fn scan_skills_dir(
     dir: &Path,
     canonical: &Path,
     plugin_dirs: &mut Vec<String>,
-) -> Result<BTreeMap<String, SkillState>> {
+) -> Result<BTreeMap<String, LinkState>> {
     let mut out = BTreeMap::new();
     if !dir.is_dir() {
         return Ok(out);
@@ -461,26 +532,7 @@ fn scan_skills_dir(
         let meta = entry.metadata()?;
 
         if meta.file_type().is_symlink() {
-            let target = std::fs::read_link(&path)?;
-            let resolved = if target.is_absolute() {
-                target.clone()
-            } else {
-                dir.join(&target)
-            };
-            let expected = canonical.join(&name);
-            let same = std::fs::canonicalize(&resolved)
-                .ok()
-                .zip(std::fs::canonicalize(&expected).ok())
-                .map(|(a, b)| a == b)
-                .unwrap_or(false);
-            out.insert(
-                name,
-                if same {
-                    SkillState::Linked
-                } else {
-                    SkillState::Foreign(resolved)
-                },
-            );
+            out.insert(name.clone(), classify_link(&path, &canonical.join(&name)));
             continue;
         }
 
@@ -496,7 +548,7 @@ fn scan_skills_dir(
         if !path.join("SKILL.md").exists() {
             continue;
         }
-        out.insert(name, SkillState::RealDir);
+        out.insert(name, LinkState::Owned);
     }
     Ok(out)
 }
@@ -653,9 +705,9 @@ mod tests {
         let mut plugin_dirs = Vec::new();
         let states = scan_skills_dir(&hostdir, &canonical, &mut plugin_dirs).unwrap();
 
-        assert_eq!(states.get("mine"), Some(&SkillState::Linked));
-        assert!(matches!(states.get("theirs"), Some(SkillState::Foreign(_))));
-        assert_eq!(states.get("local"), Some(&SkillState::RealDir));
+        assert_eq!(states.get("mine"), Some(&LinkState::Linked));
+        assert!(matches!(states.get("theirs"), Some(LinkState::Foreign(_))));
+        assert_eq!(states.get("local"), Some(&LinkState::Owned));
         assert!(!states.contains_key("not-a-skill"));
         assert!(!states.contains_key(".DS_Store"));
         assert_eq!(plugin_dirs, vec!["aplugin"]);

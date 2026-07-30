@@ -32,6 +32,8 @@ pub struct HostDescriptor {
     #[serde(default)]
     pub skills: Option<SkillsSection>,
     #[serde(default)]
+    pub instructions: Option<InstructionsSection>,
+    #[serde(default)]
     pub plugins: Option<PluginsSection>,
 }
 
@@ -146,6 +148,38 @@ impl McpSection {
             .iter()
             .copied()
             .filter(|c| !self.supports(*c))
+            .collect()
+    }
+}
+
+/// Where a host reads its instructions ("system prompt") from, per scope.
+///
+/// Omitting a scope means the host has no equivalent — Codex has no counterpart
+/// to `CLAUDE.local.md` — which the differ reports as blocked rather than
+/// inventing a location.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstructionsSection {
+    #[serde(default)]
+    pub user: Option<String>,
+    /// `{repo}` is substituted per repo.
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub local: Option<String>,
+}
+
+impl InstructionsSection {
+    pub fn path_for(&self, scope: &ScopeKind) -> Option<&String> {
+        match scope {
+            ScopeKind::User => self.user.as_ref(),
+            ScopeKind::Project => self.project.as_ref(),
+            ScopeKind::Local => self.local.as_ref(),
+        }
+    }
+    pub fn scopes(&self) -> Vec<ScopeKind> {
+        [ScopeKind::User, ScopeKind::Project, ScopeKind::Local]
+            .into_iter()
+            .filter(|s| self.path_for(s).is_some())
             .collect()
     }
 }

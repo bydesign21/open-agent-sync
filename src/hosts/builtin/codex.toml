@@ -48,6 +48,12 @@ argv = ["mcp", "login", "{name}"]
 argv = ["mcp", "list", "--json"]
 parser = "codex_auth_v1"
 
+[instructions]
+user = "~/.codex/AGENTS.md"
+project = "{repo}/AGENTS.md"
+# no `local`: Codex has no counterpart to CLAUDE.local.md, so that scope
+# is reported as blocked rather than given an invented location.
+
 [skills]
 dirs = ["~/.agents/skills", "~/.codex/skills"]
 

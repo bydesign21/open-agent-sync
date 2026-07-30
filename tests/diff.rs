@@ -749,10 +749,10 @@ fn a_skill_removal_says_when_it_destroys_the_only_copy() {
     // codex owns the content; claude merely links somewhere else.
     codex
         .skills
-        .insert("mine".into(), agentsync::core::model::SkillState::RealDir);
+        .insert("mine".into(), agentsync::core::model::LinkState::Owned);
     claude.skills.insert(
         "mine".into(),
-        agentsync::core::model::SkillState::Foreign(PathBuf::from("/elsewhere/mine")),
+        agentsync::core::model::LinkState::Foreign(PathBuf::from("/elsewhere/mine")),
     );
 
     let w = world(Manifest::default(), claude, codex);
@@ -776,6 +776,133 @@ fn a_skill_removal_says_when_it_destroys_the_only_copy() {
             .iter()
             .any(|l| l.contains("delete the only copy on codex")),
         "removing the content must say so: {labels:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Instruction files
+// ---------------------------------------------------------------------------
+
+use agentsync::core::model::{InstructionFile, LinkState};
+
+fn with_instruction(snap: &mut HostSnapshot, scope: Scope, path: &str, state: LinkState) {
+    snap.instructions.insert(
+        scope,
+        InstructionFile {
+            path: PathBuf::from(path),
+            state,
+        },
+    );
+}
+
+fn instruction_row<'a>(rows: &'a [Row], name: &str) -> &'a Row {
+    rows.iter()
+        .find(|r| r.name == name && r.domain == Domain::Instructions)
+        .unwrap_or_else(|| panic!("no instruction row {name:?} in {:?}", names(rows)))
+}
+
+#[test]
+fn an_instruction_file_on_one_host_is_adopted_and_linked_into_the_other() {
+    let mut claude = snapshot("claude", &[]);
+    let mut codex = snapshot("codex", &[]);
+    with_instruction(
+        &mut claude,
+        Scope::User,
+        "/home/me/.claude/CLAUDE.md",
+        LinkState::Owned,
+    );
+    with_instruction(
+        &mut codex,
+        Scope::User,
+        "/home/me/.codex/AGENTS.md",
+        LinkState::Absent,
+    );
+
+    let w = world(Manifest::default(), claude, codex);
+    let rows = w.rows();
+    let row = instruction_row(&rows, "user");
+    assert_eq!(row.headline, "only in claude");
+    assert_eq!(row.action().label, "adopt + link into codex");
+}
+
+#[test]
+fn two_hosts_with_their_own_file_must_be_told_whose_wins() {
+    // Picking one silently discards the other's wording, so there is no
+    // defensible default: every offer names a host.
+    let mut claude = snapshot("claude", &[]);
+    let mut codex = snapshot("codex", &[]);
+    with_instruction(
+        &mut claude,
+        Scope::Project("/repos/one".into()),
+        "/repos/one/CLAUDE.md",
+        LinkState::Owned,
+    );
+    with_instruction(
+        &mut codex,
+        Scope::Project("/repos/one".into()),
+        "/repos/one/AGENTS.md",
+        LinkState::Owned,
+    );
+
+    let w = world(Manifest::default(), claude, codex);
+    let rows = w.rows();
+    let row = instruction_row(&rows, "repos-one");
+
+    assert_eq!(row.severity, Severity::Warn);
+    assert!(
+        row.headline.contains("each have their own"),
+        "{}",
+        row.headline
+    );
+    let labels: Vec<&String> = row.actions.iter().map(|a| &a.label).collect();
+    assert!(
+        labels.iter().any(|l| l.contains("adopt claude's version")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("adopt codex's version")),
+        "{labels:?}"
+    );
+    assert!(
+        !labels.iter().any(|l| l.as_str() == "adopt into the manifest"),
+        "an ambiguous default would silently pick one: {labels:?}"
+    );
+}
+
+#[test]
+fn a_scope_a_host_cannot_hold_is_reported_not_invented() {
+    // Codex has no counterpart to CLAUDE.local.md, so its descriptor declares no
+    // `local` path and the row must say so rather than fabricate one.
+    let mut claude = snapshot("claude", &[]);
+    let codex = snapshot("codex", &[]);
+    with_instruction(
+        &mut claude,
+        Scope::Local("/repos/one".into()),
+        "/repos/one/CLAUDE.local.md",
+        LinkState::Owned,
+    );
+
+    let w = world(Manifest::default(), claude, codex);
+    let rows = w.rows();
+    let row = instruction_row(&rows, "repos-one.local");
+    assert!(
+        row.detail.contains("codex has no location for local scope"),
+        "detail was {:?}",
+        row.detail
+    );
+
+    // And nothing may be planned for codex.
+    let mut rows = rows;
+    for r in rows.iter_mut() {
+        r.accepted = r.name == "repos-one.local" && r.actionable();
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        !plan.steps.iter().any(|s| matches!(&s.step,
+            Step::Fs(agentsync::core::plan::FsOp::Link { link, .. })
+                if link.to_string_lossy().contains("AGENTS"))),
+        "codex has nowhere to link it: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
     );
 }
 

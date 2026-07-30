@@ -56,6 +56,11 @@ pub fn skills_dir() -> PathBuf {
     config_dir().join("skills")
 }
 
+/// Canonical instruction files live here; hosts get symlinks pointing in.
+pub fn prompts_dir() -> PathBuf {
+    config_dir().join("prompts")
+}
+
 pub fn hosts_dir() -> PathBuf {
     config_dir().join("hosts")
 }

@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long = "repo", global = true)]
     repos: Vec<String>,
 
-    /// Only this domain: mcp, skills, or plugins (repeatable).
+    /// Only this domain: mcp, skills, instructions, or plugins (repeatable).
     #[arg(long = "only", global = true)]
     only: Vec<String>,
 
@@ -78,7 +78,7 @@ fn real_main() -> Result<()> {
         Some(Command::Plan) => {
             let world = World::load(&manifest_path, &cli.repos)?;
             let rows = filtered_rows(&world, &cli.only);
-            print_rows(&world, &rows);
+            print_host_line(&world, &rows);
             print_plan(&world, &rows);
             Ok(())
         }
@@ -86,7 +86,8 @@ fn real_main() -> Result<()> {
         Some(Command::Apply { yes }) => {
             let world = World::load(&manifest_path, &cli.repos)?;
             let mut rows = filtered_rows(&world, &cli.only);
-            print_rows(&world, &rows);
+            print_host_line(&world, &rows);
+            print_plan(&world, &rows);
             if !yes {
                 println!(
                     "Nothing was changed. Re-run with --yes to accept every default action, \
@@ -129,9 +130,13 @@ fn filtered_rows(world: &World, only: &[String]) -> Vec<Row> {
         .filter_map(|o| match o.to_ascii_lowercase().as_str() {
             "mcp" => Some(Domain::Mcp),
             "skills" | "skill" => Some(Domain::Skills),
+            "instructions" | "instruction" | "prompts" | "prompt" => Some(Domain::Instructions),
             "plugins" | "plugin" => Some(Domain::Plugins),
             other => {
-                eprintln!("agentsync: unknown domain {other:?}; expected mcp, skills, or plugins");
+                eprintln!(
+                    "agentsync: unknown domain {other:?}; expected mcp, skills, \
+                     instructions, or plugins"
+                );
                 None
             }
         })
@@ -141,7 +146,8 @@ fn filtered_rows(world: &World, only: &[String]) -> Vec<Row> {
         .collect()
 }
 
-fn print_rows(world: &World, rows: &[Row]) {
+/// The one thing the report does not carry: which hosts were found.
+fn print_host_line(world: &World, rows: &[Row]) {
     let detected: Vec<String> = world
         .detected()
         .map(|(h, _)| h.name().to_string())
@@ -166,51 +172,6 @@ fn print_rows(world: &World, rows: &[Row]) {
         "{todo} to review, {} in sync\n",
         rows.len().saturating_sub(todo)
     );
-
-    for domain in Domain::ALL {
-        let group: Vec<&Row> = rows
-            .iter()
-            .filter(|r| r.domain == domain && r.severity != Severity::Synced)
-            .collect();
-        if group.is_empty() {
-            continue;
-        }
-        println!("{}", domain.title());
-        let width = group
-            .iter()
-            .map(|r| r.name.chars().count())
-            .max()
-            .unwrap_or(0)
-            .min(28);
-        let hwidth = group
-            .iter()
-            .map(|r| r.headline.chars().count())
-            .max()
-            .unwrap_or(0)
-            .min(36);
-        for row in group {
-            println!(
-                " {} {:<width$}  {:<hwidth$}  {}",
-                row.severity.mark(false),
-                truncate(&row.name, width),
-                truncate(&row.headline, hwidth),
-                row.action().label,
-            );
-            if !row.detail.is_empty() {
-                println!("   {:<width$}  {}", "", row.detail);
-            }
-        }
-        println!();
-    }
-}
-
-fn truncate(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return text.to_string();
-    }
-    let mut out: String = text.chars().take(width.saturating_sub(1)).collect();
-    out.push('\u{2026}');
-    out
 }
 
 /// Print the rows and the plan the default actions would produce.
