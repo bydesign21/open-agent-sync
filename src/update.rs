@@ -150,34 +150,73 @@ fn write_cache(latest: &str) -> Result<()> {
 }
 
 /// Ask GitHub for the newest release tag.
+///
+/// The JSON API is tried first because it is the documented interface, but it
+/// allows only 60 unauthenticated calls an hour *per IP*. A shared NAT, or one
+/// busy machine, exhausts that for everyone behind the address — and the symptom
+/// is a 403 that has nothing to do with whether an update exists. So a failure
+/// falls back to the web redirect, which is not rate-limited.
 fn fetch_latest_tag(slug: &str) -> Result<String> {
-    let url = format!("https://api.github.com/repos/{slug}/releases/latest");
+    match fetch_tag_via_api(slug) {
+        Ok(tag) => Ok(tag),
+        Err(api_err) => fetch_tag_via_redirect(slug).map_err(|redirect_err| {
+            // Both paths are named: "403" alone sends people looking for a
+            // problem with the release rather than with their address.
+            anyhow::anyhow!("{api_err}; the release redirect also failed: {redirect_err}")
+        }),
+    }
+}
+
+fn curl(args: &[&str], what: &str) -> Result<Vec<u8>> {
     let out = std::process::Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            &TIMEOUT_SECS.to_string(),
-            "-H",
-            "Accept: application/vnd.github+json",
-            &url,
-        ])
+        .args(["-fsSL", "--max-time", &TIMEOUT_SECS.to_string()])
+        .args(args)
         .output()
         .context("running curl (needed for the update check)")?;
-
     if !out.status.success() {
-        anyhow::bail!(
-            "curl failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        anyhow::bail!("{what}: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
+    Ok(out.stdout)
+}
 
+fn fetch_tag_via_api(slug: &str) -> Result<String> {
+    let url = format!("https://api.github.com/repos/{slug}/releases/latest");
+    let body = curl(
+        &["-H", "Accept: application/vnd.github+json", &url],
+        "curl failed",
+    )?;
     let body: serde_json::Value =
-        serde_json::from_slice(&out.stdout).context("parsing the GitHub response")?;
+        serde_json::from_slice(&body).context("parsing the GitHub response")?;
     body.get("tag_name")
         .and_then(serde_json::Value::as_str)
         .map(str::to_string)
         .context("the GitHub response had no tag_name")
 }
+
+/// `/releases/latest` redirects to `/releases/tag/<tag>`; read the tag off the
+/// URL curl ends up at.
+fn fetch_tag_via_redirect(slug: &str) -> Result<String> {
+    let url = format!("https://github.com/{slug}/releases/latest");
+    let out = curl(
+        &["-I", "-o", NULL_DEVICE, "-w", "%{url_effective}", &url],
+        "the release redirect failed",
+    )?;
+    let landed = String::from_utf8_lossy(&out);
+    tag_from_landed_url(&landed)
+        .with_context(|| format!("no release tag in the URL curl landed on ({landed})"))
+}
+
+fn tag_from_landed_url(landed: &str) -> Option<String> {
+    landed
+        .rsplit_once("/tag/")
+        .map(|(_, tag)| tag.trim().to_string())
+        .filter(|tag| !tag.is_empty())
+}
+
+#[cfg(windows)]
+const NULL_DEVICE: &str = "NUL";
+#[cfg(not(windows))]
+const NULL_DEVICE: &str = "/dev/null";
 
 /// Check for a newer release, refreshing the cache. Uses the cache when fresh.
 pub fn check() -> Status {
@@ -219,6 +258,30 @@ pub fn upgrade_hint(latest: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The redirect path is what keeps the check working when the API budget is
+    /// spent, so its parsing is worth pinning: a URL with no `/tag/` must be an
+    /// error, never an empty or invented version.
+    #[test]
+    fn a_tag_is_read_off_the_redirect_url_or_it_is_an_error() {
+        assert_eq!(
+            super::tag_from_landed_url("https://github.com/o/r/releases/tag/v1.2.3"),
+            Some("v1.2.3".to_string())
+        );
+        assert_eq!(
+            super::tag_from_landed_url("https://github.com/o/r/releases/tag/v1.2.3\n"),
+            Some("v1.2.3".to_string())
+        );
+        // Not redirected (no releases yet), and a trailing slash: both absent.
+        assert_eq!(
+            super::tag_from_landed_url("https://github.com/o/r/releases/latest"),
+            None
+        );
+        assert_eq!(
+            super::tag_from_landed_url("https://github.com/o/r/releases/tag/"),
+            None
+        );
+    }
+
     use super::*;
 
     #[test]
