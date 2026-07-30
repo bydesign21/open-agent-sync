@@ -46,9 +46,19 @@ TARGET="$arch_part-$os_part"
 if [ -z "${VERSION:-}" ]; then
   say "Looking up the latest release..."
   # Parsed with sed rather than jq, which is not universally installed.
-  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
+  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" 2>/dev/null \
     | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1)
+  if [ -z "$VERSION" ]; then
+    # The API permits 60 unauthenticated calls an hour *per IP*, so one busy
+    # machine behind a corporate NAT or CGNAT can exhaust it for everyone
+    # sharing that address — and the install one-liner is exactly the thing
+    # people run on a shared network. The web redirect for /releases/latest
+    # carries the tag in the URL it lands on and is not rate-limited.
+    VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+      "https://github.com/$REPO/releases/latest" 2>/dev/null \
+      | sed -n 's|.*/tag/\([^/]*\)$|\1|p')
+  fi
   [ -n "$VERSION" ] || die "could not determine the latest release; set VERSION=vX.Y.Z"
 fi
 
