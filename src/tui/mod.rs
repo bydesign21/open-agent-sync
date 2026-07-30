@@ -1,6 +1,6 @@
 //! The review TUI.
 //!
-//! Two screens, deliberately:
+//! The two screens that carry the safety properties:
 //!
 //! * **Review** — a to-do list of differences. Rows that are in sync are hidden,
 //!   because a screen that is dense when nothing is wrong teaches you to ignore
@@ -8,9 +8,15 @@
 //! * **Run** — the plan gate. Keys in the review screen only *stage* decisions;
 //!   nothing mutates until you see the exact commands and confirm. `c` writes the
 //!   plan out as a shell script, so you can always run it yourself instead.
+//!
+//! The rest are read-only views over a [`crate::report::Report`] — `doctor`,
+//! the plan every default would produce, the host inventory, and help. They exist
+//! here as well as on the CLI because being told to leave the TUI to answer
+//! "what is wrong with my setup?" is a bad answer.
 
 mod review;
 mod run;
+mod textview;
 
 use std::path::PathBuf;
 
@@ -35,6 +41,14 @@ enum Screen {
     Projects,
     /// Showing what happened.
     Result,
+    /// `doctor`, built on a worker thread because it probes the network.
+    Doctor,
+    /// The plan every default action would produce, staging nothing.
+    PlanPreview,
+    /// What agentsync knows about each host.
+    Hosts,
+    /// Every key.
+    Help,
 }
 
 /// One line of the review list: either a section heading or a row.
@@ -68,6 +82,9 @@ pub struct App {
     /// Repos offered by the picker; index 0 is "all projects".
     projects: Vec<String>,
     project_cursor: usize,
+
+    /// The report currently on screen, for the doctor/plan/hosts/help views.
+    view: textview::TextView,
 }
 
 /// Execute a plan on a worker thread while repainting a live progress screen.
@@ -171,6 +188,7 @@ impl App {
             project_filter: None,
             projects: Vec::new(),
             project_cursor: 0,
+            view: textview::TextView::new("", ""),
         };
         app.rebuild_projects();
         app.rebuild_items();
@@ -409,6 +427,148 @@ impl App {
         Ok(())
     }
 
+    /// Show the doctor screen and ask the event loop to fill it.
+    fn request_doctor(&mut self) {
+        self.view = textview::TextView::loading(
+            "doctor",
+            "checking host auth status and the latest release...",
+        );
+        self.screen = Screen::Doctor;
+    }
+
+    /// `doctor` probes the network, so it is built off the main thread with the
+    /// same pattern as the run screen rather than freezing the UI.
+    fn open_doctor(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        self.view = textview::TextView::loading(
+            "doctor",
+            "checking host auth status and the latest release...",
+        );
+        self.screen = Screen::Doctor;
+
+        let (tx, rx) = mpsc::channel::<crate::report::Report>();
+        let world = &self.world;
+        std::thread::scope(|scope| -> Result<()> {
+            let worker = scope.spawn(move || {
+                let _ = tx.send(crate::report::doctor(world, true));
+            });
+            loop {
+                if let Ok(report) = rx.try_recv() {
+                    self.view.report = report;
+                    self.view.loading = None;
+                    self.view.subtitle =
+                        format!("{} problem(s) need attention", self.view.report.problems);
+                    break;
+                }
+                self.view.frame += 1;
+                terminal.draw(|frame| self.view.draw(frame, &[("q", "back")]))?;
+                // Discard keys typed while it works, so they do not fire later.
+                while event::poll(Duration::ZERO)? {
+                    let _ = event::read()?;
+                }
+                if worker.is_finished() && rx.try_recv().is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(60));
+            }
+            Ok(())
+        })
+    }
+
+    /// What accepting every default would do, without staging anything.
+    fn open_plan_preview(&mut self) {
+        let mut rows = self.rows.clone();
+        for row in rows.iter_mut() {
+            if row.actionable() {
+                row.accepted = true;
+            }
+        }
+        self.view = textview::TextView::new(
+            "plan preview",
+            "every default action, staged nowhere \u{2014} press q to go back",
+        );
+        self.view.report = crate::report::plan_report(&self.world, &rows);
+        self.screen = Screen::PlanPreview;
+    }
+
+    fn open_hosts(&mut self) {
+        self.view = textview::TextView::new("hosts", "what agentsync knows about each CLI");
+        self.view.report = crate::report::hosts_report(&self.world.hosts);
+        self.screen = Screen::Hosts;
+    }
+
+    fn open_help(&mut self) {
+        use crate::report::{Line, Mark, Report, Section};
+        let mut report = Report::default();
+        report.sections.push(Section {
+            title: "REVIEW LIST".into(),
+            lines: vec![
+                Line::new(Mark::Plain, "j / k        move"),
+                Line::new(
+                    Mark::Plain,
+                    "space        accept or unaccept the chosen action",
+                ),
+                Line::new(Mark::Plain, "e            cycle to the next legal action"),
+                Line::new(Mark::Plain, "A            accept every row in this section"),
+                Line::new(Mark::Plain, "d            cycle the removal options"),
+                Line::new(
+                    Mark::Plain,
+                    "v            show rows that are already in sync",
+                ),
+                Line::new(Mark::Plain, "p            focus one project"),
+                Line::new(Mark::Plain, "r            re-read everything from disk"),
+                Line::new(Mark::Plain, "enter        review and run what you accepted"),
+            ],
+        });
+        report.sections.push(Section {
+            title: "VIEWS".into(),
+            lines: vec![
+                Line::new(
+                    Mark::Plain,
+                    "D            doctor \u{2014} problems that are not differences",
+                ),
+                Line::new(
+                    Mark::Plain,
+                    "P            the plan every default action would produce",
+                ),
+                Line::new(
+                    Mark::Plain,
+                    "H            hosts, capabilities, and compiled parsers",
+                ),
+                Line::new(Mark::Plain, "?            this screen"),
+            ],
+        });
+        report.sections.push(Section {
+            title: "ANYWHERE".into(),
+            lines: vec![
+                Line::new(
+                    Mark::Plain,
+                    "q / esc      back, or quit from the review list",
+                ),
+                Line::new(Mark::Plain, "ctrl-c       quit"),
+            ],
+        });
+        report.sections.push(Section {
+            title: "MARKS".into(),
+            lines: vec![
+                Line::new(Mark::Ok, "accepted"),
+                Line::new(
+                    Mark::Warn,
+                    "needs care \u{2014} a credential in the clear, or an overwrite",
+                ),
+                Line::new(
+                    Mark::Info,
+                    "blocked \u{2014} the host cannot represent it; nothing to run",
+                ),
+            ],
+        });
+        self.view = textview::TextView::new("keys", "");
+        self.view.report = report;
+        self.screen = Screen::Help;
+    }
+
     fn build_plan(&mut self) {
         self.plan = self.world.plan(&self.rows);
     }
@@ -452,11 +612,20 @@ impl App {
                 continue;
             }
 
+            if self.screen == Screen::Doctor && self.view.loading.is_some() {
+                self.open_doctor(terminal)?;
+                continue;
+            }
+
             terminal.draw(|frame| match self.screen {
                 Screen::Review => review::draw(self, frame),
                 Screen::Run => run::draw_plan(self, frame),
                 Screen::Projects => review::draw_projects(self, frame),
                 Screen::Result | Screen::Running => run::draw_result(self, frame),
+                Screen::Doctor => self.view.draw(frame, &[("r", "re-run"), ("q", "back")]),
+                Screen::PlanPreview | Screen::Hosts | Screen::Help => {
+                    self.view.draw(frame, &[("q", "back")])
+                }
             })?;
 
             let Event::Key(key) = event::read()? else {
@@ -490,6 +659,12 @@ impl App {
                 KeyCode::Char('d') => self.choose_delete(),
                 KeyCode::Char('v') => self.toggle_synced(),
                 KeyCode::Char('p') => self.open_projects(),
+                // Arm the loading state so the event loop runs the probe. Setting
+                // only the screen leaves an empty view on display.
+                KeyCode::Char('D') => self.request_doctor(),
+                KeyCode::Char('P') => self.open_plan_preview(),
+                KeyCode::Char('H') => self.open_hosts(),
+                KeyCode::Char('?') => self.open_help(),
                 KeyCode::Char('r') => self.rescan()?,
                 KeyCode::Enter => {
                     if self.accepted_count() == 0 {
@@ -523,6 +698,28 @@ impl App {
                 KeyCode::Enter => self.choose_project(),
                 _ => {}
             },
+
+            // Read-only views. `viewport` is approximate — the exact height is
+            // known only at draw time — but scrolling is clamped there too.
+            Screen::Doctor | Screen::PlanPreview | Screen::Hosts | Screen::Help => {
+                const VIEWPORT: usize = 20;
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => self.screen = Screen::Review,
+                    KeyCode::Char('j') | KeyCode::Down => self.view.scroll(1, VIEWPORT),
+                    KeyCode::Char('k') | KeyCode::Up => self.view.scroll(-1, VIEWPORT),
+                    KeyCode::PageDown | KeyCode::Char(' ') => {
+                        self.view.scroll(VIEWPORT as isize, VIEWPORT)
+                    }
+                    KeyCode::PageUp => self.view.scroll(-(VIEWPORT as isize), VIEWPORT),
+                    KeyCode::Char('g') => self.view.offset = 0,
+                    KeyCode::Char('G') => self.view.scroll_to_end(VIEWPORT),
+                    // Re-running doctor forces a fresh probe.
+                    KeyCode::Char('r') if self.screen == Screen::Doctor => {
+                        self.view.loading = Some("re-checking...".into());
+                    }
+                    _ => {}
+                }
+            }
 
             // The event loop drives this screen; no keys are read while it is up.
             Screen::Running => {}
@@ -671,6 +868,31 @@ mod tests {
             matches!(app.screen, Screen::Running),
             "a stray keypress must not leave the running screen"
         );
+    }
+
+    #[test]
+    fn pressing_d_arms_the_doctor_probe_rather_than_showing_an_empty_view() {
+        let mut app = app_with(vec![row(Domain::Mcp, "a", Severity::Normal)]);
+        app.handle_key(KeyEvent::from(KeyCode::Char('D'))).unwrap();
+        assert!(matches!(app.screen, Screen::Doctor));
+        assert!(
+            app.view.loading.is_some(),
+            "the event loop only runs the probe when loading is set"
+        );
+    }
+
+    #[test]
+    fn the_read_only_views_go_back_to_the_review_list() {
+        let mut app = app_with(vec![row(Domain::Mcp, "a", Severity::Normal)]);
+        for key in ['P', 'H', '?'] {
+            app.handle_key(KeyEvent::from(KeyCode::Char(key))).unwrap();
+            assert!(
+                !matches!(app.screen, Screen::Review),
+                "{key} should open a view"
+            );
+            app.handle_key(KeyEvent::from(KeyCode::Char('q'))).unwrap();
+            assert!(matches!(app.screen, Screen::Review), "q should go back");
+        }
     }
 
     #[test]

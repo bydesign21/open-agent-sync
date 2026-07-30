@@ -142,6 +142,12 @@ modified until you press `⏎`, review the exact commands, and confirm with `y`.
 `c` on that screen writes the plan out as a shell script if you would rather run
 it yourself.
 
+`doctor`, the plan preview, and the host inventory are also reachable **from
+inside the TUI** — `D`, `P`, and `H` — because being told to quit the interface to
+answer "what is wrong with my setup?" is a bad answer. `?` lists every key. All of
+those views scroll, and say `lines 12-31 of 145` so a screenful never passes for
+the whole thing.
+
 ## The screens
 
 Every image below is a real run, captured from a terminal. They use a demo

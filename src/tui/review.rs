@@ -372,15 +372,16 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
+    // Eleven keys will not fit; the help screen carries the full list.
     let keys: [(&str, &str); 8] = [
         ("space", "accept"),
         ("e", "change"),
-        ("A", "accept section"),
+        ("A", "section"),
         ("d", "remove"),
-        ("v", "show synced"),
+        ("v", "synced"),
         ("p", "project"),
-        ("r", "rescan"),
         ("\u{23ce}", "run"),
+        ("?", "help"),
     ];
     let mut spans = vec![Span::raw(" ")];
     for (key, what) in keys {

@@ -12,11 +12,9 @@ use clap::{Parser, Subcommand};
 
 use agentsync::core::apply::{self, Outcome, Progress};
 use agentsync::core::diff::{Domain, Row, Severity};
-use agentsync::core::plan::{FsOp, Step};
 use agentsync::domains::World;
-use agentsync::hosts::{parsers, runner};
 use agentsync::paths;
-use agentsync::update;
+use agentsync::report::{self, Mark};
 
 #[derive(Parser)]
 #[command(
@@ -215,67 +213,11 @@ fn truncate(text: &str, width: usize) -> String {
     out
 }
 
-/// Print the plan the default actions would produce.
+/// Print the rows and the plan the default actions would produce.
 fn print_plan(world: &World, rows: &[Row]) {
     let mut rows = rows.to_vec();
     accept_defaults(&mut rows);
-    let plan = world.plan(&rows);
-
-    if plan.is_empty() {
-        println!("Nothing to do.");
-    } else {
-        println!("PLAN ({} steps)", plan.steps.len());
-        for (i, step) in plan.steps.iter().enumerate() {
-            println!("  {:>2}  {}", i + 1, step.label);
-            if let Some(line) = describe_step(world, &step.step) {
-                println!("      {line}");
-            }
-        }
-        println!();
-    }
-
-    if !plan.notes.is_empty() {
-        println!("NOTES");
-        for note in &plan.notes {
-            println!("  \u{2022} {note}");
-        }
-        println!();
-    }
-}
-
-/// The concrete effect of a step, so the plan is auditable rather than a
-/// description of intent.
-fn describe_step(world: &World, step: &Step) -> Option<String> {
-    match step {
-        Step::Host { host, argv, cwd } => {
-            let bin = world
-                .host(host)
-                .map(|h| h.descriptor.detect.bin.clone())
-                .unwrap_or_else(|| host.clone());
-            let line = runner::shell_line(&bin, argv);
-            Some(match cwd {
-                Some(dir) => format!("{line}    (in {})", paths::contract(dir)),
-                None => line,
-            })
-        }
-        Step::Fs(FsOp::Link { target, link }) => Some(format!(
-            "ln -sfn {} {}",
-            paths::contract(target),
-            paths::contract(link)
-        )),
-        Step::Fs(FsOp::Unlink(path)) => Some(format!("rm {}", paths::contract(path))),
-        Step::Fs(FsOp::MoveIntoCanonical { from, to }) => Some(format!(
-            "mv {} {}    (backed up first)",
-            paths::contract(from),
-            paths::contract(to)
-        )),
-        Step::Fs(FsOp::RemoveTree(path)) => Some(format!(
-            "rm -r {}    (backed up first)",
-            paths::contract(path)
-        )),
-        Step::Manual(text) => Some(format!("you must: {text}")),
-        Step::Manifest(op) => Some(format!("manifest: {}", op.describe())),
-    }
+    print_report(&report::plan_report(world, &rows));
 }
 
 fn run_plan(world: World, rows: &[Row]) -> Result<()> {
@@ -334,214 +276,49 @@ fn run_plan(world: World, rows: &[Row]) -> Result<()> {
     Ok(())
 }
 
+/// Print a report the same way the TUI shows it.
+fn print_report(report: &report::Report) {
+    for section in &report.sections {
+        println!("{}", section.title);
+        for line in &section.lines {
+            let glyph = match line.mark {
+                Mark::Ok => "\u{2713}",
+                Mark::Problem => "\u{2717}",
+                Mark::Warn => "!",
+                Mark::Info => "\u{2013}",
+                Mark::Plain => " ",
+            };
+            let indent = "  ".repeat(line.indent as usize + 1);
+            println!("{indent}{glyph} {}", line.text);
+        }
+        println!();
+    }
+}
+
 fn doctor(world: &World) -> Result<()> {
-    let mut problems = 0usize;
-
-    println!("HOSTS");
-    for (host, snap) in world.detected() {
-        println!(
-            "  \u{2713} {:<10} {:<16} mcp:{} skills:{} plugins:{}",
-            host.name(),
-            host.descriptor.display,
-            snap.mcp.len(),
-            snap.skills.len(),
-            snap.plugins.len()
-        );
-    }
-    for host in world.missing_hosts() {
-        println!(
-            "  \u{2013} {:<10} not installed ({} not on PATH)",
-            host.name(),
-            host.descriptor.detect.bin
-        );
-    }
-    println!();
-
-    let secrets = world.manifest.audit_secrets();
-    if !secrets.is_empty() {
-        problems += secrets.len();
-        println!("LITERAL CREDENTIALS IN THE MANIFEST");
-        for f in &secrets {
-            println!("  \u{2717} {} \u{2014} {}", f.location, f.reason);
-        }
-        println!();
-    }
-
-    let non_portable = world.manifest.non_portable();
-    if !non_portable.is_empty() {
-        println!("NON-PORTABLE COMMANDS (these will not resolve on another machine)");
-        for (name, cmd) in &non_portable {
-            println!("  ! mcp.{name}: {cmd}");
-        }
-        println!();
-    }
-
-    let missing_env = world.manifest.missing_env();
-    if !missing_env.is_empty() {
-        problems += missing_env.len();
-        println!("UNSET ENVIRONMENT VARIABLES");
-        for (name, var) in &missing_env {
-            println!("  \u{2717} mcp.{name} needs ${var}");
-        }
-        println!();
-    }
-
-    // Auth status has to come from the CLI: a config file records how to
-    // authenticate, never whether the credential is present. This is the gap that
-    // let two OAuth servers be reported as pushed while being unable to connect.
-    let mut auth_lines: Vec<String> = Vec::new();
-    let mut unknown_hosts: Vec<String> = Vec::new();
-    for (host, _) in world.detected() {
-        match host.probe_auth() {
-            Ok(None) => unknown_hosts.push(host.name().to_string()),
-            Ok(Some(statuses)) => {
-                for (name, status) in statuses {
-                    if status.needs_login() {
-                        let fix = host
-                            .mcp_login_command(&name)
-                            .unwrap_or_else(|| format!("log in to {name} on {}", host.name()));
-                        auth_lines.push(format!("{}: {name} \u{2014} run `{fix}`", host.name()));
-                    }
-                }
-            }
-            Err(e) => world_warn(&mut auth_lines, host.name(), &e),
-        }
-    }
-    if !auth_lines.is_empty() {
-        problems += auth_lines.len();
-        println!("MCP SERVERS THAT ARE CONFIGURED BUT NOT AUTHENTICATED");
-        for line in &auth_lines {
-            println!("  \u{2717} {line}");
-        }
-        println!();
-    }
-    if !unknown_hosts.is_empty() {
-        println!(
-            "NOTE: {} exposes no machine-readable auth status, so logged-out servers\n      \
-             there cannot be detected \u{2014} only its own startup warnings will show them.\n",
-            unknown_hosts.join(", ")
-        );
-    }
-
-    if !world.warnings.is_empty() {
-        println!("READ WARNINGS");
-        for w in &world.warnings {
-            println!("  ! {w}");
-        }
-        println!();
-    }
-
-    let foreign: Vec<String> = world
-        .detected()
-        .flat_map(|(h, s)| {
-            s.skills
-                .iter()
-                .filter_map(move |(name, state)| match state {
-                    agentsync::core::model::SkillState::Foreign(target) => Some(format!(
-                        "{}: {name} -> {}",
-                        h.name(),
-                        paths::contract(target)
-                    )),
-                    _ => None,
-                })
-        })
-        .collect();
-    if !foreign.is_empty() {
-        println!("SKILLS LINKED OUTSIDE agentsync (left alone)");
-        for f in &foreign {
-            println!("  \u{2013} {f}");
-        }
-        println!();
-    }
-
-    match update::check() {
-        update::Status::Current => println!(
-            "agentsync {} is the newest release.\n",
-            update::current_version()
-        ),
-        update::Status::Newer { latest } => {
-            println!("UPDATE AVAILABLE");
-            println!(
-                "  {} \u{2192} {latest}   {}\n",
-                update::current_version(),
-                update::upgrade_hint(&latest)
-            );
-        }
-        update::Status::Ahead { latest } => println!(
-            "agentsync {} is newer than the latest release ({latest}) \u{2014} a local build.\n",
-            update::current_version()
-        ),
-        // Not a problem to fix, but not silence either: a failed check must not
-        // read as "you are up to date".
-        update::Status::Unknown { reason } => {
-            println!("Could not check for updates: {reason}\n")
-        }
-    }
-
-    if problems == 0 {
+    let report = report::doctor(world, true);
+    print_report(&report);
+    if report.problems == 0 {
         println!("No blocking problems found.");
     } else {
-        println!("{problems} problem(s) need attention.");
+        println!("{} problem(s) need attention.", report.problems);
     }
     Ok(())
 }
 
-/// A probe that failed is itself worth reporting: silence would read as "fine".
-fn world_warn(out: &mut Vec<String>, host: &str, e: &anyhow::Error) {
-    out.push(format!("{host}: could not read auth status \u{2014} {e:#}"));
-}
-
 fn hosts_command(want_parsers: bool) -> Result<()> {
-    use agentsync::core::model::ScopeKind;
-
+    let hosts = agentsync::hosts::Host::load_all().context("loading host descriptors")?;
+    let report = report::hosts_report(&hosts);
     if want_parsers {
-        println!("COMPILED PARSERS (reference these as `parser = \"...\"` in a descriptor)");
-        for (name, what) in parsers::registry() {
-            println!("  {name:<24} {what}");
+        // The parser registry is the last section; show only that.
+        if let Some(section) = report.sections.last() {
+            println!("{}", section.title);
+            for line in &section.lines {
+                println!("  {}", line.text);
+            }
         }
         return Ok(());
     }
-
-    let hosts = agentsync::hosts::Host::load_all().context("loading host descriptors")?;
-    println!(
-        "Descriptors are built in, and overridden by files in {}\n",
-        paths::contract(&paths::hosts_dir())
-    );
-    for host in hosts {
-        let status = if host.detected() {
-            "installed"
-        } else {
-            "not installed"
-        };
-        println!(
-            "{} ({}) \u{2014} {status}",
-            host.name(),
-            host.descriptor.display
-        );
-        if let Some(mcp) = &host.descriptor.mcp {
-            let scopes: Vec<&str> = mcp
-                .scopes
-                .iter()
-                .map(|s| match s {
-                    ScopeKind::User => "user",
-                    ScopeKind::Local => "local",
-                    ScopeKind::Project => "project",
-                })
-                .collect();
-            let caps: Vec<&str> = mcp.caps.iter().map(|c| c.as_str()).collect();
-            println!("  mcp scopes: {}", scopes.join(", "));
-            println!("  mcp caps:   {}", caps.join(", "));
-        }
-        if let Some(skills) = &host.descriptor.skills {
-            println!(
-                "  skills:     {} (first is the link target)",
-                skills.dirs.join(", ")
-            );
-        }
-        if host.descriptor.plugins.is_some() {
-            println!("  plugins:    yes");
-        }
-        println!();
-    }
+    print_report(&report);
     Ok(())
 }
