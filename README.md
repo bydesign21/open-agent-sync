@@ -23,8 +23,25 @@ one keypress at a time.
 One binary, no runtime dependency. Released for macOS (Apple Silicon and Intel),
 Linux (x86_64 and arm64), and Windows (x86_64).
 
-On macOS or Linux — `uname -m` prints `arm64`/`aarch64` on Apple Silicon and arm,
-`x86_64` elsewhere:
+```sh
+curl -fsSL https://raw.githubusercontent.com/bydesign21/open-agent-sync/master/install.sh | sh
+```
+
+That detects your platform, installs the latest release to `~/.local/bin`, and
+**verifies the download against the release's `SHA256SUMS`** before installing
+anything. `VERSION=v0.0.5` pins a version; `AGENTSYNC_BIN_DIR=/usr/local/bin`
+changes where it lands.
+
+Then:
+
+```sh
+agentsync --version
+```
+
+<details>
+<summary>Or do it by hand, if you would rather not pipe a script into a shell</summary>
+
+`uname -m` prints `arm64`/`aarch64` on Apple Silicon and arm, `x86_64` elsewhere.
 
 ```sh
 VERSION=v0.0.5
@@ -48,14 +65,12 @@ tar -xzf "$ASSET"
 mkdir -p ~/.local/bin && mv agentsync ~/.local/bin/ && rm "$ASSET" SHA256SUMS
 ```
 
-That should print `...tar.gz: OK`. Make sure `~/.local/bin` is on your `PATH`,
-then check it:
+That should print `...tar.gz: OK`. Make sure `~/.local/bin` is on your `PATH`.
 
-```sh
-agentsync --version
-```
+</details>
 
-macOS may quarantine a downloaded binary. If it refuses to run:
+macOS quarantines a downloaded binary; the installer strips that for you. If you
+installed by hand and it refuses to run:
 
 ```sh
 xattr -d com.apple.quarantine ~/.local/bin/agentsync
@@ -63,7 +78,8 @@ xattr -d com.apple.quarantine ~/.local/bin/agentsync
 
 On Windows, download `agentsync-v0.0.5-x86_64-pc-windows-msvc.zip` from the
 [releases page](https://github.com/bydesign21/open-agent-sync/releases), extract
-`agentsync.exe`, and put it somewhere on your `PATH`.
+`agentsync.exe`, and put it somewhere on your `PATH`. The installer script does not
+cover Windows and says so rather than half-working.
 
 **Windows and symlinks:** the skills domain works by symlinking a canonical
 directory into each host's skills directory, and creating a symlink on Windows
@@ -418,6 +434,11 @@ git tag v0.0.6 && git push origin v0.0.6
 `.github/workflows/release.yml` builds all five targets, packages them, writes
 `SHA256SUMS`, and publishes. It is idempotent: re-running a tag replaces its
 assets. `workflow_dispatch` rehearses the build without publishing.
+
+`install.sh` reads the latest release from the API, so it needs no change per
+version. The `VERSION=` examples in this README do, and the one-liner is served
+from `master` rather than a tag — a fix to the installer reaches people without a
+release.
 
 ## Status
 
