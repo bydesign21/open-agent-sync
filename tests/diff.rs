@@ -332,6 +332,53 @@ fn an_identical_definition_is_left_completely_alone() {
 }
 
 #[test]
+fn pushing_an_oauth_server_says_it_still_needs_a_login() {
+    // Credentials are per-host and do not travel with the definition. Reporting
+    // the add as done without saying so reports success for a server that cannot
+    // connect — which is exactly what happened in practice with sentry.
+    let mut manifest = Manifest::default();
+    let oauth = http("sentry", "https://mcp.sentry.dev/mcp");
+    manifest.mcp.insert(
+        "sentry".into(),
+        McpEntry::from_server(&oauth, ScopeKind::User, vec![]),
+    );
+    let with_token = http("knowledge", "https://api.example.test/mcp");
+    let mut entry = McpEntry::from_server(&with_token, ScopeKind::User, vec![]);
+    entry.bearer_token_env = Some("KNOWLEDGE_TOKEN".into());
+    manifest.mcp.insert("knowledge".into(), entry);
+
+    let w = world(manifest, snapshot("claude", &[]), snapshot("codex", &[]));
+    let mut rows = w.rows();
+    for r in rows.iter_mut() {
+        r.accepted = r.actionable();
+    }
+    let plan = w.plan(&rows);
+
+    let manual: Vec<&String> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match &s.step {
+            Step::Manual(text) => Some(text),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        manual.iter().any(|t| t.contains("claude mcp login sentry")),
+        "expected a claude login step: {manual:?}"
+    );
+    assert!(
+        manual.iter().any(|t| t.contains("codex mcp login sentry")),
+        "expected a codex login step: {manual:?}"
+    );
+    // A server that carries its own credential reference needs no login.
+    assert!(
+        !manual.iter().any(|t| t.contains("knowledge")),
+        "a bearer_token_env server must not be told to log in: {manual:?}"
+    );
+}
+
+#[test]
 fn a_local_scoped_server_is_reported_as_blocked_for_a_user_only_host() {
     let server = http("pulumi", "https://mcp.ai.pulumi.com/mcp");
     let w = world(

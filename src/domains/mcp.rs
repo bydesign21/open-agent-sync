@@ -915,14 +915,28 @@ fn push_entry_to(
                 }
             }
             match host.mcp_add_argv(&server, scope) {
-                Ok(argv) => plan.push(
-                    format!("add {name} to {hname} ({scope})"),
-                    Step::Host {
-                        host: hname.clone(),
-                        argv,
-                        cwd: cwd_for(scope),
-                    },
-                ),
+                Ok(argv) => {
+                    plan.push(
+                        format!("add {name} to {hname} ({scope})"),
+                        Step::Host {
+                            host: hname.clone(),
+                            argv,
+                            cwd: cwd_for(scope),
+                        },
+                    );
+                    // An OAuth-backed server lands as a valid config entry that
+                    // cannot connect: credentials are per-host and do not travel
+                    // with the definition. Reporting the add as done without
+                    // saying this is reporting success for something broken.
+                    if server.needs_interactive_login()
+                        && let Some(command) = host.mcp_login_command(name)
+                    {
+                        plan.push(
+                            format!("log in to {name} on {hname}"),
+                            Step::Manual(command),
+                        );
+                    }
+                }
                 Err(e) => plan.note(format!(
                     "{name}: cannot build {hname} command \u{2014} {e:#}"
                 )),

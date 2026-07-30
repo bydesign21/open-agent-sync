@@ -42,6 +42,12 @@ pub struct CatalogRead {
 }
 
 #[derive(Debug, Default)]
+pub struct AuthRead {
+    pub statuses: BTreeMap<String, crate::core::model::AuthStatus>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Default)]
 pub struct PluginRead {
     pub plugins: BTreeMap<String, InstalledPlugin>,
     pub marketplaces: BTreeMap<String, MarketplaceSource>,
@@ -74,6 +80,14 @@ pub fn read_catalog(parser: &str, text: &str, ctx: &ParseCtx) -> Result<CatalogR
 }
 
 /// Serialize a server into the JSON document a `style = "json"` host expects.
+/// Per-server auth status, read from a host's CLI.
+pub fn read_auth(parser: &str, text: &str, ctx: &ParseCtx) -> Result<AuthRead> {
+    match parser {
+        "codex_auth_v1" => mcp::codex_auth_v1(text, ctx),
+        other => bail!("unknown auth parser {other:?} (see `agentsync hosts --parsers`)"),
+    }
+}
+
 pub fn serialize_mcp(serializer: &str, server: &McpServer) -> Result<String> {
     match serializer {
         "claude_json_v1" => mcp::claude_json_v1_serialize(server),

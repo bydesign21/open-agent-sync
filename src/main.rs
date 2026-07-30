@@ -385,6 +385,43 @@ fn doctor(world: &World) -> Result<()> {
         println!();
     }
 
+    // Auth status has to come from the CLI: a config file records how to
+    // authenticate, never whether the credential is present. This is the gap that
+    // let two OAuth servers be reported as pushed while being unable to connect.
+    let mut auth_lines: Vec<String> = Vec::new();
+    let mut unknown_hosts: Vec<String> = Vec::new();
+    for (host, _) in world.detected() {
+        match host.probe_auth() {
+            Ok(None) => unknown_hosts.push(host.name().to_string()),
+            Ok(Some(statuses)) => {
+                for (name, status) in statuses {
+                    if status.needs_login() {
+                        let fix = host
+                            .mcp_login_command(&name)
+                            .unwrap_or_else(|| format!("log in to {name} on {}", host.name()));
+                        auth_lines.push(format!("{}: {name} \u{2014} run `{fix}`", host.name()));
+                    }
+                }
+            }
+            Err(e) => world_warn(&mut auth_lines, host.name(), &e),
+        }
+    }
+    if !auth_lines.is_empty() {
+        problems += auth_lines.len();
+        println!("MCP SERVERS THAT ARE CONFIGURED BUT NOT AUTHENTICATED");
+        for line in &auth_lines {
+            println!("  \u{2717} {line}");
+        }
+        println!();
+    }
+    if !unknown_hosts.is_empty() {
+        println!(
+            "NOTE: {} exposes no machine-readable auth status, so logged-out servers\n      \
+             there cannot be detected \u{2014} only its own startup warnings will show them.\n",
+            unknown_hosts.join(", ")
+        );
+    }
+
     if !world.warnings.is_empty() {
         println!("READ WARNINGS");
         for w in &world.warnings {
@@ -422,6 +459,11 @@ fn doctor(world: &World) -> Result<()> {
         println!("{problems} problem(s) need attention.");
     }
     Ok(())
+}
+
+/// A probe that failed is itself worth reporting: silence would read as "fine".
+fn world_warn(out: &mut Vec<String>, host: &str, e: &anyhow::Error) {
+    out.push(format!("{host}: could not read auth status \u{2014} {e:#}"));
 }
 
 fn hosts_command(want_parsers: bool) -> Result<()> {

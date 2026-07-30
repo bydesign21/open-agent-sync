@@ -99,6 +99,18 @@ pub struct McpAdd {
     pub bearer_env_flag: Option<String>,
 }
 
+/// How to ask a host which of its servers actually have credentials.
+///
+/// A separate probe rather than part of the read path: it costs a subprocess, and
+/// the answer is only interesting to `doctor`. It has to come from the CLI because
+/// a config file records *how* to authenticate, never whether the credential is
+/// present.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AuthProbe {
+    pub argv: Vec<String>,
+    pub parser: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpSection {
     /// Scopes this host can represent. A scope the host lacks renders blocked.
@@ -109,6 +121,16 @@ pub struct McpSection {
     pub read: Vec<ReadSource>,
     pub add: McpAdd,
     pub remove: Invocation,
+
+    /// How to authenticate a server interactively. Declared so that pushing an
+    /// OAuth-backed server can tell the user the exact command, instead of
+    /// reporting a config entry that cannot connect as done.
+    #[serde(default)]
+    pub login: Option<Invocation>,
+
+    /// Optional; omit for a host with no machine-readable auth status.
+    #[serde(default)]
+    pub auth_status: Option<AuthProbe>,
 }
 
 impl McpSection {

@@ -182,6 +182,22 @@ impl McpServer {
         caps
     }
 
+    /// True when the definition carries no credential of its own, so the host
+    /// has to acquire one interactively.
+    ///
+    /// Pushing such a server writes a perfectly valid config entry that cannot
+    /// connect until someone runs the host's login command. OAuth credentials are
+    /// per-host and do not travel with the definition, so reporting the add as
+    /// done without saying this is reporting success for something non-functional.
+    pub fn needs_interactive_login(&self) -> bool {
+        match &self.transport {
+            Transport::Http(h) => h.bearer_token_env.is_none() && h.headers.is_empty(),
+            // A stdio server authenticates however its command does; nothing for
+            // us to say.
+            Transport::Stdio(_) => false,
+        }
+    }
+
     /// A one-line summary for the detail pane.
     pub fn summary(&self) -> String {
         match &self.transport {
@@ -275,6 +291,46 @@ pub struct FieldDiff {
     pub field: String,
     pub manifest: String,
     pub host: String,
+}
+
+/// Whether a host currently holds working credentials for a server.
+///
+/// Read from the host's CLI, not its config file: the file records *how* to
+/// authenticate, never whether the credential is present and valid.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuthStatus {
+    /// Credentials present, or none needed.
+    Ok(String),
+    /// Configured but unauthenticated — the server will fail to start.
+    NotLoggedIn,
+    /// The server does not authenticate.
+    NotApplicable,
+}
+
+impl AuthStatus {
+    /// Parse a host's own vocabulary. Unknown values are treated as fine rather
+    /// than as failures, so a new status string does not manufacture alarms.
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "not_logged_in" => AuthStatus::NotLoggedIn,
+            "unsupported" => AuthStatus::NotApplicable,
+            other => AuthStatus::Ok(other.to_string()),
+        }
+    }
+
+    pub fn needs_login(&self) -> bool {
+        matches!(self, AuthStatus::NotLoggedIn)
+    }
+}
+
+impl fmt::Display for AuthStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuthStatus::Ok(v) => f.write_str(v),
+            AuthStatus::NotLoggedIn => f.write_str("not logged in"),
+            AuthStatus::NotApplicable => f.write_str("no auth"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -433,6 +489,51 @@ mod tests {
         let diffs = a.diff(&b);
         assert_eq!(diffs.len(), 1);
         assert_eq!(diffs[0].field, "transport");
+    }
+
+    #[test]
+    fn only_a_credential_less_http_server_needs_an_interactive_login() {
+        let oauth = McpServer {
+            name: "sentry".into(),
+            transport: Transport::Http(HttpServer {
+                url: "https://mcp.sentry.dev/mcp".into(),
+                ..Default::default()
+            }),
+        };
+        assert!(oauth.needs_interactive_login());
+
+        let with_env = McpServer {
+            name: "k".into(),
+            transport: Transport::Http(HttpServer {
+                url: "https://a.test/mcp".into(),
+                bearer_token_env: Some("TOK".into()),
+                ..Default::default()
+            }),
+        };
+        assert!(!with_env.needs_interactive_login());
+
+        let with_header = McpServer {
+            name: "k".into(),
+            transport: Transport::Http(HttpServer {
+                url: "https://a.test/mcp".into(),
+                headers: BTreeMap::from([("X-Key".to_string(), "${K}".to_string())]),
+                bearer_token_env: None,
+            }),
+        };
+        assert!(!with_header.needs_interactive_login());
+
+        // A stdio server authenticates however its command does.
+        assert!(!stdio("node").needs_interactive_login());
+    }
+
+    #[test]
+    fn an_unknown_auth_status_is_not_treated_as_a_failure() {
+        assert!(AuthStatus::parse("not_logged_in").needs_login());
+        assert!(!AuthStatus::parse("o_auth").needs_login());
+        assert!(!AuthStatus::parse("bearer_token").needs_login());
+        assert!(!AuthStatus::parse("unsupported").needs_login());
+        // A status string we have never seen must not manufacture an alarm.
+        assert!(!AuthStatus::parse("something_new").needs_login());
     }
 
     #[test]

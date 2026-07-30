@@ -20,7 +20,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use super::{McpRead, ParseCtx};
-use crate::core::model::{HttpServer, McpServer, Scope, StdioServer, Transport};
+use crate::core::model::{AuthStatus, HttpServer, McpServer, Scope, StdioServer, Transport};
 use crate::manifest::secrets;
 
 /// `~/.claude.json`: user-scope `mcpServers` plus per-repo `projects.*.mcpServers`.
@@ -300,6 +300,36 @@ fn parse_codex_server(name: &str, def: &toml::Value) -> Result<McpServer> {
 }
 
 // ---------------------------------------------------------------------------
+// Auth status
+// ---------------------------------------------------------------------------
+
+/// `codex mcp list --json`: an array of `{ name, auth_status, ... }`.
+pub fn codex_auth_v1(text: &str, ctx: &ParseCtx) -> Result<super::AuthRead> {
+    let root: Value = serde_json::from_str(text)
+        .with_context(|| format!("parsing auth status from {}", ctx.origin.display()))?;
+    let mut out = super::AuthRead::default();
+
+    let Some(entries) = root.as_array() else {
+        out.warnings
+            .push("expected a JSON array of servers".to_string());
+        return Ok(out);
+    };
+
+    for entry in entries {
+        let Some(name) = entry.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let raw = entry
+            .get("auth_status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        out.statuses
+            .insert(name.to_string(), AuthStatus::parse(raw));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Serializer
 // ---------------------------------------------------------------------------
 
@@ -511,6 +541,23 @@ url = "https://a.test/mcp"
             .remove(0)
             .1;
         assert_eq!(original, again);
+    }
+
+    #[test]
+    fn reads_codex_auth_status() {
+        // Trimmed from real `codex mcp list --json` output.
+        let text = r#"[
+          {"name":"sentry","auth_status":"not_logged_in","transport":{"type":"streamable_http"}},
+          {"name":"vanta","auth_status":"o_auth","transport":{"type":"streamable_http"}},
+          {"name":"tradingview","auth_status":"unsupported","transport":{"type":"stdio"}},
+          {"name":"noStatus","transport":{"type":"stdio"}}
+        ]"#;
+        let read = codex_auth_v1(text, &ctx()).unwrap();
+        assert!(read.statuses["sentry"].needs_login());
+        assert!(!read.statuses["vanta"].needs_login());
+        assert!(!read.statuses["tradingview"].needs_login());
+        // A missing field must not be read as logged out.
+        assert!(!read.statuses["noStatus"].needs_login());
     }
 
     #[test]

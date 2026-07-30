@@ -27,7 +27,7 @@ On macOS or Linux — `uname -m` prints `arm64`/`aarch64` on Apple Silicon and a
 `x86_64` elsewhere:
 
 ```sh
-VERSION=v0.0.2
+VERSION=v0.0.3
 REPO=https://github.com/bydesign21/open-agent-sync
 
 case "$(uname -s)-$(uname -m)" in
@@ -61,7 +61,7 @@ macOS may quarantine a downloaded binary. If it refuses to run:
 xattr -d com.apple.quarantine ~/.local/bin/agentsync
 ```
 
-On Windows, download `agentsync-v0.0.2-x86_64-pc-windows-msvc.zip` from the
+On Windows, download `agentsync-v0.0.3-x86_64-pc-windows-msvc.zip` from the
 [releases page](https://github.com/bydesign21/open-agent-sync/releases), extract
 `agentsync.exe`, and put it somewhere on your `PATH`.
 
@@ -78,7 +78,7 @@ edition 2024. CI checks that against the `rust-version` in `Cargo.toml`, so it i
 not a guess. `rustup` is the easy way to get it.
 
 ```sh
-cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.2
+cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.3
 ```
 
 Or from a clone, which is what you want if you plan to change anything:
@@ -116,7 +116,8 @@ both host CLIs take the same arguments.
 agentsync              # the review TUI
 agentsync plan         # print the differences and the plan the defaults would produce
 agentsync apply --yes  # accept every default and run it
-agentsync doctor       # problems that aren't differences: secrets, unset vars, dead paths
+agentsync doctor       # problems that aren't differences: secrets, unset vars,
+                       # dead paths, and servers configured but not logged in
 agentsync hosts        # what agentsync knows about each CLI
 ```
 
@@ -185,6 +186,14 @@ is why the list converges to empty instead of training you to ignore it.
 **Capabilities are enforced, not assumed.** `codex mcp add` has no `--header`, so
 a server carrying custom HTTP headers is reported as *blocked* for Codex rather
 than pushed with the headers silently dropped. Every skipped host prints why.
+
+**A configured server is not a working server.** OAuth credentials are per-host and
+do not travel with a definition, so pushing an OAuth-backed MCP server writes a
+valid config entry that cannot connect until someone logs in. agentsync emits the
+exact login command as a step you still have to run, rather than reporting the add
+as done. `doctor` also asks each host which of its servers actually hold
+credentials — `codex mcp list --json` reports that; a config file cannot, because
+it records *how* to authenticate, never whether the credential exists.
 
 **Secrets are names, never values.** The manifest holds `bearer_token_env`,
 `env_from`, and `${VAR}` references. A value that looks like a live credential is
@@ -395,7 +404,7 @@ Set `version` in `Cargo.toml` equal to the tag — so `agentsync --version` and 
 release you downloaded agree — then push the tag:
 
 ```sh
-git tag v0.0.3 && git push origin v0.0.3
+git tag v0.0.4 && git push origin v0.0.4
 ```
 
 `.github/workflows/release.yml` builds all five targets, packages them, writes

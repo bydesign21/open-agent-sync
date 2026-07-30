@@ -32,6 +32,13 @@ argv = ["mcp", "add-json", "{name}", "{json}", "--scope", "{scope}"]
 [mcp.remove]
 argv = ["mcp", "remove", "{name}", "--scope", "{scope}"]
 
+[mcp.login]
+argv = ["mcp", "login", "{name}"]
+
+# `claude mcp list` has no --json and health-checks as a side effect, so there is
+# no machine-readable auth status to read. Omitting `auth_status` makes `doctor`
+# say so rather than imply everything is authenticated.
+
 [skills]
 dirs = ["~/.claude/skills"]
 

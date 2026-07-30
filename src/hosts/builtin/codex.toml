@@ -39,6 +39,15 @@ bearer_env_flag = "--bearer-token-env-var"
 [mcp.remove]
 argv = ["mcp", "remove", "{name}"]
 
+[mcp.login]
+argv = ["mcp", "login", "{name}"]
+
+# `codex mcp list --json` reports auth_status per server. The config file cannot:
+# it records how to authenticate, never whether a credential exists.
+[mcp.auth_status]
+argv = ["mcp", "list", "--json"]
+parser = "codex_auth_v1"
+
 [skills]
 dirs = ["~/.agents/skills", "~/.codex/skills"]
 

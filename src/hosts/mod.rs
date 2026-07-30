@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::core::model::{
-    HostSnapshot, MarketplaceSource, McpServer, Scope, SkillState, Transport,
+    AuthStatus, HostSnapshot, MarketplaceSource, McpServer, Scope, SkillState, Transport,
 };
 use crate::paths;
 
@@ -292,6 +292,52 @@ impl Host {
             ("scope".to_string(), scope.cli_name().to_string()),
         ]);
         runner::render(&mcp.remove.argv, &scalars, &BTreeMap::new())
+    }
+
+    /// argv that authenticates `name` interactively, if the host declares one.
+    pub fn mcp_login_argv(&self, name: &str) -> Option<Vec<String>> {
+        let login = self.descriptor.mcp.as_ref()?.login.as_ref()?;
+        let scalars = BTreeMap::from([("name".to_string(), name.to_string())]);
+        runner::render(&login.argv, &scalars, &BTreeMap::new()).ok()
+    }
+
+    /// The command a user would type to authenticate `name` on this host.
+    pub fn mcp_login_command(&self, name: &str) -> Option<String> {
+        let argv = self.mcp_login_argv(name)?;
+        Some(runner::shell_line(&self.descriptor.detect.bin, &argv))
+    }
+
+    /// Ask the host which of its servers actually hold credentials.
+    ///
+    /// `Ok(None)` means the host exposes no machine-readable status — which is
+    /// itself worth reporting, rather than being mistaken for "everything is fine".
+    pub fn probe_auth(&self) -> Result<Option<BTreeMap<String, AuthStatus>>> {
+        let Some(mcp) = &self.descriptor.mcp else {
+            return Ok(None);
+        };
+        let Some(probe) = &mcp.auth_status else {
+            return Ok(None);
+        };
+        let Some(bin) = &self.bin else {
+            return Ok(None);
+        };
+
+        let out = runner::run(bin, &probe.argv, None)
+            .with_context(|| format!("running {} {}", self.name(), probe.argv.join(" ")))?;
+        if !out.ok() {
+            anyhow::bail!(
+                "{} {} failed: {}",
+                self.descriptor.detect.bin,
+                probe.argv.join(" "),
+                out.message()
+            );
+        }
+        let ctx = ParseCtx {
+            repo: None,
+            origin: PathBuf::from(format!("{} {}", self.name(), probe.argv.join(" "))),
+        };
+        let read = parsers::read_auth(&probe.parser, &out.stdout, &ctx)?;
+        Ok(Some(read.statuses))
     }
 
     pub fn plugin_install_argv(
