@@ -506,6 +506,9 @@ pub fn describe_step(world: &World, step: &Step) -> Option<String> {
             "rm -r {}    (backed up first)",
             paths::contract(path)
         )),
+        Step::Fs(FsOp::WriteFile { path, .. }) => {
+            Some(format!("# write {}", paths::contract(path)))
+        }
         Step::Manual(text) => Some(format!("you must: {text}")),
         Step::Manifest(op) => Some(format!("manifest: {}", ManifestOp::describe(op))),
     }

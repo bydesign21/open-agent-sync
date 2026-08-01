@@ -396,6 +396,15 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
             }
             Ok(format!("removed {} (backed up)", paths::contract(path)))
         }
+        FsOp::WriteFile { path, contents } => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+            std::fs::write(path, contents)
+                .with_context(|| format!("writing {}", path.display()))?;
+            Ok(format!("wrote {}", paths::contract(path)))
+        }
     }
 }
 

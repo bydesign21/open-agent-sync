@@ -137,6 +137,12 @@ pub enum FsOp {
     },
     /// Delete canonical content. Only an explicit purge triggers this action.
     RemoveTree(PathBuf),
+    /// Write a generated file, creating parent directories. Used for shim
+    /// content, which agentsync owns outright.
+    WriteFile {
+        path: PathBuf,
+        contents: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -166,6 +172,7 @@ impl Step {
             Step::Host { argv, .. } if argv.iter().any(|a| a == "marketplace") => 1,
             Step::Host { argv, .. } if argv.iter().any(|a| a == "remove" || a == "uninstall") => 2,
             Step::Fs(FsOp::Unlink(_)) => 2,
+            Step::Fs(FsOp::WriteFile { .. }) => 0,
             _ => 3,
         }
     }
@@ -176,6 +183,10 @@ pub struct PlannedStep {
     /// Short label for a human reader, for example `add kicad to codex`.
     pub label: String,
     pub step: Step,
+    /// Overrides the step's default ordering class. Needed where the general
+    /// rule is wrong for one case: shim installs must precede the removal of
+    /// the plugin they replace.
+    pub order_hint: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -192,6 +203,16 @@ impl Plan {
         self.steps.push(PlannedStep {
             label: label.into(),
             step,
+            order_hint: None,
+        });
+    }
+
+    /// Push a step with an explicit ordering class.
+    pub fn push_ordered(&mut self, label: impl Into<String>, step: Step, order: u8) {
+        self.steps.push(PlannedStep {
+            label: label.into(),
+            step,
+            order_hint: Some(order),
         });
     }
 
@@ -207,7 +228,8 @@ impl Plan {
     /// one class keep the order in which the rows were listed. This keeps the
     /// plan readable.
     pub fn finalize(&mut self) {
-        self.steps.sort_by_key(|s| s.step.order());
+        self.steps
+            .sort_by_key(|s| s.order_hint.unwrap_or_else(|| s.step.order()));
     }
 
     pub fn touches_manifest(&self) -> bool {
@@ -263,5 +285,40 @@ mod tests {
         plan.finalize();
         let labels: Vec<&str> = plan.steps.iter().map(|s| s.label.as_str()).collect();
         assert_eq!(labels, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn an_explicit_order_hint_overrides_the_default_class() {
+        // Shims must be installed BEFORE the original is removed. If the removal
+        // fails, a duplicate hook is noisy and visible. The other order fails into
+        // silently no security review, which reads as health.
+        let mut plan = Plan::default();
+        plan.push(
+            "remove original",
+            host_step(&["plugin", "remove", "security-guidance"]),
+        );
+        plan.push_ordered(
+            "install shim",
+            host_step(&["plugin", "add", "agentsync-shim-security-guidance"]),
+            1,
+        );
+        plan.finalize();
+        let labels: Vec<&str> = plan.steps.iter().map(|s| s.label.as_str()).collect();
+        assert_eq!(labels, vec!["install shim", "remove original"]);
+    }
+
+    #[test]
+    fn writes_happen_before_any_host_command() {
+        let mut plan = Plan::default();
+        plan.push("install", host_step(&["plugin", "add", "x"]));
+        plan.push(
+            "write shim",
+            Step::Fs(FsOp::WriteFile {
+                path: "/tmp/x/hooks.json".into(),
+                contents: "{}".into(),
+            }),
+        );
+        plan.finalize();
+        assert_eq!(plan.steps[0].label, "write shim");
     }
 }
