@@ -1,8 +1,8 @@
 //! End-to-end differ and planner tests over a synthetic world.
 //!
-//! These build `World` directly rather than reading the machine, so they assert
-//! on behaviour that would otherwise only be visible by running the tool against
-//! a real configuration.
+//! These build `World` directly rather than reading the machine. So they assert
+//! on behaviour that would otherwise only be visible by running the tool
+//! against a real configuration.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,7 +25,7 @@ fn host(name: &str) -> Host {
         .1;
     Host {
         descriptor: descriptor::parse(text, name).unwrap(),
-        // Pretend it is installed; nothing in these tests executes it.
+        // Pretend it is installed. Nothing in these tests executes it.
         bin: Some(PathBuf::from(format!("/usr/bin/{name}"))),
     }
 }
@@ -495,8 +495,8 @@ fn a_literal_credential_becomes_a_warning_that_moves_it_to_an_env_var() {
         .expect("expected a manual step naming the variable");
 
     // It must not promise a copy that does not exist. The manifest's secret gate
-    // means the literal is never written there, and host config files are never
-    // backed up — so the only copy is the one this plan overwrites.
+    // means the literal is never written there. Host config files are never
+    // backed up, so the only copy is the one this plan overwrites.
     assert!(
         !manual.contains("backup"),
         "the manual step must not claim the literal is recoverable from a backup: {manual:?}"
@@ -1125,9 +1125,9 @@ fn hooks_snapshot(name: &str, hooks: Vec<HookHandler>) -> HostSnapshot {
     snap
 }
 
-/// A detected host whose descriptor has no `[hooks]` section at all — the
-/// shape a user descriptor takes when it replaces a builtin wholesale without
-/// carrying the hooks table forward.
+/// A detected host whose descriptor has no `[hooks]` section at all. This is
+/// the shape a user descriptor takes when it replaces a builtin wholesale
+/// without carrying the hooks table forward.
 fn host_without_hooks(name: &str) -> Host {
     let text =
         format!("name = \"{name}\"\ndisplay = \"{name}\"\ndetect = {{ bin = \"{name}\" }}\n");
@@ -1301,8 +1301,8 @@ fn unmodelled_fields_are_reported_even_with_no_other_gap() {
 
 #[test]
 fn unmodelled_fields_are_folded_into_an_existing_gap_row_not_a_second_row() {
-    // There is exactly one row per name per domain: an unmodelled field found
-    // alongside a real capability gap must append to that row's detail
+    // There is exactly one row per name per domain. An unmodelled field found
+    // alongside a real capability gap must append to that row's detail,
     // rather than emit a second row for the same handler/target pair.
     let mut h = HookHandler::new(
         hook_id("claude-settings", "PreToolUse"),
@@ -1329,7 +1329,7 @@ fn unmodelled_fields_are_folded_into_an_existing_gap_row_not_a_second_row() {
         hook_rows.iter().map(|r| &r.headline).collect::<Vec<_>>()
     );
     // The unmodelled field carries strictly more unknown risk than the `if`
-    // gap it was folded into, so the merged row cannot end up at a lighter
+    // gap it was folded into. So the merged row cannot end up at a lighter
     // severity than an unmodelled field alone would produce.
     assert_eq!(hook_rows[0].severity, Severity::Blocked);
     assert!(
