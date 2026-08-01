@@ -217,15 +217,13 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
         .map(|s| paths::expand(&s.marketplace))
         .filter(|d| d.is_dir())
         .collect();
-    if let Ok(agentsync_bin) = std::env::current_exe() {
-        report.push(
-            "SHIM HEALTH",
-            shim_health(&agentsync_bin, &shim_dirs)
-                .into_iter()
-                .map(|text| Line::new(Mark::Problem, text))
-                .collect(),
-        );
-    }
+    report.push(
+        "SHIM HEALTH",
+        shim_health(&shim_dirs)
+            .into_iter()
+            .map(|text| Line::new(Mark::Problem, text))
+            .collect(),
+    );
 
     let foreign: Vec<Line> = world
         .detected()
@@ -531,44 +529,232 @@ pub fn describe_step(world: &World, step: &Step) -> Option<String> {
 
 /// Problems with generated shims, for `doctor`.
 ///
-/// A shim whose binary has moved cannot run. It must be reported, because the
-/// host will keep invoking it and every invocation will fail.
-pub fn shim_health(bin: &std::path::Path, shim_dirs: &[std::path::PathBuf]) -> Vec<String> {
+/// Every generated command invokes the agentsync binary that existed when the
+/// shim was written. If that binary has since moved — a package manager
+/// swapping the Cellar path on upgrade, for example — the host keeps invoking
+/// a path that no longer resolves, and every run fails. The only way to know
+/// is to read what was actually generated and check it against the disk, so
+/// this walks each shim marketplace directory rather than checking anything
+/// about the process running `doctor` itself.
+pub fn shim_health(shim_dirs: &[std::path::PathBuf]) -> Vec<String> {
     let mut out = Vec::new();
-    if shim_dirs.is_empty() {
-        return out;
-    }
-    if !bin.exists() {
-        out.push(format!(
-            "generated shims invoke {}, which no longer exists. \
-             Re-run agentsync to regenerate them.",
-            bin.display()
-        ));
+    for shim_dir in shim_dirs {
+        let Ok(entries) = std::fs::read_dir(shim_dir) else {
+            continue;
+        };
+        for entry in entries.filter_map(Result::ok) {
+            let plugin_dir = entry.path();
+            if !plugin_dir.is_dir() {
+                continue;
+            }
+            let name = plugin_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| plugin_dir.display().to_string());
+
+            let hooks_json = plugin_dir.join("hooks/hooks.json");
+            match std::fs::read_to_string(&hooks_json) {
+                Err(_) => {
+                    out.push(format!(
+                        "{name}: no hooks/hooks.json at {} — the shim is broken",
+                        hooks_json.display()
+                    ));
+                }
+                Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                    Err(e) => out.push(format!(
+                        "{name}: hooks/hooks.json at {} does not parse as JSON: {e}",
+                        hooks_json.display()
+                    )),
+                    Ok(manifest) => {
+                        for path in recorded_binaries(&manifest) {
+                            if !std::path::Path::new(&path).exists() {
+                                out.push(format!(
+                                    "{name}: recorded binary {path} no longer exists. \
+                                     Re-run agentsync to regenerate the shim."
+                                ));
+                            }
+                        }
+                    }
+                },
+            }
+
+            if let Ok(children) = std::fs::read_dir(&plugin_dir) {
+                for child in children.filter_map(Result::ok) {
+                    let path = child.path();
+                    // `symlink_metadata` does not follow the link, so this is
+                    // true for a symlink whose target does not exist — never
+                    // for a real file or directory that is merely unreadable.
+                    if path
+                        .symlink_metadata()
+                        .is_ok_and(|m| m.file_type().is_symlink())
+                        && std::fs::metadata(&path).is_err()
+                    {
+                        out.push(format!("{name}: {} is a dangling symlink", path.display()));
+                    }
+                }
+            }
+        }
     }
     out
+}
+
+/// The binary path each generated `command` entry invokes.
+///
+/// Every command has the shape `'{agentsync_bin}' hook-shim --spec '{sidecar}'`
+/// (see `src/shim/generate.rs::shell_quote`), so the binary is the first
+/// single-quoted token. Deduplicated, since every handler in a plugin invokes
+/// the same binary and reporting it once per handler would repeat the same
+/// line five times for a five-handler plugin.
+fn recorded_binaries(manifest: &serde_json::Value) -> Vec<String> {
+    let mut out = Vec::new();
+    let Some(events) = manifest.get("hooks").and_then(|h| h.as_object()) else {
+        return out;
+    };
+    for groups in events.values() {
+        let Some(groups) = groups.as_array() else {
+            continue;
+        };
+        for group in groups {
+            let Some(hooks) = group.get("hooks").and_then(|h| h.as_array()) else {
+                continue;
+            };
+            for hook in hooks {
+                let Some(command) = hook.get("command").and_then(|c| c.as_str()) else {
+                    continue;
+                };
+                if let Some(bin) = first_single_quoted_token(command) {
+                    out.push(bin);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The text between the first pair of single quotes in `s`.
+fn first_single_quoted_token(s: &str) -> Option<String> {
+    let start = s.find('\'')?;
+    let rest = &s[start + 1..];
+    let end = rest.find('\'')?;
+    Some(rest[..end].to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn doctor_reports_a_shim_whose_binary_no_longer_exists() {
-        let lines = shim_health(
-            std::path::Path::new("/nonexistent/agentsync"),
-            &[std::path::PathBuf::from("/nonexistent/shims/demo")],
-        );
-        assert_eq!(lines.len(), 1);
-        assert!(
-            lines[0].contains("/nonexistent/agentsync"),
-            "must name the missing binary: {lines:?}"
-        );
+    /// Writes a working shim plugin under `marketplace_dir/{plugin_name}`,
+    /// whose recorded binary is `bin` (real or not — the caller decides).
+    fn write_shim(marketplace_dir: &std::path::Path, plugin_name: &str, bin: &str) {
+        let plugin_dir = marketplace_dir.join(plugin_name);
+        let hooks_dir = plugin_dir.join("hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let manifest = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": format!("'{bin}' hook-shim --spec '/x/spec.json'"),
+                    }]
+                }]
+            }
+        });
+        std::fs::write(
+            hooks_dir.join("hooks.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
     fn doctor_is_quiet_when_there_are_no_shims() {
-        let lines = shim_health(std::path::Path::new("/bin/sh"), &[]);
+        let lines = shim_health(&[]);
         assert!(lines.is_empty(), "no shims means nothing to say: {lines:?}");
+    }
+
+    #[test]
+    fn a_healthy_shim_tree_reports_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // The recorded binary must actually exist for this to be "healthy".
+        let bin = dir.path().join("agentsync");
+        std::fs::write(&bin, b"").unwrap();
+        write_shim(
+            dir.path(),
+            "agentsync-shim-mkt-demo",
+            &bin.to_string_lossy(),
+        );
+        let lines = shim_health(&[dir.path().to_path_buf()]);
+        assert!(
+            lines.is_empty(),
+            "a healthy tree must report nothing: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_shim_whose_recorded_binary_no_longer_exists_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        write_shim(
+            dir.path(),
+            "agentsync-shim-mkt-demo",
+            "/nonexistent/agentsync",
+        );
+        let lines = shim_health(&[dir.path().to_path_buf()]);
+        assert_eq!(lines.len(), 1, "got {lines:?}");
+        assert!(
+            lines[0].contains("agentsync-shim-mkt-demo")
+                && lines[0].contains("/nonexistent/agentsync"),
+            "must name both the shim and the missing path: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_shim_plugin_with_no_hooks_json_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        // A plugin directory that exists but never got its hooks.json
+        // written — the exact shape a partially-written or hand-edited shim
+        // takes.
+        std::fs::create_dir_all(dir.path().join("agentsync-shim-mkt-demo/hooks")).unwrap();
+        let lines = shim_health(&[dir.path().to_path_buf()]);
+        assert_eq!(lines.len(), 1, "got {lines:?}");
+        assert!(
+            lines[0].contains("agentsync-shim-mkt-demo") && lines[0].contains("hooks.json"),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_dangling_vendored_symlink_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("agentsync");
+        std::fs::write(&bin, b"").unwrap();
+        write_shim(
+            dir.path(),
+            "agentsync-shim-mkt-demo",
+            &bin.to_string_lossy(),
+        );
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(
+            "/nonexistent/skills",
+            dir.path().join("agentsync-shim-mkt-demo/skills"),
+        )
+        .unwrap();
+        let lines = shim_health(&[dir.path().to_path_buf()]);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("skills") && l.contains("dangling")),
+            "got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_shim_dir_that_does_not_exist_is_quiet_rather_than_an_error() {
+        // A host whose descriptor names a shim marketplace it has never
+        // actually generated into. Nothing to report, not a crash.
+        let lines = shim_health(&[std::path::PathBuf::from("/nonexistent/shims/codex")]);
+        assert!(lines.is_empty(), "got {lines:?}");
     }
 
     #[test]
