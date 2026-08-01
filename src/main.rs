@@ -301,7 +301,7 @@ fn doctor(world: &World) -> Result<()> {
 /// Compare each detected host's binary against its declared hook capabilities.
 ///
 /// This is a human-facing report only. A name found in a binary is evidence
-/// that a feature might exist, never proof that the host honours it — this
+/// that a feature can exist, never proof that the host honours it — this
 /// project has already seen `codex` mention `asyncRewake` in its string table
 /// while still failing to honour the surrounding hook config. Nothing here
 /// feeds `plan` or `apply`.
@@ -356,7 +356,7 @@ fn probe_lines(bytes: &[u8], declared: &agentsync::hosts::descriptor::HooksSecti
     if !found_any {
         return vec![
             "could not read hook field names from this file. \
-             It may be a launcher script rather than the host binary."
+             It can be a launcher script rather than the host binary."
                 .to_string(),
         ];
     }
