@@ -40,8 +40,8 @@ pub struct StepResult {
 pub struct Report {
     pub results: Vec<StepResult>,
     pub manifest_written: bool,
-    /// Populated when the manifest could not be written; the reason matters
-    /// because the host side may already have changed.
+    /// Populated when the tool could not write the manifest. The reason
+    /// matters, because host-side changes can already exist.
     pub manifest_error: Option<String>,
 }
 
@@ -66,9 +66,9 @@ impl Report {
 
 /// A progress notification.
 ///
-/// `Started` exists because some steps are slow — a plugin install clones a
-/// repository — and a caller that only hears about *finished* steps has nothing
-/// to display while one is in flight, which reads as a hang.
+/// `Started` exists because some steps are slow. A plugin install, for
+/// example, clones a repository. A caller that hears about only *finished*
+/// steps has nothing to show while a step runs, and that looks like a hang.
 #[derive(Clone, Copy, Debug)]
 pub enum Progress<'a> {
     Started {
@@ -197,8 +197,8 @@ pub fn run(
             }
         } else {
             report.manifest_error = Some(
-                "manifest not written: at least one manifest edit failed, and a \
-                 partially-applied manifest would make the next run diff against \
+                "manifest not written: at least one manifest edit failed. A \
+                 partially-applied manifest makes the next run diff against \
                  a state that never existed"
                     .into(),
             );
@@ -325,8 +325,9 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
             if let Some(parent) = link.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            // Replacing something we did not create is a real mutation, so back
-            // it up first and say so.
+            // This replaces content that agentsync did not create, so it counts
+            // as a real mutation. Back it up first, and mention that in the
+            // result message.
             let mut backed_up = None;
             if link.symlink_metadata().is_ok() {
                 if link.is_dir() && std::fs::symlink_metadata(link)?.file_type().is_dir() {
@@ -354,9 +355,10 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
                         std::fs::remove_file(path)?;
                     } else {
                         // Refuse to silently delete real content behind an
-                        // "unlink" label. Purging is a separate, explicit op.
+                        // "unlink" label. Purging is a separate, explicit
+                        // operation.
                         anyhow::bail!(
-                            "{} is real content, not a link; use a removal action to delete it",
+                            "{} is real content, not a link. Use a removal action to delete it.",
                             path.display()
                         );
                     }
@@ -367,7 +369,7 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
         FsOp::MoveIntoCanonical { from, to } => {
             if to.exists() {
                 anyhow::bail!(
-                    "canonical path {} already exists; refusing to overwrite it",
+                    "canonical path {} already exists. This tool refuses to overwrite it.",
                     to.display()
                 );
             }
@@ -397,10 +399,11 @@ fn apply_fs_op(op: &FsOp) -> Result<String> {
     }
 }
 
-/// Rename, falling back to copy+delete across filesystems.
+/// Rename the path. If rename does not work across filesystems, copy the
+/// content, then delete the original.
 ///
-/// Handles a file as well as a directory: skills are directories, instruction
-/// files are files, and both are adopted the same way.
+/// Handles a file and a directory: skills are directories, instruction files
+/// are files, and this function adopts both the same way.
 fn move_path(from: &Path, to: &PathBuf) -> Result<()> {
     if std::fs::rename(from, to).is_ok() {
         return Ok(());
@@ -447,7 +450,7 @@ mod tests {
     fn a_failed_step_does_not_stop_the_run() {
         let home = tmp_home();
         let mut plan = Plan::default();
-        // First step fails: setting hosts on an entry that isn't there.
+        // First step fails: it sets hosts on an entry that does not exist.
         plan.push(
             "set hosts on a missing entry",
             Step::Manifest(ManifestOp::SetMcpHosts {
@@ -551,8 +554,8 @@ mod tests {
 
         let file = home.path().join("CLAUDE.md");
         std::fs::write(&file, "# instructions").unwrap();
-        // A plain file is removable by unlink, because a host-owned instruction
-        // file that we are replacing with a link has to be cleared first.
+        // A plain file is removable by unlink, because agentsync must clear a
+        // host-owned instruction file before it replaces the file with a link.
         let message = apply_fs_op(&FsOp::Unlink(file.clone())).unwrap();
         assert!(message.contains("unlinked"), "{message}");
         assert!(!file.exists());
