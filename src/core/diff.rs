@@ -1,12 +1,12 @@
 //! Row and action types.
 //!
-//! The UI shows a to-do list, not a matrix, so the differ's output is already
+//! The UI shows a to-do list, not a matrix. So the differ's output is already
 //! shaped like a decision: a headline sentence, a default action, and the legal
 //! alternatives. Keeping that shaping here rather than in the TUI is what lets
 //! `agentsync plan` print the identical set of decisions with no terminal.
 //!
 //! There is exactly **one row per name per domain**. Several problems can apply
-//! to the same name; the most severe wins the headline and the rest go in the
+//! to the same name. The most severe wins the headline, and the rest go in the
 //! detail line. Emitting three rows for one server is how a matrix design
 //! becomes unreadable.
 
@@ -70,7 +70,7 @@ impl Severity {
     }
 }
 
-/// What to do about a row. Eight variants cover all three domains; the planner
+/// What to do about a row. Eight variants cover all three domains. The planner
 /// dispatches on `(domain, kind)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionKind {
@@ -89,7 +89,7 @@ pub enum ActionKind {
     /// Send the manifest's value to these hosts.
     Push { hosts: Vec<String> },
 
-    /// Remove it. `from_manifest` also drops the manifest entry; `purge` also
+    /// Remove it. `from_manifest` also drops the manifest entry. `purge` also
     /// deletes canonical skill content (never the default).
     Delete {
         hosts: Vec<String>,
@@ -108,9 +108,9 @@ pub enum ActionKind {
     /// Replace a literal credential with an environment-variable reference.
     SecretToEnv { var: String },
 
-    /// Plugins only: record which marketplace to install from, when more than
-    /// one of a host's marketplaces offers the same name and installing would
-    /// otherwise be a coin flip.
+    /// Plugins only: record which marketplace to install from. Used when more
+    /// than one of a host's marketplaces offers the same name, so installing
+    /// would otherwise be a coin flip.
     PinMarketplace { marketplace: String },
 }
 
@@ -148,7 +148,7 @@ pub struct RowKey {
 pub struct Row {
     pub domain: Domain,
     pub name: String,
-    /// The sentence shown in the list, e.g. `only in claude, 3 repos`.
+    /// The sentence shown in the list, for example `only in claude, 3 repos`.
     pub headline: String,
     /// Extra context for the detail line, including any lower-priority problems
     /// folded into this row.
@@ -227,14 +227,15 @@ impl fmt::Display for Row {
 /// host.
 ///
 /// Per-host removal is the point: "get this out of Codex but keep it in Claude"
-/// is a normal thing to want, and doing it by hand means remembering to also
-/// narrow the manifest or it comes straight back as drift. The planner adds that
+/// is a normal thing to want. Doing it by hand means also remembering to narrow
+/// the manifest, or it comes straight back as drift. The planner adds that
 /// narrowing automatically.
 pub fn removal_actions(hosts: &[String], verb: &str, from_manifest: bool) -> Vec<Action> {
     if hosts.is_empty() {
         // In the manifest but on no host. There is nothing to uninstall, but the
-        // manifest entry itself still has to be removable, or an entry that never
-        // installed anywhere would be reported forever with no way to drop it.
+        // manifest entry itself still has to be removable. Otherwise an entry
+        // that never installed anywhere is reported forever with no way to drop
+        // it.
         if from_manifest {
             return vec![Action::new(
                 "drop it from the manifest",

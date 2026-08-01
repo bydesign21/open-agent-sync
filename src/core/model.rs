@@ -9,9 +9,9 @@ use serde::{Deserialize, Serialize};
 
 /// Which of a host's configuration layers an entry lives in.
 ///
-/// Scope is part of an entry's *identity*, not a display attribute: the same
-/// name at two scopes is a shadowing bug, not a synced pair, and the differ can
-/// only see that if it keys on scope.
+/// Scope is part of an entry's *identity*, not a display attribute. The same
+/// name at two scopes is a shadowing bug, not a synced pair. The differ can see
+/// that only when it keys on scope.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Scope {
     /// Global to the machine.
@@ -89,9 +89,9 @@ pub fn short_repo(path: &str) -> String {
 
 /// A feature an MCP server definition requires from a host.
 ///
-/// This is the mechanism that prevents silent data loss: `codex mcp add` has no
-/// `--header`, so a server carrying [`Cap::Headers`] is *blocked* for Codex and
-/// reported, never pushed with the headers quietly dropped.
+/// This is the mechanism that prevents silent data loss. `codex mcp add` has no
+/// `--header`, so a server carrying [`Cap::Headers`] is *blocked* for Codex, and
+/// reported, rather than pushed with the headers quietly dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Cap {
@@ -141,7 +141,7 @@ impl fmt::Display for Cap {
 pub enum HookCap {
     /// Coarse per-event tool filter.
     Matcher,
-    /// Fine-grained permission-style filter, e.g. `Bash(git commit:*)`.
+    /// Fine-grained permission-style filter, for example `Bash(git commit:*)`.
     If,
     Timeout,
     AsyncRewake,
@@ -310,7 +310,7 @@ pub struct StdioServer {
     pub args: Vec<String>,
     /// Literal values. Never secrets — the manifest gate rejects those.
     pub env: BTreeMap<String, String>,
-    /// Names only; values are read from the ambient environment at launch.
+    /// Names only. Values are read from the ambient environment at launch.
     pub env_from: Vec<String>,
 }
 
@@ -370,8 +370,8 @@ impl McpServer {
     pub fn needs_interactive_login(&self) -> bool {
         match &self.transport {
             Transport::Http(h) => h.bearer_token_env.is_none() && h.headers.is_empty(),
-            // A stdio server authenticates however its command does; nothing for
-            // us to say.
+            // A stdio server authenticates however its command does. There is
+            // nothing for us to say.
             Transport::Stdio(_) => false,
         }
     }
@@ -518,9 +518,9 @@ impl fmt::Display for AuthStatus {
 /// How a linked thing currently exists inside one host's directory.
 ///
 /// Shared by skills and instruction files, because the states and their
-/// consequences are identical: a symlink into canonical storage is synced, a real
-/// file or directory is content the host owns and must not be silently
-/// overwritten, and a symlink elsewhere belongs to something else.
+/// consequences are identical. A symlink into canonical storage is synced. A
+/// real file or directory is content the host owns and must not be silently
+/// overwritten. A symlink elsewhere belongs to something else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LinkState {
     /// Symlink pointing at our canonical path. Synced.
@@ -599,7 +599,7 @@ impl fmt::Display for MarketplaceSource {
 pub struct HostSnapshot {
     pub host: String,
     pub display: String,
-    /// False when the host's binary isn't on PATH. Such a host renders dimmed
+    /// False when the host's binary is not on PATH. Such a host renders dimmed
     /// and stages nothing: absent is not the same as divergent.
     pub detected: bool,
     pub mcp: BTreeMap<(Scope, String), McpServer>,
@@ -616,10 +616,9 @@ pub struct HostSnapshot {
     /// plugin names.
     ///
     /// This has to be read rather than assumed. Neither CLI resolves a bare
-    /// plugin id: `codex plugin add superpowers` fails with "requires
-    /// --marketplace unless passed as <plugin>@<marketplace>", and
-    /// `claude plugin install` fails outright when no configured marketplace
-    /// carries the name.
+    /// plugin id. `codex plugin add superpowers` fails with "requires
+    /// --marketplace unless passed as <plugin>@<marketplace>". `claude plugin
+    /// install` fails outright when no configured marketplace carries the name.
     pub catalog: BTreeMap<String, BTreeSet<String>>,
     pub hooks: BTreeMap<HookId, HookHandler>,
     /// Non-fatal problems hit while reading, surfaced by `doctor`.
