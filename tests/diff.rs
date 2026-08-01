@@ -12,7 +12,7 @@ use agentsync::core::model::{
     HookHandler, HookId, HostSnapshot, HttpServer, McpServer, Scope, ScopeKind, StdioServer,
     Transport,
 };
-use agentsync::core::plan::Step;
+use agentsync::core::plan::{FsOp, Step};
 use agentsync::domains::World;
 use agentsync::hosts::{Host, descriptor};
 use agentsync::manifest::{Manifest, McpEntry};
@@ -1336,5 +1336,162 @@ fn unmodelled_fields_are_folded_into_an_existing_gap_row_not_a_second_row() {
         hook_rows[0].detail.contains("futureThing"),
         "{}",
         hook_rows[0].detail
+    );
+}
+
+#[test]
+fn a_shimmable_gap_offers_to_generate_a_shim_and_planning_it_emits_real_steps() {
+    // `if` is shimmable, and codex declares `[hooks.shim]`, so this gap is the
+    // "actionable" case: shimmable and hostable.
+    let mut h = HookHandler::new(
+        hook_id(
+            "security-guidance@claude-plugins-official:hooks/hooks.json",
+            "PreToolUse",
+        ),
+        "PreToolUse",
+        "echo hi",
+    );
+    h.if_pattern = Some("Bash(git commit:*)".into());
+
+    let mut codex_snap = hooks_snapshot("codex", vec![]);
+    // The original plugin is already installed on the target, so the plan must
+    // also remove it once the shim replaces it.
+    codex_snap.plugins.insert(
+        "security-guidance".to_string(),
+        agentsync::core::model::InstalledPlugin {
+            name: "security-guidance".to_string(),
+            marketplace: "claude-plugins-official".to_string(),
+        },
+    );
+
+    let world = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![hooks_snapshot("claude", vec![h]), codex_snap],
+    );
+
+    let mut rows = world.rows();
+    let row = rows
+        .iter_mut()
+        .find(|r| r.domain == Domain::Hooks && r.severity == Severity::Normal)
+        .expect("a shimmable gap");
+
+    assert!(
+        row.actionable(),
+        "a gap a shim can close must offer to close it, got {:?}",
+        row.action().kind
+    );
+    row.accepted = true;
+
+    let plan = world.plan(&rows);
+    let labels: Vec<&str> = plan.steps.iter().map(|s| s.label.as_str()).collect();
+    assert!(!plan.steps.is_empty(), "accepting must produce steps");
+
+    let write_at = plan
+        .steps
+        .iter()
+        .position(|s| matches!(s.step, Step::Fs(FsOp::WriteFile { .. })))
+        .expect("the shim content must be written");
+    let install_at = plan
+        .steps
+        .iter()
+        .position(
+            |s| matches!(&s.step, Step::Host { argv, .. } if argv.contains(&"add".to_string())),
+        )
+        .expect("the shim must be installed");
+    let remove_at = plan
+        .steps
+        .iter()
+        .position(
+            |s| matches!(&s.step, Step::Host { argv, .. } if argv.contains(&"remove".to_string())),
+        )
+        .expect("the original must be removed");
+
+    assert!(write_at < install_at, "content before install: {labels:?}");
+    assert!(
+        install_at < remove_at,
+        "install BEFORE remove: a failed removal leaves a duplicate hook, \
+         which is visible. The other order fails into no security review at \
+         all, which reads as health. Got {labels:?}"
+    );
+}
+
+#[test]
+fn accepting_two_shimmable_plugins_writes_the_marketplace_manifest_only_once() {
+    // The manifest lists every shim plugin at once, and applying it is a
+    // whole-file write. Writing it per row would leave only the last row's
+    // plugin registered, so this pins the fix from the plan side too.
+    let mut h1 = HookHandler::new(
+        hook_id(
+            "security-guidance@claude-plugins-official:hooks/hooks.json",
+            "PreToolUse",
+        ),
+        "PreToolUse",
+        "echo hi",
+    );
+    h1.if_pattern = Some("Bash(git commit:*)".into());
+
+    let mut h2 = HookHandler::new(
+        hook_id(
+            "other-plugin@claude-plugins-official:hooks/hooks.json",
+            "PreToolUse",
+        ),
+        "PreToolUse",
+        "echo bye",
+    );
+    h2.if_pattern = Some("Bash(git push:*)".into());
+
+    let world = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![
+            hooks_snapshot("claude", vec![h1, h2]),
+            hooks_snapshot("codex", vec![]),
+        ],
+    );
+
+    let mut rows = world.rows();
+    for row in rows
+        .iter_mut()
+        .filter(|r| r.domain == Domain::Hooks && r.severity == Severity::Normal)
+    {
+        row.accepted = true;
+    }
+
+    let plan = world.plan(&rows);
+    let manifest_writes: Vec<&String> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match &s.step {
+            Step::Fs(FsOp::WriteFile { path, contents })
+                if path
+                    .to_string_lossy()
+                    .ends_with(".claude-plugin/marketplace.json") =>
+            {
+                Some(contents)
+            }
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(
+        manifest_writes.len(),
+        1,
+        "the manifest must be written exactly once, or the last write wins \
+         and silently unregisters the earlier plugin: {:?}",
+        manifest_writes
+    );
+    let manifest: serde_json::Value = serde_json::from_str(manifest_writes[0]).unwrap();
+    let names: Vec<&str> = manifest["plugins"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|p| p["name"].as_str())
+        .collect();
+    assert!(
+        names.iter().any(|n| n.contains("security-guidance")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n.contains("other-plugin")),
+        "{names:?}"
     );
 }

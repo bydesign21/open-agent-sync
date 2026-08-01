@@ -6,9 +6,11 @@
 //! A hook that silently does not run looks exactly like a hook that found
 //! nothing, which is the worst outcome available for a security review.
 
+use anyhow::Context;
+
 use crate::core::diff::{Action, ActionKind, Domain, Row, Severity};
 use crate::core::model::HookCap;
-use crate::core::plan::Plan;
+use crate::core::plan::{Plan, Step};
 use crate::domains::World;
 
 /// How the shim emulates a capability the target lacks.
@@ -87,7 +89,12 @@ pub fn rows(world: &World) -> Vec<Row> {
                         Severity::Blocked => {
                             Some(blocked_cap_row(handler, target_host.name(), &missing))
                         }
-                        _ => Some(shim_row(handler, target_host.name(), &missing)),
+                        _ => Some(shim_row(
+                            handler,
+                            source_host.name(),
+                            target_host.name(),
+                            &missing,
+                        )),
                     }
                 };
 
@@ -213,7 +220,12 @@ fn blocked_cap_row(
     }
 }
 
-fn shim_row(handler: &crate::core::model::HookHandler, target: &str, missing: &[HookCap]) -> Row {
+fn shim_row(
+    handler: &crate::core::model::HookHandler,
+    source: &str,
+    target: &str,
+    missing: &[HookCap],
+) -> Row {
     Row {
         domain: Domain::Hooks,
         name: handler.id.short(),
@@ -223,19 +235,206 @@ fn shim_row(handler: &crate::core::model::HookHandler, target: &str, missing: &[
             caps_list(missing)
         ),
         severity: Severity::Normal,
-        // Generating the shim lands in the next plan. Until then the only
-        // honest action is none: claiming a fix that does not run is worse
-        // than reporting the gap.
-        actions: vec![Action::new("nothing to do", ActionKind::Nothing)],
+        actions: vec![
+            Action::new(
+                format!("generate a shim for {target}"),
+                ActionKind::Push {
+                    hosts: vec![target.to_string()],
+                },
+            ),
+            Action::new("nothing to do", ActionKind::Nothing),
+        ],
         chosen: 0,
         accepted: false,
-        key: Default::default(),
+        key: crate::core::diff::RowKey {
+            source_host: Some(source.to_string()),
+            ..Default::default()
+        },
     }
 }
 
-/// No actionable row is produced yet, so nothing reaches the planner. The next
-/// plan replaces this with shim generation.
-pub fn plan_row(_world: &World, _row: &Row, _plan: &mut Plan) {}
+pub fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
+    let ActionKind::Push { hosts } = &row.action().kind else {
+        return;
+    };
+    for target_name in hosts {
+        if let Err(e) = plan_one(world, row, target_name, plan) {
+            // A shim we cannot build must be said out loud. Skipping quietly
+            // would leave the row looking handled.
+            plan.note(format!("{}: {e:#}", row.name));
+        }
+    }
+}
+
+fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> anyhow::Result<()> {
+    let source_name = row
+        .key
+        .source_host
+        .as_deref()
+        .context("row does not record which host the hook came from")?;
+    let source = world
+        .snapshot(source_name)
+        .context("source host is not detected")?;
+    let target = world.host(target_name).context("target host is unknown")?;
+    let declared = target
+        .descriptor
+        .hooks
+        .as_ref()
+        .context("target declares no [hooks] section")?;
+    let effective = world.manifest.hooks_for(target_name, declared);
+    let shim = effective
+        .shim
+        .as_ref()
+        .context("target declares no [hooks.shim] marketplace")?;
+
+    // Every handler from the same source plugin travels together: the shim
+    // replaces the original wholesale, so a partial shim would drop the rest.
+    let handler = source
+        .hooks
+        .values()
+        .find(|h| h.id.short() == row.name)
+        .context("handler is no longer present")?;
+    let origin = handler.id.source.clone();
+    let handlers: Vec<_> = source
+        .hooks
+        .values()
+        .filter(|h| h.id.source == origin)
+        .cloned()
+        .collect();
+
+    let (plugin, marketplace) =
+        split_source(&origin).context("only plugin hooks can be shimmed today")?;
+
+    let input = crate::shim::generate::ShimInput {
+        marketplace_dir: crate::paths::expand(&shim.marketplace),
+        plugin: plugin.clone(),
+        marketplace: marketplace.clone(),
+        handlers,
+        allowed_output: effective
+            .output
+            .iter()
+            .map(|f| f.json_key().to_string())
+            .collect(),
+        fold_into_system_message: vec!["rewakeMessage".to_string()],
+        agentsync_bin: std::env::current_exe()
+            .context("cannot find the agentsync binary to invoke from the shim")?,
+        // The shim supersedes the original, so its other content has to travel
+        // with it. Only directories that actually exist are linked, which is a
+        // filesystem question and therefore answered here, not in the pure
+        // generator.
+        vendor: handler
+            .plugin_root
+            .as_ref()
+            .map(|root| {
+                ["skills", "commands", "agents"]
+                    .iter()
+                    .map(|d| root.join(d))
+                    .filter(|d| d.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let generated = crate::shim::generate::plan_shim(&input)?;
+
+    for op in generated.ops {
+        plan.push(format!("write shim for {plugin}"), Step::Fs(op));
+    }
+    plan.push(
+        format!("register the agentsync shim marketplace with {target_name}"),
+        Step::Host {
+            host: target_name.to_string(),
+            argv: target.marketplace_add_argv(
+                &generated.marketplace_name,
+                &input.marketplace_dir.to_string_lossy(),
+            )?,
+            cwd: None,
+        },
+    );
+
+    // The marketplace manifest lists every shim plugin at once, and applying it
+    // is a whole-file write. Writing it per row would leave only the last row's
+    // plugin registered, and the earlier ones would silently fail to install.
+    // So rebuild it from every shim this plan already carries, plus this one.
+    rewrite_marketplace_manifest(plan, &input.marketplace_dir, &generated.shim_plugin)?;
+    // Order 1 puts the install ahead of the removal below. A failed removal
+    // leaves a duplicate hook, which is visible. A failed install after a
+    // removal leaves no review at all, which reads as health.
+    plan.push_ordered(
+        format!("install the {plugin} shim in {target_name}"),
+        Step::Host {
+            host: target_name.to_string(),
+            argv: target
+                .plugin_install_argv(&generated.shim_plugin, Some(&generated.marketplace_name))?,
+            cwd: None,
+        },
+        1,
+    );
+    if world
+        .snapshot(target_name)
+        .is_some_and(|s| s.plugins.contains_key(&plugin))
+    {
+        plan.push(
+            format!("remove the original {plugin} from {target_name}"),
+            Step::Host {
+                host: target_name.to_string(),
+                argv: target.plugin_remove_argv(&plugin, Some(&marketplace))?,
+                cwd: None,
+            },
+        );
+    }
+    Ok(())
+}
+
+/// `<plugin>@<marketplace>:<file>` split into its two names.
+fn split_source(source: &str) -> Option<(String, String)> {
+    let (plugin, rest) = source.split_once('@')?;
+    let marketplace = rest.split(':').next()?;
+    Some((plugin.to_string(), marketplace.to_string()))
+}
+
+/// Replace the marketplace manifest op with one naming every shim in the plan.
+///
+/// Rows are planned one at a time, but the manifest is a single file listing
+/// them all. Reading the set back out of the plan keeps this correct however
+/// many rows the user accepts.
+fn rewrite_marketplace_manifest(
+    plan: &mut Plan,
+    marketplace_dir: &std::path::Path,
+    new_plugin: &str,
+) -> anyhow::Result<()> {
+    let manifest_path = marketplace_dir.join(".claude-plugin/marketplace.json");
+
+    let mut plugins: Vec<String> = plan
+        .steps
+        .iter()
+        .filter_map(|s| match &s.step {
+            // An install step names the shim as `<plugin>@<marketplace>`.
+            Step::Host { argv, .. } => argv
+                .iter()
+                .find(|a| a.starts_with("agentsync-shim-"))
+                .map(|a| a.split('@').next().unwrap_or(a).to_string()),
+            _ => None,
+        })
+        .collect();
+    if !plugins.iter().any(|p| p == new_plugin) {
+        plugins.push(new_plugin.to_string());
+    }
+    plugins.sort();
+    plugins.dedup();
+
+    plan.steps.retain(|s| {
+        !matches!(&s.step, Step::Fs(crate::core::plan::FsOp::WriteFile { path, .. })
+            if path == &manifest_path)
+    });
+    plan.push(
+        "list every generated shim in the agentsync marketplace",
+        Step::Fs(crate::shim::generate::marketplace_manifest_op(
+            marketplace_dir,
+            &plugins,
+        )?),
+    );
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
