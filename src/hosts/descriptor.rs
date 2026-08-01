@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::core::model::{Cap, ScopeKind};
+use crate::core::model::{Cap, HookCap, HookOutputField, ScopeKind};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostDescriptor {
@@ -35,6 +35,8 @@ pub struct HostDescriptor {
     pub instructions: Option<InstructionsSection>,
     #[serde(default)]
     pub plugins: Option<PluginsSection>,
+    #[serde(default)]
+    pub hooks: Option<HooksSection>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -231,6 +233,69 @@ pub struct PluginsSection {
     pub implicit_marketplaces: Vec<String>,
 }
 
+/// Where a host reads hook definitions from. Exactly one of `file` or `glob`.
+///
+/// A separate type from [`ReadSource`] because plugin hooks live behind a
+/// wildcard path and MCP sources never do.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HookSource {
+    #[serde(default)]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub glob: Option<String>,
+    pub parser: String,
+}
+
+/// Where generated shim plugins are written for this host.
+///
+/// Absent means the host can be a *source* of hooks but never a shim target;
+/// incompatibilities aimed at it are reported as blocked.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HooksShim {
+    /// Directory agentsync owns and registers as a local marketplace.
+    pub marketplace: String,
+}
+
+/// What a host's hook engine can represent.
+///
+/// `caps` and `output` are two vocabularies on purpose: `caps` is what the host
+/// understands in the manifest, `output` is what it accepts back on stdout.
+/// These are *defaults* — the user manifest may override them per host, so a
+/// user on a newer host release is not blocked waiting for a release here.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HooksSection {
+    pub events: Vec<String>,
+    pub caps: Vec<HookCap>,
+    pub output: Vec<HookOutputField>,
+    #[serde(default)]
+    pub read: Vec<HookSource>,
+    #[serde(default)]
+    pub shim: Option<HooksShim>,
+}
+
+impl HooksSection {
+    pub fn supports(&self, cap: HookCap) -> bool {
+        self.caps.contains(&cap)
+    }
+    pub fn supports_event(&self, event: &str) -> bool {
+        self.events.iter().any(|e| e == event)
+    }
+    pub fn accepts_output(&self, field: HookOutputField) -> bool {
+        self.output.contains(&field)
+    }
+    /// Capabilities `needed` that this host cannot represent.
+    pub fn missing_caps(&self, needed: &[HookCap]) -> Vec<HookCap> {
+        needed
+            .iter()
+            .copied()
+            .filter(|c| !self.supports(*c))
+            .collect()
+    }
+    pub fn can_shim(&self) -> bool {
+        self.shim.is_some()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
@@ -246,7 +311,9 @@ pub const BUILTIN: &[(&str, &str)] = &[
 pub fn parse(text: &str, origin: &str) -> Result<HostDescriptor> {
     let d: HostDescriptor =
         toml::from_str(text).with_context(|| format!("parsing host descriptor {origin}"))?;
-    validate(&d).with_context(|| format!("validating host descriptor {origin}"))?;
+    if let Err(e) = validate(&d) {
+        anyhow::bail!("validating host descriptor {origin}: {e}");
+    }
     Ok(d)
 }
 
@@ -293,6 +360,13 @@ fn validate(d: &HostDescriptor) -> Result<()> {
         && skills.dirs.is_empty()
     {
         anyhow::bail!("skills.dirs must not be empty");
+    }
+    if let Some(hooks) = &d.hooks {
+        for (i, source) in hooks.read.iter().enumerate() {
+            if source.file.is_some() == source.glob.is_some() {
+                anyhow::bail!("hooks.read[{i}] must name exactly one of `file` or `glob`");
+            }
+        }
     }
     Ok(())
 }
@@ -376,5 +450,59 @@ argv_http = ["mcp", "add", "{name}", "--url", "{url}"]
 "#;
         let err = parse(bad, "bogus").unwrap_err();
         assert!(format!("{err:#}").contains("header_flag"), "{err:#}");
+    }
+
+    #[test]
+    fn codex_declares_hook_caps_that_exclude_if() {
+        let d = parse(
+            include_str!("builtin/codex.toml"),
+            "builtin/codex.toml",
+        )
+        .unwrap();
+        let hooks = d.hooks.expect("codex declares a hooks section");
+        assert!(hooks.supports(HookCap::Matcher));
+        assert!(hooks.supports(HookCap::AsyncRewake));
+        assert!(!hooks.supports(HookCap::If));
+        assert!(!hooks.accepts_output(HookOutputField::RewakeSummary));
+        assert!(hooks.can_shim());
+    }
+
+    #[test]
+    fn claude_supports_events_codex_cannot_express() {
+        let c = parse(include_str!("builtin/claude.toml"), "claude").unwrap();
+        let x = parse(include_str!("builtin/codex.toml"), "codex").unwrap();
+        let claude = c.hooks.unwrap();
+        let codex = x.hooks.unwrap();
+        assert!(claude.supports_event("PreCompact"));
+        assert!(!codex.supports_event("PreCompact"));
+    }
+
+    #[test]
+    fn missing_caps_names_exactly_what_the_target_lacks() {
+        let d = parse(include_str!("builtin/codex.toml"), "codex").unwrap();
+        let hooks = d.hooks.unwrap();
+        assert_eq!(
+            hooks.missing_caps(&[HookCap::Matcher, HookCap::If, HookCap::RewakeSummary]),
+            vec![HookCap::If, HookCap::RewakeSummary]
+        );
+    }
+
+    #[test]
+    fn a_hook_source_must_name_exactly_one_of_file_or_glob() {
+        let text = r#"
+name = "x"
+display = "X"
+detect = { bin = "x" }
+
+[hooks]
+events = ["Stop"]
+caps = []
+output = []
+
+[[hooks.read]]
+parser = "claude_hooks_json_v1"
+"#;
+        let err = parse(text, "x").unwrap_err().to_string();
+        assert!(err.contains("hooks.read"), "unexpected error: {err}");
     }
 }

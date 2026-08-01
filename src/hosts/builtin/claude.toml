@@ -74,3 +74,29 @@ argv = ["plugin", "marketplace", "add", "{source}"]
 
 [plugins.marketplace_remove]
 argv = ["plugin", "marketplace", "remove", "{name}"]
+
+# Hooks. `caps` is what the manifest may express; `output` is what the host
+# accepts back on a hook's stdout. Both are defaults — `[hosts.claude.hooks]`
+# in the user manifest overrides them.
+[hooks]
+events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+          "Stop", "SubagentStop", "PreCompact", "Notification", "SessionEnd"]
+caps   = ["matcher", "if", "timeout", "async_rewake",
+          "rewake_message", "rewake_summary"]
+output = ["hook_specific_output", "system_message", "additional_context",
+          "suppress_output", "rewake_message", "rewake_summary"]
+
+[[hooks.read]]
+glob   = "~/.claude/plugins/cache/*/*/*/hooks/hooks.json"
+parser = "claude_hooks_json_v1"
+
+[[hooks.read]]
+file   = "~/.claude/settings.json"
+parser = "claude_settings_hooks_v1"
+
+[[hooks.read]]
+file   = "~/.claude/settings.local.json"
+parser = "claude_settings_hooks_v1"
+
+[hooks.shim]
+marketplace = "~/.agentsync/shims/claude"
