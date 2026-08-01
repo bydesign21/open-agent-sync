@@ -66,7 +66,7 @@ pub struct Invocation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AddStyle {
-    /// One argv containing `{json}`; the whole definition goes in as a document.
+    /// One argv containing `{json}`. The whole definition goes in as a document.
     Json,
     /// Separate argv per transport, with repeated flags for env and headers.
     Flags,
@@ -132,7 +132,7 @@ pub struct McpSection {
     #[serde(default)]
     pub login: Option<Invocation>,
 
-    /// Optional; omit for a host with no machine-readable auth status.
+    /// Optional. Omit it for a host with no machine-readable auth status.
     #[serde(default)]
     pub auth_status: Option<AuthProbe>,
 }
@@ -157,7 +157,7 @@ impl McpSection {
 /// Where a host reads its instructions ("system prompt") from, per scope.
 ///
 /// Omitting a scope means the host has no equivalent — Codex has no counterpart
-/// to `CLAUDE.local.md` — which the differ reports as blocked rather than
+/// to `CLAUDE.local.md`. The differ reports this as blocked, rather than
 /// inventing a location.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InstructionsSection {
@@ -190,7 +190,7 @@ impl InstructionsSection {
 pub struct SkillsSection {
     /// Directories this host reads skills from. **`dirs[0]` is the write
     /// target** — the rest are read-only, so a host that also reads a shared
-    /// directory doesn't get a duplicate symlink.
+    /// directory does not get a duplicate symlink.
     pub dirs: Vec<String>,
 }
 
@@ -207,7 +207,7 @@ impl SkillsSection {
 /// guessed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CatalogSource {
-    /// Path with `*` wildcards, e.g.
+    /// Path with `*` wildcards, for example
     /// `~/.claude/plugins/marketplaces/*/.claude-plugin/marketplace.json`.
     pub glob: String,
     pub parser: String,
@@ -216,10 +216,10 @@ pub struct CatalogSource {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PluginsSection {
     pub read: Vec<ReadSource>,
-    /// Marketplace manifests to read. In addition to these, the manifest of any
-    /// directory-source marketplace this host has configured is read from
-    /// `<dir>/.claude-plugin/marketplace.json`, which is how local marketplaces
-    /// are found without hardcoding where a host caches them.
+    /// Marketplace manifests to read. In addition to these, agentsync reads the
+    /// manifest of any directory-source marketplace this host has configured,
+    /// from `<dir>/.claude-plugin/marketplace.json`. This is how local
+    /// marketplaces are found without hardcoding where a host caches them.
     #[serde(default)]
     pub catalog: Vec<CatalogSource>,
     pub install: Invocation,
@@ -248,8 +248,8 @@ pub struct HookSource {
 
 /// Where generated shim plugins are written for this host.
 ///
-/// Absent means the host can be a *source* of hooks but never a shim target;
-/// incompatibilities aimed at it are reported as blocked.
+/// Absent means the host can be a *source* of hooks but never a shim target.
+/// Incompatibilities aimed at it are reported as blocked.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HooksShim {
     /// Directory agentsync owns and registers as a local marketplace.
@@ -260,7 +260,7 @@ pub struct HooksShim {
 ///
 /// `caps` and `output` are two vocabularies on purpose: `caps` is what the host
 /// understands in the manifest, `output` is what it accepts back on stdout.
-/// These are *defaults* — the user manifest may override them per host, so a
+/// These are *defaults*. The user manifest may override them per host, so a
 /// user on a newer host release is not blocked waiting for a release here.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HooksSection {
@@ -331,7 +331,9 @@ fn validate(d: &HostDescriptor) -> Result<()> {
             }
             AddStyle::Flags => {
                 if mcp.add.argv_stdio.is_empty() && mcp.add.argv_http.is_empty() {
-                    anyhow::bail!("mcp.add.style = \"flags\" requires argv_stdio and/or argv_http");
+                    anyhow::bail!(
+                        "mcp.add.style = \"flags\" requires argv_stdio, argv_http, or both"
+                    );
                 }
                 if mcp.supports(Cap::Env)
                     && (mcp.add.env_flag.is_none() || mcp.add.env_format.is_none())

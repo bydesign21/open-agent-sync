@@ -75,7 +75,7 @@ argv = ["plugin", "marketplace", "add", "{source}"]
 [plugins.marketplace_remove]
 argv = ["plugin", "marketplace", "remove", "{name}"]
 
-# Hooks. `caps` is what the manifest may express; `output` is what the host
+# Hooks. `caps` is what the manifest may express. `output` is what the host
 # accepts back on a hook's stdout. Both are defaults — `[hosts.claude.hooks]`
 # in the user manifest overrides them.
 [hooks]

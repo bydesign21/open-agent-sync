@@ -4,7 +4,7 @@
 //! Config *formats* are irregular enough that describing them in data would be a
 //! second programming language. Config *locations* and *CLI invocations* are
 //! regular, so those stay in the descriptor. A new host normally reuses a parser
-//! here; only a genuinely new file format needs code.
+//! here. Only a genuinely new file format needs code.
 
 pub mod hooks;
 pub mod mcp;

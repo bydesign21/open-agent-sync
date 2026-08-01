@@ -1,9 +1,9 @@
 //! The host layer: descriptor + detection + read path + argv construction.
 //!
 //! Writes always go through the host's own CLI. We parse host config files but
-//! never rewrite them, because those files hold state that is none of our
-//! business (Codex's `[projects.*]` trust levels, notice flags, model
-//! preferences) and a generator that owns the whole file destroys it.
+//! never rewrite them. Those files hold state that is none of our business
+//! (Codex's `[projects.*]` trust levels, notice flags, model preferences), and
+//! a generator that owns the whole file destroys it.
 
 pub mod descriptor;
 pub mod parsers;
@@ -25,7 +25,7 @@ use parsers::ParseCtx;
 
 pub struct Host {
     pub descriptor: HostDescriptor,
-    /// Resolved binary, or `None` when the host isn't installed.
+    /// Resolved binary, or `None` when the host is not installed.
     pub bin: Option<PathBuf>,
 }
 
@@ -264,7 +264,7 @@ impl Host {
     }
 
     /// Expand one read source into concrete paths. A `{repo}` path yields one
-    /// entry per repo; everything else yields exactly one.
+    /// entry per repo. Everything else yields exactly one.
     fn expand_source(&self, source: &ReadSource, repos: &[String]) -> Vec<(PathBuf, ParseCtx)> {
         if source.file.contains("{repo}") {
             repos
@@ -502,11 +502,11 @@ impl Host {
 }
 
 /// Expand a `*`-containing path. A pattern that matches nothing yields nothing,
-/// which is normal — a host may simply have no marketplaces cached yet.
+/// which is normal — a host may have no marketplaces cached yet.
 ///
-/// Output is sorted so that any "last one wins" behaviour downstream (e.g. two
-/// cached plugin versions keying to the same `HookId`) is deterministic rather
-/// than dependent on filesystem iteration order.
+/// Output is sorted, so any "last one wins" behaviour downstream (for example,
+/// two cached plugin versions keying to the same `HookId`) is deterministic.
+/// It does not depend on filesystem iteration order.
 fn expand_glob(pattern: &str) -> Vec<PathBuf> {
     let expanded = paths::expand(pattern);
     let text = expanded.to_string_lossy();
@@ -565,7 +565,7 @@ fn read_if_present(path: &Path) -> Result<Option<String>> {
 ///
 /// Skipped: dotfiles (`.DS_Store`, `.skill-lock.json`), plain files, and
 /// directories with no `SKILL.md`. A directory carrying a plugin manifest is
-/// recorded in `plugin_dirs` and excluded — `claude plugin init` scaffolds
+/// recorded in `plugin_dirs` and excluded. `claude plugin init` scaffolds
 /// plugins into the skills directory, and those belong to the plugin manager.
 fn scan_skills_dir(
     dir: &Path,
@@ -733,8 +733,8 @@ parser = "claude_settings_hooks_v1"
         // Claude's plugin cache keeps every version it has ever fetched:
         // `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/hooks/hooks.json`.
         // `plugin_identity` deliberately drops the version segment from the
-        // `HookId` (Codex's own state is versionless), so two versions of the
-        // same plugin key to the same id and the second read silently wins.
+        // `HookId` (Codex's own state is versionless). So two versions of the
+        // same plugin key to the same id, and the second read silently wins.
         // That must not happen without a warning naming both plugin roots.
         let tmp = tempfile::tempdir().unwrap();
         let root_v1 = tmp.path().join("cache/mkt/demo/1.0.0");
