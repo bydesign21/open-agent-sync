@@ -33,11 +33,6 @@ pub fn normalize(stdout: &str, spec: &ShimSpec) -> String {
             } else {
                 suppressed.push(key);
             }
-        } else if value.is_string() {
-            // A plain string key that nobody declared as carrying human text.
-            // Drop it without a note. A note on every unlisted string field
-            // would bury the notes that matter under routine noise.
-            continue;
         } else {
             suppressed.push(key);
         }
@@ -87,14 +82,19 @@ mod tests {
     }
 
     #[test]
-    fn a_key_the_target_rejects_is_dropped() {
+    fn a_key_the_target_rejects_is_dropped_and_named() {
         let out = normalize(
             r#"{"systemMessage":"keep me","rewakeSummary":"drop me"}"#,
             &spec(&["systemMessage"], &[]),
         );
         let v = parse(&out);
-        assert_eq!(v["systemMessage"], "keep me");
-        assert!(v.get("rewakeSummary").is_none());
+        assert!(v.get("rewakeSummary").is_none(), "the key must not survive");
+        let msg = v["systemMessage"].as_str().unwrap();
+        assert!(msg.contains("keep me"), "existing text lost: {msg}");
+        assert!(
+            msg.contains("rewakeSummary"),
+            "a dropped field must be named, never deleted quietly: {msg}"
+        );
     }
 
     #[test]
