@@ -133,7 +133,7 @@ both host CLIs take the same arguments.
 agentsync              # the review TUI
 agentsync plan         # print the differences and the plan the defaults would produce
 agentsync apply --yes  # accept every default and run it
-agentsync plan --only instructions   # or mcp, skills, plugins
+agentsync plan --only instructions   # or mcp, skills, plugins, hooks
 agentsync doctor       # problems that aren't differences: secrets, unset vars,
                        # dead paths, servers not logged in, and new releases
 agentsync hosts        # what agentsync knows about each CLI
@@ -222,6 +222,23 @@ MEMORIES (reported, never synced)
   – codex: ~/.codex/memories_1.sqlite (40 KB) — SQLite, with no file-level
     counterpart on the other side
 ```
+
+**Hooks are reported, not yet fixed.** A bash hook can carry an `if` guard, or
+set `rewakeMessage` / `rewakeSummary` — Codex's hook config has no field for any
+of them, and its own `trusted_hash` proves it: that hash covers only the
+command, so five differently-guarded handlers hash identically once installed.
+`agentsync plan --only hooks` names exactly which fields a target would drop,
+and blocks the row outright when the whole event has no counterpart on that
+host (`PreCompact`, `SubagentStop`, `Notification`):
+
+```
+HOOKS
+    security-guidance@claude-plugins-official:hooks/hooks.json:post_tool_use:1:0
+      codex ignores if, rewake_message, rewake_summary  →  nothing to do
+```
+
+Nothing is generated to close the gap yet — a shim that emulates the dropped
+fields on Codex is a separate, later plan.
 
 **A canonical manifest, adopted from either side.** `~/.config/agentsync/manifest.toml`
 records what you decided should exist. Symlink it into your dotfiles to version
@@ -433,7 +450,7 @@ It never shadows the user manifest silently — a name collision is reported.
 ```
 tui/        review + run screens
 core/       model, differ, planner, applier — no host knowledge
-domains/    mcp, skills, instructions, plugins
+domains/    mcp, skills, instructions, plugins, hooks
 hosts/      descriptor loader, parser registry, CLI runner
 manifest/   canonical file + secret gate
 ```
