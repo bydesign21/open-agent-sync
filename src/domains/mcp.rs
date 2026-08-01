@@ -27,7 +27,7 @@ fn block_reason(host: &Host, server: &McpServer, scope: &Scope) -> Option<String
     None
 }
 
-/// A literal credential sitting in a server definition, and the header holding it.
+/// A literal credential in a server definition, and the header that holds it.
 fn literal_secret(server: &McpServer) -> Option<(String, &'static str)> {
     match &server.transport {
         Transport::Http(h) => h
@@ -172,8 +172,8 @@ fn unmanaged_row(
                 .join(", ")
         ));
         // Default to one global definition. Collapsing to *a* scope is also
-        // offered, but which per-repo copy survives is arbitrary, so it must not
-        // be what happens when you hold down the accept key.
+        // offered. Which per-repo copy survives is arbitrary, so it must not be
+        // what happens when the user holds down the accept key.
         actions.push(Action::new(
             "adopt + make global (drops the duplicates)",
             ActionKind::Adopt {
@@ -191,7 +191,7 @@ fn unmanaged_row(
         }
     } else {
         severity = Severity::Normal;
-        // "only in X" is a lie when every host has it — what is missing then is
+        // "only in X" is wrong when every host has it. What is missing then is
         // the manifest entry, not a host.
         let everywhere = world
             .detected()
@@ -221,7 +221,7 @@ fn unmanaged_row(
             if needs_promote {
                 "adopt, keep it per-repo"
             } else {
-                "adopt only, don't push"
+                "adopt only, do not push"
             },
             ActionKind::Adopt {
                 push: false,
@@ -285,8 +285,8 @@ fn managed_row(
             continue;
         }
 
-        // A host that cannot represent this server is blocked, never pushed to
-        // with the unrepresentable part quietly dropped.
+        // A host that cannot represent this server is blocked. It never receives
+        // a push that silently drops the unrepresentable part.
         let representative_scope = want_scopes.first().cloned().unwrap_or(Scope::User);
         if let Some(why) = block_reason(host, &want, &representative_scope) {
             blocked.push((hname, why));
@@ -555,8 +555,8 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
     match &row.action().kind {
         ActionKind::Nothing => {}
 
-        // Plugins-only; reaching it here means a row was built with the wrong
-        // action, so say so rather than doing nothing silently.
+        // This applies only to plugins. Reaching it here means a row used the
+        // wrong action, so say so rather than doing nothing silently.
         ActionKind::PinMarketplace { .. } => {
             plan.note(format!(
                 "{name}: pinning a marketplace does not apply to MCP servers"
@@ -583,10 +583,10 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
             );
 
             if *promote {
-                // Remove the per-repo definitions we are replacing, before the
-                // global one lands. A host that already holds it at user scope is
-                // left alone — removing and re-adding it would be pure churn, and
-                // would briefly delete a correct entry.
+                // Remove the per-repo definitions being replaced, before the
+                // global one lands. Leave alone a host that already holds it at
+                // user scope: removing and re-adding it would only cause churn,
+                // and would briefly delete a correct entry.
                 remove_from_hosts(world, &name, &row.key.host_scopes, plan, |scope| {
                     scope.kind() != ScopeKind::User
                 });
@@ -707,9 +707,9 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
             // Land a corrected definition in the manifest, then push it so the
             // host's own config stops holding the literal too.
             //
-            // Where the literal lives *right now*, so the manual step can say
-            // where to copy it from. It is deliberately never echoed into the
-            // plan: the plan is printable and exportable as a shell script.
+            // This records where the literal lives right now, so the manual step
+            // can say where to copy it from. The plan never echoes it, because
+            // the plan is printable and exportable as a shell script.
             let holder;
             let entry = match world.manifest.mcp.get(&name) {
                 Some(existing) => {
@@ -755,17 +755,17 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
             };
 
             push_entry(world, &name, &entry, plan, true);
-            // Not "it is in the backup": the manifest's secret gate means the
-            // literal is never written there, and host config files are never
-            // backed up because we do not own them. The only copy is the one
-            // this plan is about to overwrite, so say that.
+            // Not "it is in the backup": the manifest's secret gate means it
+            // never writes the literal there, and host config files are never
+            // backed up, because we do not own them. This plan is about to
+            // overwrite the only copy, so say that.
             plan.push(
                 format!("set ${var} in your shell profile"),
                 Step::Manual(format!(
-                    "copy the token out of {holder} FIRST, then \
-                     export {var}=<that value> \u{2014} running this plan replaces \
+                    "copy the token out of {holder} FIRST. Then \
+                     export {var}=<that value>. Running this plan replaces \
                      the literal with a ${{{var}}} reference, and nothing keeps a \
-                     copy of it"
+                     copy of it."
                 )),
             );
         }
@@ -774,10 +774,10 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
 
 /// After removing from `removed`, make the manifest agree.
 ///
-/// Removing from one host while the manifest still wants it everywhere is futile
-/// — the next run reports it as missing and offers to put it back. So a partial
-/// removal narrows `hosts = [...]` to what remains, and a total removal drops the
-/// entry.
+/// Removing from one host while the manifest still wants it everywhere is
+/// futile: the next run reports it as missing and offers to add it back. So a
+/// partial removal narrows `hosts = [...]` to what remains, and a total
+/// removal drops the entry.
 fn record_narrowing(
     world: &World,
     name: &str,
@@ -938,8 +938,8 @@ fn push_entry_to(
                     );
                     // An OAuth-backed server lands as a valid config entry that
                     // cannot connect: credentials are per-host and do not travel
-                    // with the definition. Reporting the add as done without
-                    // saying this is reporting success for something broken.
+                    // with the definition. Reporting the add as done, without
+                    // saying this, would report success for something broken.
                     if server.needs_interactive_login()
                         && let Some(command) = host.mcp_login_command(name)
                     {

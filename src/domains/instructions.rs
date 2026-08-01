@@ -1,17 +1,18 @@
 //! The instructions domain: `CLAUDE.md`, `AGENTS.md`, and their per-repo forms.
 //!
-//! Mechanically this is the skills domain with a file instead of a directory: one
-//! canonical file in `~/.config/agentsync/prompts/`, symlinked into wherever each
-//! host looks. Both read plain markdown, so one file genuinely serves both.
+//! This domain works like the skills domain, but with a file instead of a
+//! directory. One canonical file lives in `~/.config/agentsync/prompts/`, and a
+//! symlink points to it from wherever each host looks. Both hosts read plain
+//! markdown, so one file can serve both.
 //!
-//! Shared is the default because most of what goes in these files is about the
-//! *repo* — package manager, deploy gate, conventions — not the tool. The parts
-//! that do name one CLI are what `hosts = [...]` is for, and a row that differs
-//! offers "keep them divergent" precisely so you can split those out once instead
-//! of being nagged forever.
+//! The shared file is the default. Most content in these files describes the
+//! *repo* — package manager, deploy gate, conventions — not the tool. The
+//! `hosts = [...]` field exists for the parts that name one CLI. When a row
+//! differs, it offers a "keep them divergent" action, so you can split those
+//! parts out once instead of the tool asking about it on every run.
 //!
-//! A scope a host has no location for — Codex has no `CLAUDE.local.md` — is
-//! blocked rather than given an invented path.
+//! When a host has no location for a scope — for example, Codex has no
+//! `CLAUDE.local.md` — agentsync blocks that scope. It does not invent a path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -24,10 +25,10 @@ use crate::paths;
 
 use super::World;
 
-/// The canonical file for a scope, when the manifest does not say otherwise.
+/// The canonical file for a scope, used when the manifest names none.
 ///
-/// Public because the host read path needs it to decide whether a symlink it
-/// found points at us.
+/// This function is public. The host read path needs it to decide whether a
+/// found symlink points at us.
 pub fn canonical_for(scope: &Scope) -> PathBuf {
     paths::prompts_dir().join(format!("{}.md", default_name(scope)))
 }
@@ -70,8 +71,9 @@ fn canonical_path(world: &World, scope: &Scope) -> PathBuf {
     }
 }
 
-/// Removal labels that say what is actually destroyed, as for skills: unlinking
-/// is reversible, deleting the only copy of a file you wrote is not.
+/// Removal labels that state what the action actually destroys, as in
+/// skills.rs. Unlinking is reversible. Deleting the only copy of a file you
+/// wrote is not.
 fn removals(
     states: &BTreeMap<String, LinkState>,
     canonical_exists: bool,
@@ -243,9 +245,10 @@ fn row_for(world: &World, scope: &Scope) -> Option<Row> {
             .filter(|h| !owned.contains(h))
             .cloned()
             .collect();
-        // When two hosts each wrote their own file, there is no defensible
-        // default: picking one silently discards the other's wording. So the
-        // only offers are explicit, and you choose whose becomes canonical.
+        // When two hosts each wrote their own file, no default choice is safe:
+        // picking one would silently discard the other's wording. So the
+        // options stay explicit, and you choose which version becomes
+        // canonical.
         let mut actions = Vec::new();
         if owned.len() > 1 {
             for host in &owned {
@@ -267,7 +270,7 @@ fn row_for(world: &World, scope: &Scope) -> Option<Row> {
                 },
             ));
             actions.push(Action::new(
-                "adopt only, don't link",
+                "adopt only, do not link",
                 ActionKind::Adopt {
                     push: false,
                     promote: false,
@@ -612,7 +615,7 @@ fn link_into(world: &World, scope: &Scope, canonical: &Path, hosts: &[String], p
         }
         let Some(path) = host.instruction_path(scope) else {
             plan.note(format!(
-                "{hname}: no location for {} instructions, so it was skipped",
+                "{hname}: no location for {} instructions, so agentsync skipped it",
                 scope.cli_name()
             ));
             continue;
@@ -633,7 +636,8 @@ fn link_into(world: &World, scope: &Scope, canonical: &Path, hosts: &[String], p
     }
 }
 
-/// Removing from some hosts narrows the manifest; removing from all drops it.
+/// Removing from some hosts narrows the manifest. Removing from all hosts
+/// drops it.
 fn narrow_or_drop(
     world: &World,
     name: &str,
