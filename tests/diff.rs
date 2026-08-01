@@ -422,7 +422,7 @@ fn a_header_carrying_server_is_never_pushed_to_a_host_that_cannot_express_header
         row.headline
     );
 
-    // Even if accepted, no codex add may be emitted.
+    // Even if accepted, the plan must not emit a codex add step.
     accept(&mut rows, "corridor");
     let plan = w.plan(&rows);
     let touches_codex = plan.steps.iter().any(|s| match &s.step {
@@ -894,7 +894,7 @@ fn a_scope_a_host_cannot_hold_is_reported_not_invented() {
         row.detail
     );
 
-    // And nothing may be planned for codex.
+    // And nothing must be planned for codex.
     let mut rows = rows;
     for r in rows.iter_mut() {
         r.accepted = r.name == "repos-one.local" && r.actionable();

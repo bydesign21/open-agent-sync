@@ -391,7 +391,7 @@ part that does not fit.
 
 Template vocabulary: `{key}` substitutes a scalar anywhere in an argument (an
 unknown key is an error, never an empty string), and an argument that is exactly
-`{key...}` splices a list and may expand to nothing.
+`{key...}` splices a list and can expand to nothing.
 
 ## Manifest
 
