@@ -25,24 +25,27 @@ pub enum Strategy {
 }
 
 /// Capabilities a generated shim can emulate.
-pub const SHIMMABLE: &[HookCap] = &[
-    HookCap::If,
-    HookCap::AsyncRewake,
-    HookCap::RewakeMessage,
-    HookCap::RewakeSummary,
-];
+pub const SHIMMABLE: &[HookCap] = &[HookCap::If, HookCap::RewakeMessage, HookCap::RewakeSummary];
 
 pub fn strategy_for(cap: HookCap) -> Option<Strategy> {
     match cap {
         HookCap::If => Some(Strategy::Prefilter),
-        HookCap::AsyncRewake | HookCap::RewakeMessage | HookCap::RewakeSummary => {
-            Some(Strategy::NormalizeOutput)
-        }
+        HookCap::RewakeMessage | HookCap::RewakeSummary => Some(Strategy::NormalizeOutput),
         // Without `matcher` the host never invokes the hook for the right tool
         // in the first place, so there is nothing for a shim to intercept.
         HookCap::Matcher => None,
         // A host that cannot express a timeout cannot be given one from outside.
         HookCap::Timeout => None,
+        // Asynchronous rewake is the host's own scheduling behaviour: it wakes
+        // the agent up again after the hook returns. A shim runs inside a
+        // single hook invocation and exits when the command does, so there is
+        // no "later" for it to run in — nothing here can make a host wake up
+        // on its own. Where a target DOES declare `async_rewake` (Codex does),
+        // the generator re-emits the field directly (see
+        // `src/shim/generate.rs`), so the cap never reaches `missing` and this
+        // arm is not exercised. Where a target does not declare it, the honest
+        // answer is a blocked row naming the cap, not a promised emulation.
+        HookCap::AsyncRewake => None,
     }
 }
 
@@ -559,6 +562,18 @@ mod tests {
     fn a_gap_with_an_unshimmable_cap_is_blocked_and_names_it() {
         // `matcher` cannot be emulated: without it the host never invokes us.
         assert_eq!(classify(&[HookCap::Matcher], true), Severity::Blocked);
+    }
+
+    #[test]
+    fn a_shim_cannot_make_a_host_wake_up_later_so_async_rewake_has_no_strategy() {
+        // A shim runs inside one hook invocation and exits with the command.
+        // There is no "later" for it to run in, so a target that genuinely
+        // lacks `async_rewake` gets an honest blocked row, never a promised
+        // emulation. (A target that DOES declare the cap, like Codex, gets it
+        // re-emitted directly in `src/shim/generate.rs` and never reaches
+        // this path at all.)
+        assert!(strategy_for(HookCap::AsyncRewake).is_none());
+        assert!(!SHIMMABLE.contains(&HookCap::AsyncRewake));
     }
 
     #[test]
