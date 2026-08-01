@@ -144,6 +144,10 @@ modified until you press `⏎`, review the exact commands, and confirm with `y`.
 `c` on that screen writes the plan out as a shell script if you would rather run
 it yourself.
 
+Some default actions replace a file or a plugin on the target host instead of
+only adding one. The hooks section below explains what generating a shim
+removes, and how to reverse it.
+
 `doctor`, the plan preview, and the host inventory are also reachable **from
 inside the TUI** — `D`, `P`, and `H`. Being told to quit the interface to answer
 "what is wrong with my setup?" is a bad answer. `?` lists every key. All of
@@ -224,11 +228,12 @@ MEMORIES (reported, never synced)
 ```
 
 **A dropped hook field gets a shim, not just a report.** A bash hook can carry
-an `if` guard, or set `rewakeMessage` / `rewakeSummary`. Codex's hook config
-has no field for any of them. Its own `trusted_hash` proves this. The hash
-covers only the command, so five differently-guarded handlers hash
-identically once installed. For a gap like this, `agentsync plan --only hooks`
-now offers to generate a shim instead of reporting a dead end:
+an `if` guard, or set `asyncRewake`, `rewakeMessage`, or `rewakeSummary`.
+Codex's hook config has no field for `if`, `rewakeMessage`, or `rewakeSummary`.
+Its own `trusted_hash` proves this. The hash covers only the command, so five
+differently-guarded handlers hash identically once installed. For a gap like
+this, `agentsync plan --only hooks` offers to generate a shim instead of
+reporting a dead end:
 
 ```
 HOOKS
@@ -236,19 +241,39 @@ HOOKS
       codex ignores if, rewake_message, rewake_summary  →  generate a shim for codex
 ```
 
-Applying it writes a small plugin whose commands call `agentsync hook-shim
---spec <sidecar>`, one sidecar per handler. At run time, the shim evaluates the
-dropped `if` guard itself. It then runs the original command, with
-`CLAUDE_PLUGIN_ROOT` set back to the original plugin, and folds
-`rewakeMessage` into a field Codex accepts. Each handler gets its own sidecar,
-so the five commands are distinct again, and so are their `trusted_hash`
-values.
+**Applying this action replaces the plugin on the target host.** agentsync
+installs the generated shim, then removes the original plugin from Codex. From
+that point, the shim is the only thing that runs the original's hooks there.
 
-A shim closes a filter gap only. A `matcher` or `timeout` that Codex cannot
-express still blocks the row, and a field agentsync does not model still
-blocks it too — a shim cannot emulate what agentsync cannot read. The
-generated command names this binary's own path. Regenerate the shim after you
-upgrade agentsync.
+The generated plugin lives under `~/.agentsync/shims/<host>`, registered with
+Codex as a local marketplace named `agentsync-shims`. Its commands call
+`agentsync hook-shim --spec <sidecar>`, one sidecar per handler. At run time,
+the shim evaluates the dropped `if` guard itself, then runs the original
+command with `CLAUDE_PLUGIN_ROOT` set back to the original plugin. It also
+reshapes the hook's output for the target: it folds the handler's configured
+`rewakeMessage` and `rewakeSummary` text into a field Codex accepts, and it
+re-emits `asyncRewake` when Codex supports it. Each handler gets its own
+sidecar, so the five commands are distinct again, and so are their
+`trusted_hash` values.
+
+A shim emulates a filter gap and reshapes output for the target. It cannot
+give Codex a `matcher` or `timeout` field Codex does not have, and a field
+agentsync does not model still blocks the row — a shim cannot emulate what
+agentsync cannot read. The generated command names this binary's own path.
+Regenerate the shim after you upgrade agentsync.
+
+**Reversing a shim.** To put the original plugin back on the target host, run:
+
+```sh
+codex plugin add <plugin>@<marketplace>
+codex plugin remove <shim>@agentsync-shims
+codex plugin marketplace remove agentsync-shims
+rm -rf ~/.agentsync/shims
+```
+
+The first command restores the original plugin. The other three remove the
+generated shim and its marketplace. This removal has no backup — see the note
+on destructive changes below.
 
 **A canonical manifest, adopted from either side.** `~/.config/agentsync/manifest.toml`
 records what you decided to keep. Symlink it into your dotfiles to version
@@ -299,10 +324,16 @@ the host's own stderr, and what was skipped. Stopping halfway would leave you
 unable to tell which half landed. The manifest is written once at the end, and
 only if every manifest edit succeeded.
 
-**Nothing destructive happens without a backup.** Replacing a real directory with
-a symlink, moving host-owned skill content into canonical storage, and deleting
-canonical content all copy to `~/.config/agentsync/backups/` first. An "unlink"
-action refuses to delete a real directory.
+**Filesystem changes are backed up. Host commands are not.** Replacing a real
+directory with a symlink, moving host-owned skill content into canonical
+storage, and deleting canonical content all copy to
+`~/.config/agentsync/backups/` first. An "unlink" action refuses to delete a
+real directory.
+
+This guarantee covers only agentsync's own file operations. Generating a hook
+shim also runs a host command that removes the original plugin, and that
+removal has no backup. See "Reversing a shim" above for how to put the
+original back.
 
 ## Scopes
 
