@@ -111,8 +111,8 @@ impl RunState {
 }
 
 /// The in-progress screen: completed steps with their marks, the step currently
-/// running, and a count. Without this the UI simply stops repainting until the
-/// whole plan finishes, which is indistinguishable from a freeze.
+/// running, and a count. Without this the UI stops repainting until the
+/// whole plan finishes, which looks the same as a freeze.
 pub fn draw_running(state: &RunState, frame: &mut Frame) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
@@ -314,7 +314,7 @@ pub fn effect_of(world: &World, step: &Step) -> Option<String> {
 
 /// Render the plan as a runnable shell script.
 ///
-/// Only the host commands and filesystem operations can be scripted — manifest
+/// Only the host commands and filesystem operations can be scripted. Manifest
 /// edits and manual steps are emitted as comments, so the script never pretends
 /// to be a complete substitute for running the tool.
 pub fn as_shell_script(world: &World, plan: &Plan) -> String {

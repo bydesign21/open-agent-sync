@@ -13,8 +13,8 @@ use crate::core::diff::{Row, Severity};
 const GUTTER: usize = 5;
 /// Two double-space column separators.
 const SEPARATORS: usize = 4;
-/// Never squeeze the action label below this; it is the part that says what will
-/// happen, so it is the last thing that should be truncated.
+/// Never squeeze the action label below this. It is the part that says what
+/// will happen, so it is the last thing to truncate.
 const MIN_ACTION_W: usize = 24;
 
 /// Row highlight. A dark neutral so the per-column colours stay readable on top
@@ -24,8 +24,8 @@ pub(super) const SELECTED_BG: Color = Color::Indexed(237);
 /// Column widths sized to the content, then shrunk to fit the terminal.
 ///
 /// Fixed widths truncated real names like `sentry-setup-ai-monitoring` and
-/// `marketplace claude-plugins-official` into uselessness, but a fully ragged
-/// layout is unscannable — so the columns are uniform down the page and merely
+/// `marketplace claude-plugins-official` into uselessness. But a fully ragged
+/// layout is unscannable. So the columns are uniform down the page, and merely
 /// computed rather than hardcoded.
 fn columns(app: &App, total: usize) -> (usize, usize) {
     let visible: Vec<&Row> = app
@@ -77,9 +77,9 @@ pub fn draw(app: &mut App, frame: &mut Frame) {
 /// The project picker.
 ///
 /// Repos are discovered from the manifest and from each host's per-repo config.
-/// A repo that has no agent configuration yet cannot be discovered, so it is
-/// added with `agentsync --repo <path>` rather than typed in here — a text field
-/// would be the only place in the UI that takes free input.
+/// A repo that has no agent configuration yet cannot be discovered, so you add
+/// it with `agentsync --repo <path>` rather than typing it in here. A text
+/// field would be the only place in the UI that takes free input.
 pub fn draw_projects(app: &App, frame: &mut Frame) {
     let chunks = Layout::vertical([
         Constraint::Length(2),
@@ -274,7 +274,7 @@ fn draw_list(app: &mut App, frame: &mut Frame, area: Rect) {
                 };
 
                 // Truncate the action label rather than letting the terminal
-                // clip it: a hard cut mid-word reads as a rendering bug, and on
+                // clip it. A hard cut mid-word reads as a rendering bug, and on
                 // this column it would hide what is about to happen.
                 let action_w =
                     (area.width as usize).saturating_sub(GUTTER + SEPARATORS + name_w + headline_w);
@@ -372,7 +372,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    // Eleven keys will not fit; the help screen carries the full list.
+    // Eleven keys will not fit. The help screen carries the full list.
     let keys: [(&str, &str); 8] = [
         ("space", "accept"),
         ("e", "change"),

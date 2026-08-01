@@ -5,13 +5,13 @@
 //! * **Review** — a to-do list of differences. Rows that are in sync are hidden,
 //!   because a screen that is dense when nothing is wrong teaches you to ignore
 //!   it. Each row is a sentence plus an already-chosen action.
-//! * **Run** — the plan gate. Keys in the review screen only *stage* decisions;
-//!   nothing mutates until you see the exact commands and confirm. `c` writes the
+//! * **Run** — the plan gate. Keys in the review screen only *stage* decisions.
+//!   Nothing mutates until you see the exact commands and confirm. `c` writes the
 //!   plan out as a shell script, so you can always run it yourself instead.
 //!
 //! The rest are read-only views over a [`crate::report::Report`] — `doctor`,
-//! the plan every default would produce, the host inventory, and help. They exist
-//! here as well as on the CLI because being told to leave the TUI to answer
+//! the plan every default would produce, the host inventory, and help. They
+//! exist here as well as on the CLI. Being told to leave the TUI to answer
 //! "what is wrong with my setup?" is a bad answer.
 
 mod review;
@@ -79,7 +79,7 @@ pub struct App {
     /// nature (skills, plugins, user-scope servers) are always shown, because
     /// hiding them would make the filter look like data loss.
     project_filter: Option<String>,
-    /// Repos offered by the picker; index 0 is "all projects".
+    /// Repos offered by the picker. Index 0 is "all projects".
     projects: Vec<String>,
     project_cursor: usize,
 
@@ -91,9 +91,9 @@ pub struct App {
 ///
 /// A synchronous run inside the event loop cannot repaint, so a plan containing
 /// anything slow — a plugin install clones a repository — looks like a freeze.
-/// The work runs in a scoped thread and reports through a channel; this loop
-/// drains it, redraws, and discards keystrokes so nothing typed during the run is
-/// replayed into the review screen afterwards.
+/// The work runs in a scoped thread and reports through a channel. This loop
+/// drains it, redraws, and discards keystrokes, so nothing typed during the run
+/// is replayed into the review screen afterwards.
 fn run_with_progress(
     plan: &Plan,
     mut manifest: crate::manifest::Manifest,
@@ -121,7 +121,7 @@ fn run_with_progress(
                     }
                     apply::Progress::Finished(result) => Message::Finished(result.clone()),
                 };
-                // A send failure means the UI went away; the work still finishes.
+                // A send failure means the UI went away. The work still finishes.
                 let _ = tx.send(message);
             })
         });
@@ -198,9 +198,9 @@ impl App {
     /// Every repo under consideration, for the picker.
     ///
     /// This is `world.repos` — the manifest's repos, the current directory, any
-    /// `--repo` flags, and anything discovered in a host's per-repo config — not
+    /// `--repo` flags, and anything discovered in a host's per-repo config. Not
     /// merely the repos that already have entries. A repo with nothing in it yet
-    /// is exactly the one you want to focus in order to put something there.
+    /// is exactly the one you want to focus, to put something there.
     fn rebuild_projects(&mut self) {
         let mut projects = self.world.repos.clone();
         for repo in crate::domains::repos_in_use(&self.world) {
@@ -593,7 +593,7 @@ impl App {
     fn execute(&mut self, terminal: &mut ratatui::DefaultTerminal) -> Result<()> {
         let manifest = self.world.manifest.clone();
         let path = self.world.manifest_path.clone();
-        // Immutable reborrows; the runner never touches `self`, which is what
+        // Immutable reborrows. The runner never touches `self`, which is what
         // lets the worker thread hold the host list while we redraw.
         let report = run_with_progress(&self.plan, manifest, &path, &self.world.hosts, terminal)?;
         self.report = Some(report);
@@ -640,7 +640,7 @@ impl App {
         }
     }
 
-    /// Returns true when the app should exit.
+    /// Returns true when the app must exit.
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         // Ctrl-C always quits, on every screen.
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
@@ -721,7 +721,7 @@ impl App {
                 }
             }
 
-            // The event loop drives this screen; no keys are read while it is up.
+            // The event loop drives this screen. No keys are read while it is up.
             Screen::Running => {}
 
             Screen::Result => match key.code {
@@ -888,10 +888,10 @@ mod tests {
             app.handle_key(KeyEvent::from(KeyCode::Char(key))).unwrap();
             assert!(
                 !matches!(app.screen, Screen::Review),
-                "{key} should open a view"
+                "{key} must open a view"
             );
             app.handle_key(KeyEvent::from(KeyCode::Char('q'))).unwrap();
-            assert!(matches!(app.screen, Screen::Review), "q should go back");
+            assert!(matches!(app.screen, Screen::Review), "q must go back");
         }
     }
 

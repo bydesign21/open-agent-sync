@@ -1,7 +1,7 @@
 //! A scrollable rendering of a [`Report`].
 //!
 //! Scrolling is not a nicety here. The plan gate is the safety mechanism of the
-//! whole tool, and a plan of ninety steps rendered into a thirty-line terminal
+//! whole tool. A plan of ninety steps rendered into a thirty-line terminal
 //! silently hid most of what you were approving. Same for the result screen: a
 //! failure below the fold reads as no failure.
 
