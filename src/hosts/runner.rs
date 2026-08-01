@@ -1,10 +1,10 @@
 //! argv templating and subprocess execution.
 //!
-//! Template vocabulary, deliberately tiny:
+//! Template vocabulary, kept deliberately small:
 //!
 //! * `{key}` anywhere inside an element is replaced by a scalar. An unknown key
-//!   is an error, never an empty string — a silently-empty argument would
-//!   produce a command that runs and does the wrong thing.
+//!   is an error, never an empty string. A silently empty argument produces a
+//!   command that runs, but does the wrong thing.
 //! * An element that is exactly `{key...}` splices a list in place, contributing
 //!   zero or more arguments. This is the only construct allowed to vanish.
 
@@ -45,8 +45,8 @@ fn substitute(element: &str, scalars: &Scalars) -> Result<String> {
         match scalars.get(key) {
             Some(value) => out.push_str(value),
             None => bail!(
-                "argv element {element:?} references unknown template key {key:?}; \
-                 known keys: {}",
+                "argv element {element:?} references unknown template key {key:?}. \
+                 Known keys: {}",
                 scalars.keys().cloned().collect::<Vec<_>>().join(", ")
             ),
         }

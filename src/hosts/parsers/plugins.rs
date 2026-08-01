@@ -6,7 +6,7 @@ use serde_json::Value;
 use super::{CatalogRead, ParseCtx, PluginRead};
 use crate::core::model::{InstalledPlugin, MarketplaceSource};
 
-/// Split `name@marketplace`. A key without `@` has no marketplace, which is
+/// Split `name@marketplace`. A key without `@` has no marketplace. This is
 /// legal for locally-scaffolded plugins.
 fn split_id(id: &str) -> (String, Option<String>) {
     match id.rsplit_once('@') {
@@ -19,8 +19,8 @@ fn split_id(id: &str) -> (String, Option<String>) {
 
 /// `~/.claude/plugins/installed_plugins.json` (`version: 2`).
 ///
-/// Only user-scoped installs are collected. A project-scoped install belongs to
-/// one repo and would otherwise look like global drift.
+/// Only user-scoped installs are collected. A project-scoped install belongs
+/// to one repo. If it appears here, it looks like drift across every host.
 pub fn claude_plugins_v1(text: &str, ctx: &ParseCtx) -> Result<PluginRead> {
     let root: Value =
         serde_json::from_str(text).with_context(|| format!("parsing {}", ctx.origin.display()))?;
@@ -96,9 +96,9 @@ pub fn claude_marketplaces_v1(text: &str, ctx: &ParseCtx) -> Result<PluginRead> 
 
 /// A marketplace manifest: `{ "name": ..., "plugins": [{ "name": ... }] }`.
 ///
-/// The same shape is used by Claude Code's `.claude-plugin/marketplace.json`,
-/// Codex's cached copies of the same, and Codex's `api_marketplace.json`, so one
-/// parser covers every catalog we read.
+/// Claude Code's `.claude-plugin/marketplace.json`, Codex's cached copies of
+/// it, and Codex's `api_marketplace.json` all use the same shape. One parser
+/// covers every catalog we read.
 pub fn marketplace_manifest_v1(text: &str, ctx: &ParseCtx) -> Result<CatalogRead> {
     let root: Value =
         serde_json::from_str(text).with_context(|| format!("parsing {}", ctx.origin.display()))?;
@@ -152,7 +152,7 @@ pub fn codex_plugins_toml_v1(text: &str, ctx: &ParseCtx) -> Result<PluginRead> {
         toml::from_str(text).with_context(|| format!("parsing {}", ctx.origin.display()))?;
     let mut out = PluginRead::default();
 
-    // Codex records marketplaces here once `plugin marketplace add` has run.
+    // Codex records marketplaces here after `plugin marketplace add` runs.
     if let Some(markets) = root.get("marketplaces").and_then(toml::Value::as_table) {
         for (name, entry) in markets {
             let Some(source) = entry.get("source").and_then(toml::Value::as_str) else {
