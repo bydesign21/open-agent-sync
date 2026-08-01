@@ -223,22 +223,32 @@ MEMORIES (reported, never synced)
     counterpart on the other side
 ```
 
-**Hooks are reported, not yet fixed.** A bash hook can carry an `if` guard, or
-set `rewakeMessage` / `rewakeSummary`. Codex's hook config has no field for
-any of them. Its own `trusted_hash` proves it: that hash covers only the command,
-so five differently-guarded handlers hash identically once installed.
-`agentsync plan --only hooks` names exactly which fields a target would drop.
-It also blocks the row outright when the whole event has no counterpart on
-that host (`PreCompact`, `SubagentStop`, `Notification`):
+**A dropped hook field gets a shim, not just a report.** A bash hook can carry
+an `if` guard, or set `rewakeMessage` / `rewakeSummary`. Codex's hook config
+has no field for any of them. Its own `trusted_hash` proves this. The hash
+covers only the command, so five differently-guarded handlers hash
+identically once installed. For a gap like this, `agentsync plan --only hooks`
+now offers to generate a shim instead of reporting a dead end:
 
 ```
 HOOKS
     security-guidance@claude-plugins-official:hooks/hooks.json:post_tool_use:1:0
-      codex ignores if, rewake_message, rewake_summary  →  nothing to do
+      codex ignores if, rewake_message, rewake_summary  →  generate a shim for codex
 ```
 
-Nothing is generated to close the gap yet — a shim that emulates the dropped
-fields on Codex is a separate, later plan.
+Applying it writes a small plugin whose commands call `agentsync hook-shim
+--spec <sidecar>`, one sidecar per handler. At run time, the shim evaluates the
+dropped `if` guard itself. It then runs the original command, with
+`CLAUDE_PLUGIN_ROOT` set back to the original plugin, and folds
+`rewakeMessage` into a field Codex accepts. Each handler gets its own sidecar,
+so the five commands are distinct again, and so are their `trusted_hash`
+values.
+
+A shim closes a filter gap only. A `matcher` or `timeout` that Codex cannot
+express still blocks the row, and a field agentsync does not model still
+blocks it too — a shim cannot emulate what agentsync cannot read. The
+generated command names this binary's own path. Regenerate the shim after you
+upgrade agentsync.
 
 **A canonical manifest, adopted from either side.** `~/.config/agentsync/manifest.toml`
 records what you decided to keep. Symlink it into your dotfiles to version
