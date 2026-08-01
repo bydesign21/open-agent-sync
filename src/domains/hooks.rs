@@ -10,7 +10,7 @@ use anyhow::Context;
 
 use crate::core::diff::{Action, ActionKind, Domain, Row, Severity};
 use crate::core::model::HookCap;
-use crate::core::plan::{Plan, Step};
+use crate::core::plan::{FsOp, Plan, PlannedStep, Step};
 use crate::domains::World;
 
 /// How the shim emulates a capability the target lacks.
@@ -226,6 +226,23 @@ fn shim_row(
     target: &str,
     missing: &[HookCap],
 ) -> Row {
+    // Only a plugin hook has a marketplace and plugin name a shim can be
+    // installed as. A settings-file hook (or a path that merely contains an
+    // `@`, such as a home directory) must not advertise a fix it cannot
+    // deliver.
+    let actions = if split_source(&handler.id.source).is_some() {
+        vec![
+            Action::new(
+                format!("generate a shim for {target}"),
+                ActionKind::Push {
+                    hosts: vec![target.to_string()],
+                },
+            ),
+            Action::new("nothing to do", ActionKind::Nothing),
+        ]
+    } else {
+        vec![Action::new("nothing to do", ActionKind::Nothing)]
+    };
     Row {
         domain: Domain::Hooks,
         name: handler.id.short(),
@@ -235,19 +252,17 @@ fn shim_row(
             caps_list(missing)
         ),
         severity: Severity::Normal,
-        actions: vec![
-            Action::new(
-                format!("generate a shim for {target}"),
-                ActionKind::Push {
-                    hosts: vec![target.to_string()],
-                },
-            ),
-            Action::new("nothing to do", ActionKind::Nothing),
-        ],
+        actions,
         chosen: 0,
         accepted: false,
         key: crate::core::diff::RowKey {
             source_host: Some(source.to_string()),
+            // `short()` drops the marketplace, so two same-named plugins from
+            // different marketplaces can share a `name`. The full source
+            // string is unambiguous and lets the planner find the exact
+            // handler back, rather than the first one whose short name
+            // matches.
+            marketplace: Some(handler.id.source.clone()),
             ..Default::default()
         },
     }
@@ -287,14 +302,38 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
         .as_ref()
         .context("target declares no [hooks.shim] marketplace")?;
 
-    // Every handler from the same source plugin travels together: the shim
-    // replaces the original wholesale, so a partial shim would drop the rest.
+    // The row records the handler's own full source (not its `short()` name),
+    // because two same-named plugins from different marketplaces collapse to
+    // the same short name. Matching on the full string finds the exact
+    // handler this row was built from, never a same-named stand-in.
+    let origin = row
+        .key
+        .marketplace
+        .clone()
+        .context("row does not record which plugin the hook came from")?;
     let handler = source
         .hooks
         .values()
-        .find(|h| h.id.short() == row.name)
+        .find(|h| h.id.source == origin)
         .context("handler is no longer present")?;
-    let origin = handler.id.source.clone();
+
+    let (plugin, marketplace) =
+        split_source(&origin).context("only plugin hooks can be shimmed today")?;
+    let marketplace_dir = crate::paths::expand(&shim.marketplace);
+    let shim_plugin = crate::shim::generate::shim_plugin_name(&marketplace, &plugin);
+
+    // A plugin with two shimmable handlers (for example a PreToolUse and a
+    // PostToolUse handler) produces two rows, since `rows()` emits one row per
+    // handler. Both carry the same plugin, so the second row must not repeat
+    // work the first already committed: the whole plugin is shimmed at once,
+    // from every one of its handlers, the first time any of its rows is
+    // planned.
+    if shim_plugin_names(&marketplace_dir, &plan.steps).any(|p| p == shim_plugin) {
+        return Ok(());
+    }
+
+    // Every handler from the same source plugin travels together: the shim
+    // replaces the original wholesale, so a partial shim would drop the rest.
     let handlers: Vec<_> = source
         .hooks
         .values()
@@ -302,11 +341,8 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
         .cloned()
         .collect();
 
-    let (plugin, marketplace) =
-        split_source(&origin).context("only plugin hooks can be shimmed today")?;
-
     let input = crate::shim::generate::ShimInput {
-        marketplace_dir: crate::paths::expand(&shim.marketplace),
+        marketplace_dir: marketplace_dir.clone(),
         plugin: plugin.clone(),
         marketplace: marketplace.clone(),
         handlers,
@@ -336,12 +372,20 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
     };
     let generated = crate::shim::generate::plan_shim(&input)?;
 
+    // Nothing is committed to `plan` until every fallible step below has
+    // succeeded. An argv-building error partway through must not leave a plan
+    // that writes shim content it never installs.
+    let mut staged: Vec<PlannedStep> = Vec::new();
     for op in generated.ops {
-        plan.push(format!("write shim for {plugin}"), Step::Fs(op));
+        staged.push(PlannedStep {
+            label: format!("write shim for {plugin}"),
+            step: Step::Fs(op),
+            order_hint: None,
+        });
     }
-    plan.push(
-        format!("register the agentsync shim marketplace with {target_name}"),
-        Step::Host {
+    staged.push(PlannedStep {
+        label: format!("register the agentsync shim marketplace with {target_name}"),
+        step: Step::Host {
             host: target_name.to_string(),
             argv: target.marketplace_add_argv(
                 &generated.marketplace_name,
@@ -349,91 +393,111 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             )?,
             cwd: None,
         },
-    );
+        order_hint: None,
+    });
 
-    // The marketplace manifest lists every shim plugin at once, and applying it
-    // is a whole-file write. Writing it per row would leave only the last row's
-    // plugin registered, and the earlier ones would silently fail to install.
-    // So rebuild it from every shim this plan already carries, plus this one.
-    rewrite_marketplace_manifest(plan, &input.marketplace_dir, &generated.shim_plugin)?;
+    // The marketplace manifest lists every shim plugin at once, and applying
+    // it is a whole-file write. Writing it per row would leave only the last
+    // row's plugin registered, and the earlier ones would silently fail to
+    // install. So rebuild it from every shim already committed to `plan`, plus
+    // this one, which is why the manifest write is derived from `plan.steps`
+    // and `staged` together rather than tracked separately.
+    let mut plugins: Vec<String> = shim_plugin_names(&marketplace_dir, &plan.steps)
+        .chain(shim_plugin_names(&marketplace_dir, &staged))
+        .collect();
+    plugins.sort();
+    plugins.dedup();
+    staged.push(PlannedStep {
+        label: "list every generated shim in the agentsync marketplace".to_string(),
+        step: Step::Fs(crate::shim::generate::marketplace_manifest_op(
+            &marketplace_dir,
+            &plugins,
+        )?),
+        order_hint: None,
+    });
+
     // Order 1 puts the install ahead of the removal below. A failed removal
     // leaves a duplicate hook, which is visible. A failed install after a
     // removal leaves no review at all, which reads as health.
-    plan.push_ordered(
-        format!("install the {plugin} shim in {target_name}"),
-        Step::Host {
+    staged.push(PlannedStep {
+        label: format!("install the {plugin} shim in {target_name}"),
+        step: Step::Host {
             host: target_name.to_string(),
             argv: target
                 .plugin_install_argv(&generated.shim_plugin, Some(&generated.marketplace_name))?,
             cwd: None,
         },
-        1,
-    );
+        order_hint: Some(1),
+    });
     if world
         .snapshot(target_name)
         .is_some_and(|s| s.plugins.contains_key(&plugin))
     {
-        plan.push(
-            format!("remove the original {plugin} from {target_name}"),
-            Step::Host {
+        staged.push(PlannedStep {
+            label: format!("remove the original {plugin} from {target_name}"),
+            step: Step::Host {
                 host: target_name.to_string(),
                 argv: target.plugin_remove_argv(&plugin, Some(&marketplace))?,
                 cwd: None,
             },
-        );
+            order_hint: None,
+        });
     }
+
+    // Every prior write of this manifest is superseded by the one just staged
+    // above, which lists every shim `plan` and `staged` together carry.
+    let manifest_path = marketplace_dir.join(".claude-plugin/marketplace.json");
+    plan.steps.retain(
+        |s| !matches!(&s.step, Step::Fs(FsOp::WriteFile { path, .. }) if path == &manifest_path),
+    );
+    plan.steps.extend(staged);
+    // `current_exe()` resolves symlinks, so a package manager that swaps the
+    // binary on upgrade (for example Homebrew's Cellar path) leaves every
+    // generated shim invoking a binary that no longer exists. Silently
+    // shipping that is the kind of exposure this project never allows, so it
+    // is said here instead.
+    plan.note(format!(
+        "the {plugin} shim for {target_name} invokes {}; regenerate it after upgrading agentsync",
+        input.agentsync_bin.display()
+    ));
     Ok(())
 }
 
 /// `<plugin>@<marketplace>:<file>` split into its two names.
+///
+/// Only a plugin source has this shape. A settings-file path can still
+/// contain `@` (a home directory such as `/Users/logan@corp.com` is ordinary
+/// on directory-joined machines), so the split alone is not proof of a plugin
+/// hook. A plugin id has no path separator; a misparsed settings-file path
+/// does, so that distinguishes the two.
 fn split_source(source: &str) -> Option<(String, String)> {
-    let (plugin, rest) = source.split_once('@')?;
-    let marketplace = rest.split(':').next()?;
-    Some((plugin.to_string(), marketplace.to_string()))
+    let head = source.split(':').next()?;
+    let (plugin, marketplace) = head.split_once('@')?;
+    let named = |s: &str| !s.is_empty() && !s.contains('/') && !s.contains('\\');
+    (named(plugin) && named(marketplace)).then(|| (plugin.to_string(), marketplace.to_string()))
 }
 
-/// Replace the marketplace manifest op with one naming every shim in the plan.
+/// Names of every generated shim plugin already written under
+/// `marketplace_dir`, found from the paths the plan actually writes to or
+/// links into — the directory agentsync owns and nothing else writes under.
 ///
-/// Rows are planned one at a time, but the manifest is a single file listing
-/// them all. Reading the set back out of the plan keeps this correct however
-/// many rows the user accepts.
-fn rewrite_marketplace_manifest(
-    plan: &mut Plan,
-    marketplace_dir: &std::path::Path,
-    new_plugin: &str,
-) -> anyhow::Result<()> {
-    let manifest_path = marketplace_dir.join(".claude-plugin/marketplace.json");
-
-    let mut plugins: Vec<String> = plan
-        .steps
-        .iter()
-        .filter_map(|s| match &s.step {
-            // An install step names the shim as `<plugin>@<marketplace>`.
-            Step::Host { argv, .. } => argv
-                .iter()
-                .find(|a| a.starts_with("agentsync-shim-"))
-                .map(|a| a.split('@').next().unwrap_or(a).to_string()),
-            _ => None,
-        })
-        .collect();
-    if !plugins.iter().any(|p| p == new_plugin) {
-        plugins.push(new_plugin.to_string());
-    }
-    plugins.sort();
-    plugins.dedup();
-
-    plan.steps.retain(|s| {
-        !matches!(&s.step, Step::Fs(crate::core::plan::FsOp::WriteFile { path, .. })
-            if path == &manifest_path)
-    });
-    plan.push(
-        "list every generated shim in the agentsync marketplace",
-        Step::Fs(crate::shim::generate::marketplace_manifest_op(
-            marketplace_dir,
-            &plugins,
-        )?),
-    );
-    Ok(())
+/// Scanning host command argv for `agentsync-shim-` was tried first and
+/// rejected: a real user plugin coincidentally named that way would be
+/// swept in from an unrelated removal step, and the prefix is one character
+/// away from `MARKETPLACE_NAME` itself.
+fn shim_plugin_names<'a>(
+    marketplace_dir: &'a std::path::Path,
+    steps: &'a [PlannedStep],
+) -> impl Iterator<Item = String> + 'a {
+    steps.iter().filter_map(move |s| match &s.step {
+        Step::Fs(FsOp::WriteFile { path, .. }) | Step::Fs(FsOp::Link { link: path, .. }) => path
+            .strip_prefix(marketplace_dir)
+            .ok()
+            .and_then(|rel| rel.components().next())
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .filter(|c| c.starts_with("agentsync-shim-")),
+        _ => None,
+    })
 }
 
 #[cfg(test)]

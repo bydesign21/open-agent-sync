@@ -1391,19 +1391,27 @@ fn a_shimmable_gap_offers_to_generate_a_shim_and_planning_it_emits_real_steps() 
         .iter()
         .position(|s| matches!(s.step, Step::Fs(FsOp::WriteFile { .. })))
         .expect("the shim content must be written");
+    // `argv.contains("add")` alone is ambiguous: the marketplace-add step
+    // (`["plugin","marketplace","add",dir]`) matches it too, and comes before
+    // the actual install regardless of whether the install is ordered ahead of
+    // the removal. Keying on the generated shim's own name, while excluding
+    // the marketplace step, matches the install unambiguously on every host.
     let install_at = plan
         .steps
         .iter()
-        .position(
-            |s| matches!(&s.step, Step::Host { argv, .. } if argv.contains(&"add".to_string())),
-        )
+        .position(|s| {
+            matches!(&s.step, Step::Host { argv, .. }
+                if !argv.iter().any(|a| a == "marketplace")
+                    && argv.iter().any(|a| a.starts_with("agentsync-shim-")))
+        })
         .expect("the shim must be installed");
     let remove_at = plan
         .steps
         .iter()
-        .position(
-            |s| matches!(&s.step, Step::Host { argv, .. } if argv.contains(&"remove".to_string())),
-        )
+        .position(|s| {
+            matches!(&s.step, Step::Host { argv, .. }
+                if argv.iter().any(|a| a == "remove" || a == "uninstall"))
+        })
         .expect("the original must be removed");
 
     assert!(write_at < install_at, "content before install: {labels:?}");
@@ -1493,5 +1501,123 @@ fn accepting_two_shimmable_plugins_writes_the_marketplace_manifest_only_once() {
     assert!(
         names.iter().any(|n| n.contains("other-plugin")),
         "{names:?}"
+    );
+}
+
+#[test]
+fn a_plugin_with_two_shimmable_handlers_plans_the_shim_only_once() {
+    // `rows()` emits one row per handler, and a plugin with two shimmable
+    // handlers (for example a PreToolUse and a PostToolUse handler, the
+    // ordinary case) produces two rows. Planning must not repeat the shim's
+    // install and the original's removal once per row: the second of each
+    // pair would fail at apply time.
+    let mut h1 = HookHandler::new(
+        hook_id(
+            "security-guidance@claude-plugins-official:hooks/hooks.json",
+            "PreToolUse",
+        ),
+        "PreToolUse",
+        "echo hi",
+    );
+    h1.if_pattern = Some("Bash(git commit:*)".into());
+
+    let mut h2 = HookHandler::new(
+        hook_id(
+            "security-guidance@claude-plugins-official:hooks/hooks.json",
+            "PostToolUse",
+        ),
+        "PostToolUse",
+        "echo bye",
+    );
+    h2.if_pattern = Some("Bash(git push:*)".into());
+
+    let mut codex_snap = hooks_snapshot("codex", vec![]);
+    codex_snap.plugins.insert(
+        "security-guidance".to_string(),
+        agentsync::core::model::InstalledPlugin {
+            name: "security-guidance".to_string(),
+            marketplace: "claude-plugins-official".to_string(),
+        },
+    );
+
+    let world = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![hooks_snapshot("claude", vec![h1, h2]), codex_snap],
+    );
+
+    let mut rows = world.rows();
+    let shimmable: Vec<_> = rows
+        .iter_mut()
+        .filter(|r| r.domain == Domain::Hooks && r.severity == Severity::Normal)
+        .collect();
+    assert_eq!(shimmable.len(), 2, "one row per handler");
+    for row in shimmable {
+        row.accepted = true;
+    }
+
+    let plan = world.plan(&rows);
+    let labels: Vec<&str> = plan.steps.iter().map(|s| s.label.as_str()).collect();
+
+    let installs = plan
+        .steps
+        .iter()
+        .filter(|s| {
+            matches!(&s.step, Step::Host { argv, .. }
+                if !argv.iter().any(|a| a == "marketplace")
+                    && argv.iter().any(|a| a.starts_with("agentsync-shim-")))
+        })
+        .count();
+    let removes = plan
+        .steps
+        .iter()
+        .filter(|s| {
+            matches!(&s.step, Step::Host { argv, .. }
+                if argv.iter().any(|a| a == "remove" || a == "uninstall"))
+        })
+        .count();
+
+    assert_eq!(
+        installs, 1,
+        "the shim must be installed exactly once: {labels:?}"
+    );
+    assert_eq!(
+        removes, 1,
+        "the original must be removed exactly once: {labels:?}"
+    );
+}
+
+#[test]
+fn a_settings_file_path_containing_an_at_sign_is_not_offered_a_shim() {
+    // A directory-joined macOS machine can have a home directory like
+    // /Users/logan@corp.com, which is an ordinary settings-file path, not a
+    // <plugin>@<marketplace> source. A plugin id never contains a path
+    // separator; this does, so the split must be rejected rather than
+    // manufacturing a plugin name out of half a path.
+    let mut h = HookHandler::new(
+        hook_id("/Users/logan@corp.com/.claude/settings.json", "PreToolUse"),
+        "PreToolUse",
+        "echo hi",
+    );
+    h.if_pattern = Some("Bash(git commit:*)".into());
+
+    let world = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![
+            hooks_snapshot("claude", vec![h]),
+            hooks_snapshot("codex", vec![]),
+        ],
+    );
+
+    let rows = world.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.domain == Domain::Hooks && r.severity == Severity::Normal)
+        .expect("still a shimmable-severity gap: only the action must change");
+
+    assert!(
+        !row.actionable(),
+        "a source that only looks like <plugin>@<marketplace> must not \
+         advertise a fix it cannot deliver: {:?}",
+        row.action().kind
     );
 }
