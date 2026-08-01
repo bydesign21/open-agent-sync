@@ -20,7 +20,7 @@ pub fn matches(pattern: &str, tool_name: &str, tool_input: &Value) -> Match {
 
     // Bare tool name, e.g. `Bash`.
     let Some(open) = pattern.find('(') else {
-        if pattern.is_empty() || pattern.contains(')') {
+        if pattern.is_empty() || pattern.contains(')') || pattern.contains('|') {
             return Match::Unparseable;
         }
         return yes_if(pattern == tool_name);
@@ -32,10 +32,19 @@ pub fn matches(pattern: &str, tool_name: &str, tool_input: &Value) -> Match {
         return Match::Unparseable;
     }
     let tool = &pattern[..open];
+    if tool.is_empty() || tool.contains('|') {
+        return Match::Unparseable;
+    }
     let inner = &pattern[open + 1..pattern.len() - 1];
+    if inner.contains('(') || inner.contains(')') {
+        return Match::Unparseable;
+    }
     let Some(prefix) = inner.strip_suffix(":*") else {
         return Match::Unparseable;
     };
+    if prefix.is_empty() {
+        return Match::Unparseable;
+    }
     if tool != tool_name {
         return Match::No;
     }
@@ -137,6 +146,49 @@ mod tests {
         assert_eq!(
             matches("Bash(git commit:*)", "Bash", &serde_json::json!({})),
             Match::No
+        );
+    }
+
+    #[test]
+    fn a_piped_tool_list_before_the_paren_is_reported_not_guessed() {
+        // `Edit|Write` style tool lists are real hook config shapes. We do not
+        // model them. Reporting `No` here would silently skip the hook.
+        assert_eq!(
+            matches("Bash|Edit(git commit:*)", "Edit", &bash("git commit -m x")),
+            Match::Unparseable
+        );
+    }
+
+    #[test]
+    fn a_piped_tool_list_with_no_paren_is_reported_not_guessed() {
+        assert_eq!(
+            matches("Bash|Edit", "Edit", &bash("anything")),
+            Match::Unparseable
+        );
+    }
+
+    #[test]
+    fn an_empty_tool_name_is_reported_not_guessed() {
+        assert_eq!(matches("(x:*)", "Bash", &bash("x foo")), Match::Unparseable);
+    }
+
+    #[test]
+    fn a_trailing_paren_group_is_a_shape_we_do_not_model() {
+        // `Bash(a:*)(b:*)` must not be read as the literal prefix `a:*)(b`.
+        assert_eq!(
+            matches("Bash(a:*)(b:*)", "Bash", &bash("a foo")),
+            Match::Unparseable
+        );
+    }
+
+    #[test]
+    fn an_empty_prefix_is_reported_not_treated_as_match_everything() {
+        // `Bash(:*)` reads like "match everything" but a literal empty
+        // prefix only matches an empty command. Report it instead of
+        // guessing either way.
+        assert_eq!(
+            matches("Bash(:*)", "Bash", &bash("anything")),
+            Match::Unparseable
         );
     }
 }
