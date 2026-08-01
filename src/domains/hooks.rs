@@ -372,6 +372,13 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
     };
     let generated = crate::shim::generate::plan_shim(&input)?;
 
+    // The guard that ties every step of this shim's install together. If the
+    // sidecars or hooks.json fail to write, the install must not run against
+    // a half-written plugin directory, and if the install itself fails, the
+    // removal below must not run either. Computed once, up front, so every
+    // step below shares the same key regardless of where it is pushed.
+    let install_guard = format!("shim:{target_name}:{}", generated.shim_plugin);
+
     // Nothing is committed to `plan` until every fallible step below has
     // succeeded. An argv-building error partway through must not leave a plan
     // that writes shim content it never installs.
@@ -381,7 +388,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             label: format!("write shim for {plugin}"),
             step: Step::Fs(op),
             order_hint: None,
-            guard: None,
+            guard: Some(install_guard.clone()),
         });
     }
     staged.push(PlannedStep {
@@ -395,7 +402,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             cwd: None,
         },
         order_hint: None,
-        guard: None,
+        guard: Some(install_guard.clone()),
     });
 
     // The marketplace manifest lists every shim plugin at once, and applying
@@ -423,10 +430,10 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
     // leaves a duplicate hook, which is visible. A failed install after a
     // removal leaves no review at all, which reads as health.
     //
-    // The guard key ties the two steps together. If the install fails, the
-    // removal below is skipped instead of run, so the ordering actually buys
-    // something: a failed install never leaves the host with no hook at all.
-    let install_guard = format!("shim:{target_name}:{}", generated.shim_plugin);
+    // The guard key ties every step above and below together. If a write, the
+    // marketplace registration, or the install itself fails, the removal is
+    // skipped instead of run, so the ordering actually buys something: a
+    // failed install never leaves the host with no hook at all.
     staged.push(PlannedStep {
         label: format!("install the {plugin} shim in {target_name}"),
         step: Step::Host {

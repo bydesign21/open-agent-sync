@@ -1421,6 +1421,21 @@ fn a_shimmable_gap_offers_to_generate_a_shim_and_planning_it_emits_real_steps() 
          which is visible. The other order fails into no security review at \
          all, which reads as health. Got {labels:?}"
     );
+
+    // Ordering alone does not stop a failed install from being followed by
+    // the removal: only the guard does. Both steps must carry one, and it
+    // must be the SAME key, or a failed install cannot skip the removal.
+    let install_guard = plan.steps[install_at].guard.clone();
+    let remove_guard = plan.steps[remove_at].guard.clone();
+    assert!(
+        install_guard.is_some(),
+        "the install step must carry a guard key: {labels:?}"
+    );
+    assert_eq!(
+        install_guard, remove_guard,
+        "the install and the removal must share the same guard key, or a \
+         failed install cannot skip the removal that depends on it"
+    );
 }
 
 #[test]

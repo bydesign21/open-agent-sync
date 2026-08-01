@@ -90,7 +90,10 @@ pub fn run(
     let mut report = Report::default();
     let mut manifest_dirty = false;
     let mut manifest_ops_ok = true;
-    let mut failed_guards: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Maps a guard key to the label of the step that failed while carrying it,
+    // so a later skip can name the actual cause instead of an opaque key.
+    let mut failed_guards: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
 
     for (index, planned) in plan.steps.iter().enumerate() {
         progress(Progress::Started {
@@ -99,14 +102,18 @@ pub fn run(
         });
 
         if let Some(guard) = &planned.guard
-            && failed_guards.contains(guard)
+            && let Some(failed_label) = failed_guards.get(guard)
         {
+            let command = match &planned.step {
+                Step::Host { host, argv, .. } => Some(format!("{host} {}", argv.join(" "))),
+                _ => None,
+            };
             let result = StepResult {
                 label: planned.label.clone(),
                 outcome: Outcome::Skipped,
-                command: None,
+                command,
                 message: format!(
-                    "skipped: an earlier step guarding \"{guard}\" failed, so this step \
+                    "skipped: \"{failed_label}\" failed (guard \"{guard}\"), so this step \
                      did not run"
                 ),
             };
@@ -207,7 +214,7 @@ pub fn run(
         if result.outcome == Outcome::Failed
             && let Some(guard) = &planned.guard
         {
-            failed_guards.insert(guard.clone());
+            failed_guards.insert(guard.clone(), planned.label.clone());
         }
 
         progress(Progress::Finished(&result));
@@ -637,6 +644,76 @@ mod tests {
             !report.results[2].message.contains("shim:codex:example"),
             "the guard here never failed, so this must be the plain manual skip: {}",
             report.results[2].message
+        );
+    }
+
+    #[test]
+    fn one_shims_failed_guard_does_not_skip_a_different_shims_steps() {
+        // Two shims in one plan: `a`'s install fails, `b`'s install and
+        // removal are unrelated and must both still run. Guard keys are
+        // per-shim, so a failure under one key must never leak into another.
+        let home = tmp_home();
+        let mut plan = Plan::default();
+        plan.push_guarded(
+            "install a",
+            Step::Manifest(ManifestOp::SetMcpHosts {
+                name: "nope".into(),
+                hosts: Some(vec!["codex".into()]),
+            }),
+            0,
+            "shim:codex:a",
+        );
+        plan.push_guarded(
+            "remove original a",
+            Step::Manual("remove original a".into()),
+            0,
+            "shim:codex:a",
+        );
+        plan.push_guarded(
+            "install b",
+            Step::Manifest(ManifestOp::UpsertSkill {
+                name: "b".into(),
+                source: "skills/b".into(),
+            }),
+            0,
+            "shim:codex:b",
+        );
+        plan.push_guarded(
+            "remove original b",
+            Step::Manual("remove original b".into()),
+            0,
+            "shim:codex:b",
+        );
+
+        let mut manifest = Manifest::default();
+        let report = run(
+            &plan,
+            &mut manifest,
+            &home.path().join("manifest.toml"),
+            &[],
+            |_| {},
+        );
+        assert_eq!(report.results[0].outcome, Outcome::Failed, "a's install");
+        assert_eq!(
+            report.results[1].outcome,
+            Outcome::Skipped,
+            "a's removal must be skipped by a's own failed guard"
+        );
+        assert!(report.results[1].message.contains("shim:codex:a"));
+        assert_eq!(
+            report.results[2].outcome,
+            Outcome::Done,
+            "b's install must not be affected by a's failure"
+        );
+        assert_eq!(
+            report.results[3].outcome,
+            Outcome::Skipped,
+            "b's removal is still the ordinary manual skip"
+        );
+        assert!(
+            !report.results[3].message.contains("shim:codex:"),
+            "b's guard never failed, so this must not read like a guard skip: {}",
+            report.results[3].message
         );
     }
 

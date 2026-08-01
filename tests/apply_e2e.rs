@@ -72,6 +72,11 @@ elif argv[:2] == ["mcp", "remove"]:
     text = without(argv[2], load())
     with open(CFG, "w") as fh:
         fh.write(text)
+elif argv[:1] == ["touch"]:
+    # Proof-of-execution for the guard test below: if this process ever
+    # runs, the path named in argv[1] exists afterward.
+    with open(argv[1], "w") as fh:
+        fh.write("")
 
 sys.exit(0)
 "#;
@@ -344,5 +349,50 @@ hosts = ["fakehost"]
     assert!(
         still_open.is_empty(),
         "a second run must not re-report work already done: {still_open:?}"
+    );
+
+    // ---- a guarded step whose guard failed must never be spawned ----
+    //
+    // This reuses `brokenhost` (always exits 3) as the guarded install and
+    // `fakehost` (the `touch` branch above) as the guarded removal, both
+    // already wired to real processes on `PATH`. `Step::Manual` never spawns
+    // anything, so proving the guard on a manual step only proves the
+    // *label* says "Skipped" — it does not prove non-execution. A marker
+    // file left behind by an actual process does.
+    let marker = root.join("removal-ran");
+    let mut guard_plan = agentsync::core::plan::Plan::default();
+    guard_plan.push_guarded(
+        "install the shim",
+        agentsync::core::plan::Step::Host {
+            host: "brokenhost".into(),
+            argv: vec!["plugin".into(), "add".into(), "shim".into()],
+            cwd: None,
+        },
+        1,
+        "shim:test:example",
+    );
+    guard_plan.push_guarded(
+        "remove the original",
+        agentsync::core::plan::Step::Host {
+            host: "fakehost".into(),
+            argv: vec!["touch".into(), marker.display().to_string()],
+            cwd: None,
+        },
+        2,
+        "shim:test:example",
+    );
+    let mut guard_manifest = agentsync::manifest::Manifest::default();
+    let guard_report = apply::run(
+        &guard_plan,
+        &mut guard_manifest,
+        &root.join("unused-manifest.toml"),
+        &world.hosts,
+        |_| {},
+    );
+    assert_eq!(guard_report.results[0].outcome, Outcome::Failed);
+    assert_eq!(guard_report.results[1].outcome, Outcome::Skipped);
+    assert!(
+        !marker.exists(),
+        "the guarded removal must never have been spawned, but its marker file exists"
     );
 }
