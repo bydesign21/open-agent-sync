@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
-use crate::core::model::{HookHandler, event_key};
+use crate::core::model::{HookCap, HookHandler, event_key};
 use crate::core::plan::FsOp;
 use crate::shim::ShimSpec;
 
@@ -32,6 +32,13 @@ pub struct ShimInput {
     pub fold_into_system_message: Vec<String>,
     /// Absolute path of the agentsync binary the generated commands invoke.
     pub agentsync_bin: PathBuf,
+    /// The target host's declared hook capabilities. A handler config field is
+    /// re-emitted into the generated manifest only when the target actually
+    /// declares support for it — otherwise `plan_shim` would either write a key
+    /// the target ignores, or silently drop one it does honour. `asyncRewake`
+    /// is the motivating case: Codex supports it, but nothing re-emitted it
+    /// before this field existed.
+    pub target_caps: Vec<HookCap>,
     /// Directories in the ORIGINAL plugin to carry over by symlink, for example
     /// its `skills` and `commands`. The shim replaces the original outright, so
     /// without these that content would disappear. Linking rather than copying
@@ -83,6 +90,16 @@ pub fn plan_shim(input: &ShimInput) -> Result<Generated> {
             if_pattern: handler.if_pattern.clone(),
             allowed_output: input.allowed_output.clone(),
             fold_into_system_message: input.fold_into_system_message.clone(),
+            // Only carried into the spec (and folded into `systemMessage` at
+            // run time) when the target cannot represent the field itself. A
+            // target that declares the cap gets it as a real manifest field
+            // below, and does not need a second, textual copy of it.
+            rewake_message: (!input.target_caps.contains(&HookCap::RewakeMessage))
+                .then(|| handler.rewake_message.clone())
+                .flatten(),
+            rewake_summary: (!input.target_caps.contains(&HookCap::RewakeSummary))
+                .then(|| handler.rewake_summary.clone())
+                .flatten(),
         };
         ops.push(FsOp::WriteFile {
             path: specs_dir.join(sidecar_name(handler)),
@@ -112,6 +129,13 @@ pub fn plan_shim(input: &ShimInput) -> Result<Generated> {
         let mut entry = json!({ "type": "command", "command": command });
         if let Some(timeout) = handler.timeout {
             entry["timeout"] = json!(timeout);
+        }
+        // Re-emit every config field the target actually declares support
+        // for. Without this, a handler field the target supports natively
+        // still gets lost, because the whole plugin travels together as one
+        // shim and this loop is the only place that writes the manifest entry.
+        if handler.async_rewake && input.target_caps.contains(&HookCap::AsyncRewake) {
+            entry["asyncRewake"] = json!(true);
         }
         group["hooks"]
             .as_array_mut()
@@ -225,6 +249,9 @@ mod tests {
         h.matcher = Some("Bash".into());
         h.if_pattern = if_pattern.map(str::to_string);
         h.plugin_root = Some("/cache/claude-plugins-official/security-guidance/2.0.6".into());
+        h.async_rewake = true;
+        h.rewake_message = Some("security findings follow".into());
+        h.rewake_summary = Some("Commit security review found issues".into());
         h
     }
 
@@ -238,6 +265,7 @@ mod tests {
             fold_into_system_message: vec!["rewakeMessage".into()],
             agentsync_bin: "/usr/local/bin/agentsync".into(),
             vendor: vec![],
+            target_caps: vec![crate::core::model::HookCap::AsyncRewake],
         }
     }
 
@@ -299,6 +327,65 @@ mod tests {
         // The filter is emulated by the runtime, so it must NOT be re-emitted
         // into a manifest the target cannot honour anyway.
         assert!(group["hooks"][0].get("if").is_none());
+    }
+
+    #[test]
+    fn a_handler_carrying_async_rewake_gets_the_full_key_set_the_target_supports() {
+        // Regression for the bug where `asyncRewake` was silently dropped even
+        // though the target declares support for it. Asserting the complete
+        // key set, not just that one key is present, so a future dropped
+        // field fails this test instead of sliding past it.
+        let g = plan_shim(&input(vec![handler(0, Some("Bash(git commit:*)"))])).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&written(&g.ops, "hooks/hooks.json")).unwrap();
+        let entry = &manifest["hooks"]["PostToolUse"][0]["hooks"][0];
+        let mut keys: Vec<&str> = entry
+            .as_object()
+            .expect("hook entry must be a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["asyncRewake", "command", "type"],
+            "the full generated key set must be exactly this, so a dropped or \
+             newly-added field fails the test rather than passing silently: {entry}"
+        );
+        assert_eq!(entry["asyncRewake"], true);
+    }
+
+    #[test]
+    fn async_rewake_is_not_reemitted_when_the_target_does_not_declare_the_cap() {
+        let mut i = input(vec![handler(0, None)]);
+        i.target_caps = vec![];
+        let g = plan_shim(&i).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_str(&written(&g.ops, "hooks/hooks.json")).unwrap();
+        let entry = &manifest["hooks"]["PostToolUse"][0]["hooks"][0];
+        assert!(
+            entry.get("asyncRewake").is_none(),
+            "must not claim a capability the target never declared: {entry}"
+        );
+    }
+
+    #[test]
+    fn rewake_text_is_carried_into_the_sidecar_only_when_the_target_lacks_the_cap() {
+        // When the target does not declare rewake_message/rewake_summary as
+        // manifest capabilities (true of every current target), the sidecar
+        // must still carry the configured text so the runtime can fold it
+        // into systemMessage. See src/shim/output.rs.
+        let g = plan_shim(&input(vec![handler(0, None)])).unwrap();
+        let spec: crate::shim::ShimSpec =
+            serde_json::from_str(&written(&g.ops, "post_tool_use-1-0.json")).unwrap();
+        assert_eq!(
+            spec.rewake_message.as_deref(),
+            Some("security findings follow")
+        );
+        assert_eq!(
+            spec.rewake_summary.as_deref(),
+            Some("Commit security review found issues")
+        );
     }
 
     #[test]

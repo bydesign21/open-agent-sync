@@ -192,6 +192,8 @@ mod tests {
             if_pattern: if_pattern.map(str::to_string),
             allowed_output: vec!["systemMessage".into()],
             fold_into_system_message: vec![],
+            rewake_message: None,
+            rewake_summary: None,
         }
     }
 

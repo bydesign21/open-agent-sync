@@ -20,6 +20,14 @@ pub fn normalize(stdout: &str, spec: &ShimSpec) -> String {
         return stdout.to_string();
     };
 
+    // Whether the hook produced any output at all. The configured
+    // `rewakeMessage`/`rewakeSummary` text is static — carried on the
+    // handler's own config, not on this run's output — so folding it in when
+    // the hook printed nothing would manufacture a message for a hook that
+    // never ran, or ran and had nothing to say. Folding it in only when there
+    // is already something to attach it to keeps the emulation honest.
+    let produced_output = !original.is_empty();
+
     let mut kept = Map::new();
     let mut folded: Vec<String> = Vec::new();
     let mut suppressed: Vec<String> = Vec::new();
@@ -40,6 +48,17 @@ pub fn normalize(stdout: &str, spec: &ShimSpec) -> String {
 
     if spec.allowed_output.iter().any(|k| k == SYSTEM_MESSAGE) {
         let mut parts: Vec<String> = Vec::new();
+        // The handler's configured rewake text is emulation, not the hook's
+        // own output, so it leads the message rather than getting buried
+        // after what the hook actually printed.
+        if produced_output {
+            if let Some(message) = &spec.rewake_message {
+                parts.push(message.clone());
+            }
+            if let Some(summary) = &spec.rewake_summary {
+                parts.push(summary.clone());
+            }
+        }
         if let Some(Value::String(existing)) = kept.get(SYSTEM_MESSAGE) {
             parts.push(existing.clone());
         }
@@ -74,6 +93,8 @@ mod tests {
             if_pattern: None,
             allowed_output: allowed.iter().map(|s| s.to_string()).collect(),
             fold_into_system_message: fold.iter().map(|s| s.to_string()).collect(),
+            rewake_message: None,
+            rewake_summary: None,
         }
     }
 
@@ -145,6 +166,49 @@ mod tests {
         let v = parse(&out);
         assert!(v.get("systemMessage").is_none());
         assert!(v.get("metrics").is_none());
+    }
+
+    #[test]
+    fn a_configured_rewake_message_is_folded_into_system_message_when_the_hook_has_output() {
+        let mut s = spec(&["systemMessage"], &[]);
+        s.rewake_message = Some("a rewake would have followed up here".into());
+        let out = normalize(r#"{"systemMessage":"ran clean"}"#, &s);
+        let v = parse(&out);
+        let msg = v["systemMessage"].as_str().unwrap();
+        assert!(
+            msg.contains("a rewake would have followed up here"),
+            "the configured rewake text must survive, got {msg}"
+        );
+        assert!(
+            msg.contains("ran clean"),
+            "the hook's own text must survive too: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_configured_rewake_message_is_not_manufactured_for_a_silent_hook() {
+        // The hook printed nothing, so there is nothing to attach the static
+        // rewake text to. Fabricating a systemMessage here would invent output
+        // for a hook that had none.
+        let mut s = spec(&["systemMessage"], &[]);
+        s.rewake_message = Some("should not appear".into());
+        let out = normalize("{}", &s);
+        let v = parse(&out);
+        assert!(
+            v.get("systemMessage").is_none(),
+            "must not manufacture a message for silent output: {v}"
+        );
+    }
+
+    #[test]
+    fn a_configured_rewake_summary_is_folded_in_alongside_the_message() {
+        let mut s = spec(&["systemMessage"], &[]);
+        s.rewake_message = Some("message text".into());
+        s.rewake_summary = Some("summary text".into());
+        let out = normalize(r#"{"systemMessage":"ran"}"#, &s);
+        let msg = parse(&out)["systemMessage"].as_str().unwrap().to_string();
+        assert!(msg.contains("message text"), "got {msg}");
+        assert!(msg.contains("summary text"), "got {msg}");
     }
 
     #[test]

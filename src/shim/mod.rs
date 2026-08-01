@@ -42,6 +42,16 @@ pub struct ShimSpec {
     /// being discarded.
     #[serde(default)]
     pub fold_into_system_message: Vec<String>,
+    /// The handler's configured `rewakeMessage`, carried over only when the
+    /// target cannot represent the field itself. `NormalizeOutput` folds this
+    /// static text into `systemMessage` at run time, so the row's promise ("a
+    /// shim can emulate it") is something the shim actually does rather than a
+    /// mapping that goes nowhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewake_message: Option<String>,
+    /// Same as `rewake_message`, for the handler's configured `rewakeSummary`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewake_summary: Option<String>,
 }
 
 impl ShimSpec {
@@ -70,6 +80,8 @@ mod tests {
             if_pattern: Some("Bash(git commit:*)".into()),
             allowed_output: vec!["systemMessage".into(), "additionalContext".into()],
             fold_into_system_message: vec!["rewakeMessage".into()],
+            rewake_message: Some("findings follow".into()),
+            rewake_summary: Some("Commit security review found issues".into()),
         }
     }
 
