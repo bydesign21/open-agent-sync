@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/bydesign21/open-agent-sync/master/i
 
 That detects your platform, installs the latest release to `~/.local/bin`, and
 **verifies the download against the release's `SHA256SUMS`** before installing
-anything. `VERSION=v0.0.6` pins a version; `AGENTSYNC_BIN_DIR=/usr/local/bin`
+anything. `VERSION=v0.0.6` pins a version. `AGENTSYNC_BIN_DIR=/usr/local/bin`
 changes where it lands.
 
 Then:
@@ -66,11 +66,11 @@ tar -xzf "$ASSET"
 mkdir -p ~/.local/bin && mv agentsync ~/.local/bin/ && rm "$ASSET" SHA256SUMS
 ```
 
-That should print `...tar.gz: OK`. Make sure `~/.local/bin` is on your `PATH`.
+That prints `...tar.gz: OK`. Make sure `~/.local/bin` is on your `PATH`.
 
 </details>
 
-macOS quarantines a downloaded binary; the installer strips that for you. If you
+macOS quarantines a downloaded binary. The installer strips that for you. If you
 installed by hand and it refuses to run:
 
 ```sh
@@ -83,10 +83,10 @@ On Windows, download `agentsync-v0.0.6-x86_64-pc-windows-msvc.zip` from the
 cover Windows and says so rather than half-working.
 
 **Windows and symlinks:** the skills domain works by symlinking a canonical
-directory into each host's skills directory, and creating a symlink on Windows
-needs either Developer Mode (Settings → Privacy & security → For developers) or an
-elevated terminal. Without one of those, skill rows will fail with a message
-saying so; the MCP and plugin domains are unaffected.
+directory into each host's skills directory. Creating a symlink on Windows
+needs either Developer Mode (Settings → Privacy & security → For developers) or
+an elevated terminal. Without one of those, skill rows fail with a message
+saying so. The MCP and plugin domains are unaffected.
 
 ### From source with cargo
 
@@ -134,7 +134,7 @@ agentsync              # the review TUI
 agentsync plan         # print the differences and the plan the defaults would produce
 agentsync apply --yes  # accept every default and run it
 agentsync plan --only instructions   # or mcp, skills, plugins, hooks
-agentsync doctor       # problems that aren't differences: secrets, unset vars,
+agentsync doctor       # problems that are not differences: secrets, unset vars,
                        # dead paths, servers not logged in, and new releases
 agentsync hosts        # what agentsync knows about each CLI
 ```
@@ -145,8 +145,8 @@ modified until you press `⏎`, review the exact commands, and confirm with `y`.
 it yourself.
 
 `doctor`, the plan preview, and the host inventory are also reachable **from
-inside the TUI** — `D`, `P`, and `H` — because being told to quit the interface to
-answer "what is wrong with my setup?" is a bad answer. `?` lists every key. All of
+inside the TUI** — `D`, `P`, and `H`. Being told to quit the interface to answer
+"what is wrong with my setup?" is a bad answer. `?` lists every key. All of
 those views scroll, and say `lines 12-31 of 145` so a screenful never passes for
 the whole thing.
 
@@ -157,7 +157,7 @@ fixture — see [`docs/screenshots/`](docs/screenshots/) — so they stay stable
 cover the interesting states rather than whatever happens to be on one machine.
 
 **Accepting rows.** `space` accepts one, `A` accepts a whole section, `e` cycles
-the action. The count in the header tracks what is staged; nothing has run yet.
+the action. The count in the header tracks what is staged. Nothing has run yet.
 
 <img src="docs/screens/review-accepted.svg" alt="rows accepted, with the staged count in the header" width="100%">
 
@@ -193,16 +193,16 @@ skipped — including steps you have to finish yourself, like exporting a token.
 
 **Read from config files, write through each CLI.** Host config files are parsed
 directly, because that is complete and instant and reveals per-repo scopes the
-CLIs hide behind the working directory. But every *change* is made by invoking the
-host's own CLI, because those files hold state that is none of our business —
-Codex's project trust levels, notice flags, model preferences — and a tool that
+CLIs hide behind the working directory. But every *change* is made by invoking
+the host's own CLI. Those files hold state that is none of our business —
+Codex's project trust levels, notice flags, model preferences. A tool that
 takes ownership of the whole file destroys it.
 
 **Instruction files are shared by default.** `CLAUDE.md` and `AGENTS.md` are both
 plain markdown, so one canonical file in `~/.config/agentsync/prompts/` symlinks
 into both — at user, project, and local scope. Shared is the default because most
 of what goes in these files is about the *repo* (package manager, deploy gate,
-conventions) rather than the tool; `hosts = [...]` is the opt-out for the parts
+conventions) rather than the tool. `hosts = [...]` is the opt-out for the parts
 that genuinely name one CLI.
 
 Two things it will not do. A scope a host has no location for — Codex has no
@@ -212,7 +212,7 @@ names whose version becomes canonical, because picking one silently discards the
 other's wording.
 
 **Memories are reported, never synced.** Claude Code keeps per-project notes under
-a directory keyed by an encoded project path; Codex keeps its own in SQLite. There
+a directory keyed by an encoded project path. Codex keeps its own in SQLite. There
 is no file-level correspondence, so `doctor` says what exists and stops:
 
 ```
@@ -224,12 +224,12 @@ MEMORIES (reported, never synced)
 ```
 
 **Hooks are reported, not yet fixed.** A bash hook can carry an `if` guard, or
-set `rewakeMessage` / `rewakeSummary` — Codex's hook config has no field for any
-of them, and its own `trusted_hash` proves it: that hash covers only the
-command, so five differently-guarded handlers hash identically once installed.
-`agentsync plan --only hooks` names exactly which fields a target would drop,
-and blocks the row outright when the whole event has no counterpart on that
-host (`PreCompact`, `SubagentStop`, `Notification`):
+set `rewakeMessage` / `rewakeSummary`. Codex's hook config has no field for
+either. Its own `trusted_hash` proves it: that hash covers only the command,
+so five differently-guarded handlers hash identically once installed.
+`agentsync plan --only hooks` names exactly which fields a target would drop.
+It also blocks the row outright when the whole event has no counterpart on
+that host (`PreCompact`, `SubagentStop`, `Notification`):
 
 ```
 HOOKS
@@ -241,7 +241,7 @@ Nothing is generated to close the gap yet — a shim that emulates the dropped
 fields on Codex is a separate, later plan.
 
 **A canonical manifest, adopted from either side.** `~/.config/agentsync/manifest.toml`
-records what you decided should exist. Symlink it into your dotfiles to version
+records what you decided to keep. Symlink it into your dotfiles to version
 it. You can adopt *into* it from any host, which matches how this actually goes:
 you install something ad-hoc, then decide to keep it.
 
@@ -254,19 +254,20 @@ a server carrying custom HTTP headers is reported as *blocked* for Codex rather
 than pushed with the headers silently dropped. Every skipped host prints why.
 
 **It tells you when it is out of date, without ever waiting on the network.**
-`doctor` asks GitHub for the newest release and prints the upgrade command; the
+`doctor` asks GitHub for the newest release and prints the upgrade command. The
 review screen shows only what that last check found, so it never makes a request
 and never adds latency. A failed check reports as *unknown*, not as "up to date".
 Set `AGENTSYNC_OFFLINE=1` to skip it entirely. The check shells out to `curl`
 rather than linking a TLS stack — a version comparison is not worth an HTTP client
 and the cross-compilation it complicates.
 
-**A configured server is not a working server.** OAuth credentials are per-host and
-do not travel with a definition, so pushing an OAuth-backed MCP server writes a
-valid config entry that cannot connect until someone logs in. agentsync emits the
-exact login command as a step you still have to run, rather than reporting the add
-as done. `doctor` also asks each host which of its servers actually hold
-credentials — `codex mcp list --json` reports that; a config file cannot, because
+**A configured server is not a working server.** OAuth credentials are per-host
+and do not travel with a definition. So pushing an OAuth-backed MCP server
+writes a valid config entry that cannot connect until someone logs in.
+agentsync emits the exact login command as a step you still have to run,
+rather than reporting the add as done. `doctor` also asks each host which of
+its servers actually hold
+credentials — `codex mcp list --json` reports that. A config file cannot, because
 it records *how* to authenticate, never whether the credential exists.
 
 **Secrets are names, never values.** The manifest holds `bearer_token_env`,
@@ -282,11 +283,11 @@ UI that only repaints when everything is finished is indistinguishable from a
 hang. Keystrokes during a run are discarded rather than queued, so nothing you
 typed while waiting fires the moment the review screen returns.
 
-**Failures don't abort the run.** Steps run in order; a failed step is recorded
-and the run continues, then the summary says what was done, what failed with the
-host's own stderr, and what was skipped. Stopping halfway would leave you unable
-to tell which half landed. The manifest is written once at the end, and only if
-every manifest edit succeeded.
+**Failures do not abort the run.** Steps run in order. A failed step is recorded
+and the run continues. The summary then says what was done, what failed with
+the host's own stderr, and what was skipped. Stopping halfway would leave you
+unable to tell which half landed. The manifest is written once at the end, and
+only if every manifest edit succeeded.
 
 **Nothing destructive happens without a backup.** Replacing a real directory with
 a symlink, moving host-owned skill content into canonical storage, and deleting
@@ -375,8 +376,8 @@ to describe in data, but a new host usually reuses an existing parser. Everythin
 else — paths, argv, flag spellings, scopes, capabilities — lives in the file.
 
 `caps` is what makes this safe: declare only what the CLI can actually express,
-and agentsync will refuse to push anything it can't, instead of dropping the part
-that doesn't fit.
+and agentsync refuses to push anything it cannot express, instead of dropping the
+part that does not fit.
 
 Template vocabulary: `{key}` substitutes a scalar anywhere in an argument (an
 unknown key is an error, never an empty string), and an argument that is exactly
@@ -390,7 +391,7 @@ transport = "stdio"
 command = "node"                     # bare, so it resolves on another machine
 args = ["~/repos/kicad-mcp/dist/index.js"]
 env = { LOG_LEVEL = "info" }
-env_from = ["KICAD_PYTHON"]          # forwarded by name; the value is never stored
+env_from = ["KICAD_PYTHON"]          # forwarded by name. The value is never stored
 
 [mcp.knowledge]
 transport = "http"
@@ -434,10 +435,10 @@ hosts = ["claude"]
 ```
 
 Plugin ids are derived rather than declared, because the curated registries
-genuinely differ between hosts — `superpowers` is in `claude-plugins-official` on
+genuinely differ between hosts. `superpowers` is in `claude-plugins-official` on
 Claude Code and three different marketplaces on Codex, and plenty of plugins are
 in only one. Neither CLI resolves a bare id (`codex plugin add superpowers` exits
-1 with "requires --marketplace unless passed as `<plugin>@<marketplace>`"), so
+1 with "requires --marketplace unless passed as `<plugin>@<marketplace>`"). So
 agentsync reads each host's marketplace manifests and resolves the id per host.
 A name no marketplace offers is *not available*, not drift. A name several
 marketplaces offer asks you to pin one rather than guessing.
@@ -455,7 +456,7 @@ hosts/      descriptor loader, parser registry, CLI runner
 manifest/   canonical file + secret gate
 ```
 
-`core` takes a manifest and a list of host snapshots and emits rows and a plan; it
+`core` takes a manifest and a list of host snapshots and emits rows and a plan. It
 has never heard of Claude Code or Codex. That is what keeps hosts pluggable and
 the differ testable without a machine to test against.
 
@@ -473,8 +474,8 @@ CI additionally checks that the code really does build with the `rust-version`
 declared in `Cargo.toml`, so the MSRV is a measurement rather than a claim.
 
 `tests/diff.rs` builds synthetic worlds and asserts on row wording and planner
-output. `tests/apply_e2e.rs` stands up a fake host CLI on a temporary `PATH` — it
-records the argv it receives and maintains a real config file — so the write path
+output. `tests/apply_e2e.rs` stands up a fake host CLI on a temporary `PATH`. It
+records the argv it receives and maintains a real config file. So the write path
 is verified without touching the machine running the tests, including that a
 second pass converges.
 
@@ -514,11 +515,11 @@ against the CLIs' own `--help` output rather than assumed — see the comments i
 Known gaps:
 
 - Codex's project-scoped `.mcp.json` support is inferred from its loader strings,
-  not confirmed; its descriptor declares `scopes = ["user"]` until it is. Claude
+  not confirmed. Its descriptor declares `scopes = ["user"]` until it is. Claude
   Code's three scopes are confirmed against `claude mcp add --help`.
 - `agentsync doctor --fix`, to rewrite a literal secret out of a host's own config
   file, is not implemented. Today, moving a token to an environment variable
-  rewrites the manifest and re-pushes the corrected definition; the old literal
+  rewrites the manifest and re-pushes the corrected definition. The old literal
   survives in the backup.
 - Whether Claude Code expands `${VAR}` inside `headers` at **user** scope (as
   opposed to a project `.mcp.json`) is unverified. If it does not, a bearer token
