@@ -1,9 +1,9 @@
 //! Structured reports, rendered by both the CLI and the TUI.
 //!
-//! These used to be `println!` calls inside `main.rs`, which meant the TUI could
-//! not show them at all. Building a structure instead is what lets one
-//! implementation serve both surfaces — and stops the two from drifting, which is
-//! the usual fate of "the same" output written twice.
+//! These reports used to be `println!` calls inside `main.rs`. The TUI could
+//! not show them at all. A structure instead lets one implementation serve
+//! both surfaces. This also stops the two from drifting apart, the usual fate
+//! of "the same" output written twice.
 
 use crate::core::diff::{Domain, Row, Severity};
 use crate::core::model::LinkState;
@@ -13,7 +13,7 @@ use crate::hosts::{Host, runner};
 use crate::paths;
 use crate::update;
 
-/// How a line reads at a glance. The renderer maps these to glyphs and colour.
+/// How a line reads at a glance. The renderer maps these to glyphs and color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mark {
     /// Fine.
@@ -173,7 +173,7 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
                         }
                     }
                 }
-                // A probe that failed is itself worth reporting: silence would
+                // A failed probe is itself worth reporting. Silence would
                 // read as "fine".
                 Err(e) => auth.push(Line::new(
                     Mark::Warn,
@@ -192,8 +192,8 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
                 vec![Line::new(
                     Mark::Info,
                     format!(
-                        "{} exposes no machine-readable auth status, so a logged-out \
-                         server there shows up only in its own startup warnings",
+                        "{} has no machine-readable auth status. A logged-out server \
+                         there shows up only in its own startup warnings",
                         unknown_hosts.join(", ")
                     ),
                 )],
@@ -252,8 +252,8 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
                     update::current_version()
                 ),
             ),
-            // Not a problem to fix, but not silence either: a failed check must
-            // not read as "you are up to date".
+            // This is not a problem to fix, but not silence either. A failed
+            // check must not read as "you are up to date".
             update::Status::Unknown { reason } => {
                 Line::new(Mark::Warn, format!("could not check for updates: {reason}"))
             }
@@ -266,10 +266,10 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
 
 /// What each host stores as "memory", and why none of it is synced.
 ///
-/// Claude Code keeps per-project markdown under a directory keyed by an encoded
-/// project path; Codex keeps its own in SQLite. There is no file-level
-/// correspondence between them, so agentsync reports what exists and stops there.
-/// Claiming to sync these would be inventing a mapping.
+/// Claude Code keeps per-project markdown under a directory keyed by an
+/// encoded project path. Codex keeps its own memory in SQLite. There is no
+/// file-level match between them, so agentsync reports what exists and stops
+/// there. Claiming to sync these would invent a mapping that does not exist.
 fn memories() -> Vec<Line> {
     let mut out = Vec::new();
 
@@ -476,7 +476,7 @@ pub fn plan_report(world: &World, rows: &[Row]) -> Report {
     report
 }
 
-/// The concrete effect of a step, so a plan is auditable rather than a
+/// The concrete effect of a step. This makes a plan auditable, not just a
 /// description of intent.
 pub fn describe_step(world: &World, step: &Step) -> Option<String> {
     match step {

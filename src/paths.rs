@@ -1,5 +1,6 @@
-//! Path helpers. Tilde expansion is done here and nowhere else so descriptors
-//! and manifests can both use `~/...` without each call site reimplementing it.
+//! Path helpers. This file does all tilde expansion, in one place, so
+//! descriptors and manifests can both use `~/...` without each call site
+//! reimplementing it.
 
 use std::path::{Path, PathBuf};
 
@@ -23,8 +24,9 @@ pub fn expand(input: &str) -> PathBuf {
     PathBuf::from(input)
 }
 
-/// Render a path with the home directory collapsed back to `~`, for display and
-/// for writing paths into the manifest (which must stay machine-portable).
+/// Render a path with the home directory collapsed to `~`. Use this for
+/// display, and for paths written into the manifest, which must stay
+/// machine-portable.
 pub fn contract(path: &Path) -> String {
     let Some(home) = dirs::home_dir() else {
         return path.display().to_string();
@@ -51,12 +53,12 @@ pub fn manifest_path() -> PathBuf {
     config_dir().join("manifest.toml")
 }
 
-/// Canonical skill content lives here; hosts get symlinks pointing in.
+/// Canonical skill content lives here. Hosts get symlinks that point to it.
 pub fn skills_dir() -> PathBuf {
     config_dir().join("skills")
 }
 
-/// Canonical instruction files live here; hosts get symlinks pointing in.
+/// Canonical instruction files live here. Hosts get symlinks that point to it.
 pub fn prompts_dir() -> PathBuf {
     config_dir().join("prompts")
 }
@@ -74,11 +76,11 @@ pub fn project_manifest_path(repo: &Path) -> PathBuf {
     repo.join(".agentsync.toml")
 }
 
-/// Copy `path` into a timestamped backup directory before we mutate it.
+/// Copy `path` into a timestamped backup directory before this tool changes it.
 ///
-/// Timestamps come from the filesystem clock via a monotonically increasing
-/// counter directory rather than a formatted date, so this needs no time crate
-/// and stays deterministic under test.
+/// The timestamp is a monotonically increasing counter directory, not a
+/// formatted date. This needs no time crate, and stays deterministic under
+/// test.
 pub fn backup(path: &Path) -> Result<Option<PathBuf>> {
     if !path.exists() {
         return Ok(None);
@@ -122,8 +124,8 @@ fn copy_dir(from: &Path, to: &Path) -> Result<()> {
         if ty.is_dir() {
             copy_dir(&entry.path(), &target)?;
         } else if ty.is_symlink() {
-            // Preserve the link rather than following it: a backup that
-            // dereferences links would silently duplicate canonical content.
+            // Preserve the link. Do not follow it: a backup that dereferences
+            // links would duplicate canonical content without warning.
             crate::platform::copy_symlink(&entry.path(), &target)?;
         } else {
             std::fs::copy(entry.path(), &target)?;

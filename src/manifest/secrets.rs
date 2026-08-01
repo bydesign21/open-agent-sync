@@ -1,28 +1,28 @@
 //! The secret gate.
 //!
-//! The manifest is meant to be committed. It must therefore hold *names* of
-//! environment variables, never their values. This is enforced as a hard gate on
-//! save rather than a lint, because a lint that can be ignored will be, and the
-//! failure mode is a credential in git history.
+//! The manifest is meant for a commit to git. It must hold only the *names* of
+//! environment variables, never their values. Save enforces this as a hard
+//! gate, not as a lint. A lint that a user can ignore, a user will ignore. The
+//! result of a missed check is a credential in the git history.
 
 /// A value that looks like a live credential.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SecretFinding {
-    /// Dotted path into the manifest, e.g. `mcp.upskillai-knowledge.headers.Authorization`.
+    /// Dotted path into the manifest, for example `mcp.upskillai-knowledge.headers.Authorization`.
     pub location: String,
     pub reason: &'static str,
 }
 
-/// True when the value is nothing but environment-variable references and
-/// punctuation, which is the shape we *want* people to write.
+/// True when the value has only environment-variable references and
+/// punctuation. This is the shape the manifest wants people to write.
 fn is_only_references(value: &str) -> bool {
     let mut rest = value;
     let mut saw_reference = false;
     while let Some(start) = rest.find("${") {
         let before = &rest[..start];
         if before.chars().any(|c| c.is_ascii_alphanumeric()) {
-            // Literal alphanumeric text outside a reference: keep scanning the
-            // whole value with the heuristics instead.
+            // Alphanumeric text sits outside a reference. Scan the whole value
+            // with the heuristics instead.
             return false;
         }
         let Some(end) = rest[start..].find('}') else {
@@ -89,8 +89,8 @@ pub fn inspect(value: &str) -> Option<&'static str> {
         }
     }
 
-    // Only judge opaque single tokens. A sentence or a path with a long word in
-    // it is not a credential, and flagging it would train people to bypass this.
+    // Judge only opaque single tokens. A sentence, or a path with one long word,
+    // is not a credential. Flagging it would teach people to bypass this check.
     let token = trimmed.split_whitespace().last().unwrap_or(trimmed);
     if trimmed.split_whitespace().count() > 1 && !lower.starts_with("bearer ") {
         return None;
