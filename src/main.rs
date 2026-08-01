@@ -1,8 +1,9 @@
 //! agentsync — keep MCP servers, skills, and plugins in sync across agentic
 //! coding CLIs.
 //!
-//! With no subcommand this opens the review TUI. The subcommands exist so the
-//! same core is scriptable and so the plan can be inspected without a terminal.
+//! With no subcommand, this opens the review TUI. The subcommands exist so
+//! the same core stays scriptable, and so a plan can be inspected without a
+//! terminal.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -90,8 +91,8 @@ fn real_main() -> Result<()> {
             print_plan(&world, &rows);
             if !yes {
                 println!(
-                    "Nothing was changed. Re-run with --yes to accept every default action, \
-                     or run `agentsync` with no arguments to choose per row."
+                    "Nothing changed. Re-run with --yes to accept every default action. \
+                     Or run `agentsync` with no arguments to choose per row."
                 );
                 return Ok(());
             }
@@ -134,7 +135,7 @@ fn filtered_rows(world: &World, only: &[String]) -> Vec<Row> {
             "plugins" | "plugin" => Some(Domain::Plugins),
             other => {
                 eprintln!(
-                    "agentsync: unknown domain {other:?}; expected mcp, skills, \
+                    "agentsync: unknown domain {other:?}. Expected mcp, skills, \
                      instructions, or plugins"
                 );
                 None
@@ -271,7 +272,7 @@ fn hosts_command(want_parsers: bool) -> Result<()> {
     let hosts = agentsync::hosts::Host::load_all().context("loading host descriptors")?;
     let report = report::hosts_report(&hosts);
     if want_parsers {
-        // The parser registry is the last section; show only that.
+        // The parser registry is the last section. Show only that.
         if let Some(section) = report.sections.last() {
             println!("{}", section.title);
             for line in &section.lines {

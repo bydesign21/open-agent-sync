@@ -10,8 +10,9 @@
 //! manifest/  Canonical file load/save + secret gate.
 //! ```
 //!
-//! The read path parses host config files directly; the write path always goes
-//! through the host's own CLI so we never take ownership of files we don't own.
+//! The read path parses host config files directly. The write path always goes
+//! through the host's own CLI, so agentsync never takes ownership of files it
+//! does not own.
 
 pub mod core;
 pub mod domains;

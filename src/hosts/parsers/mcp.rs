@@ -1,18 +1,18 @@
 //! MCP config parsers.
 //!
-//! All of them normalize two idioms so the same server read from different hosts
-//! compares equal:
+//! Each parser normalizes two idioms, so the same server read from different
+//! hosts compares equal:
 //!
 //! * `env = { FOO = "${FOO}" }` becomes `env_from = ["FOO"]`. Self-referential
-//!   passthrough is the same intent expressed differently, and treating it as a
-//!   literal value would make every such server look divergent forever.
+//!   passthrough expresses the same intent in a different form. Treating it as
+//!   a literal value makes every such server look divergent forever.
 //! * `Authorization: Bearer ${VAR}` becomes `bearer_token_env = "VAR"`. This
-//!   matters because it is the difference between a server Codex can accept and
-//!   one it must refuse — Codex has `--bearer-token-env-var` but no `--header`.
+//!   matters: it marks the difference between a server Codex can accept and one
+//!   it must refuse. Codex has `--bearer-token-env-var` but no `--header`.
 //!
-//! A *literal* `Authorization: Bearer <token>` is deliberately **not**
-//! normalized. It is kept as a header and reported, so it surfaces as an unsafe
-//! row rather than being quietly laundered into the manifest.
+//! A *literal* `Authorization: Bearer <token>` is not normalized. It stays as a
+//! header and is reported, so it appears as an unsafe row instead of being
+//! laundered quietly into the manifest.
 
 use std::collections::BTreeMap;
 
@@ -230,9 +230,9 @@ fn parse_codex_server(name: &str, def: &toml::Value) -> Result<McpServer> {
             if let Some(map) = table.get(key).and_then(toml::Value::as_table) {
                 for (k, v) in map {
                     if let Some(s) = v.as_str() {
-                        // env_http_headers maps a header to an env var *name*;
-                        // render it as a reference so it compares equal to the
-                        // same intent expressed on another host.
+                        // env_http_headers maps a header to the *name* of an env
+                        // var. Render it as a reference, so it compares equal to
+                        // the same intent on another host.
                         let value = if key == "env_http_headers" {
                             format!("${{{s}}}")
                         } else {

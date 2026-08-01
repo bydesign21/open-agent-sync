@@ -1,9 +1,9 @@
 //! Plan types: the concrete, reviewable steps an accepted set of rows becomes.
 //!
-//! The plan is a first-class artifact, not an implementation detail. It is shown
-//! before anything runs and can be exported as a shell script, which is what
-//! makes the tool auditable: you can always see, and run yourself, exactly what
-//! it intended to do.
+//! The plan is a first-class artifact, not an implementation detail. The tool
+//! shows the plan before it runs anything, and it can export the plan as a
+//! shell script. This makes the tool auditable: you can see exactly what it
+//! plans to do, then run the script yourself.
 
 use std::path::PathBuf;
 
@@ -67,9 +67,9 @@ pub enum ManifestOp {
 impl ManifestOp {
     /// The manifest change in the manifest's own syntax.
     ///
-    /// Both the TUI and `agentsync plan` render this, so the plan you approve
-    /// interactively and the plan you read in a terminal describe the edit the
-    /// same way.
+    /// Both the TUI and `agentsync plan` render this text. As a result, the plan
+    /// you approve interactively and the plan you read in a terminal describe
+    /// the edit the same way.
     pub fn describe(&self) -> String {
         fn hosts(h: &Option<Vec<String>>) -> String {
             h.clone().unwrap_or_default().join(", ")
@@ -122,8 +122,9 @@ impl ManifestOp {
 
 #[derive(Clone, Debug)]
 pub enum FsOp {
-    /// Create (or replace) `link` pointing at `target`. Replacing anything we
-    /// did not create is preceded by a backup.
+    /// Create (or replace) `link` so it points at `target`. When agentsync did
+    /// not create the existing content at `link`, it backs that content up
+    /// first.
     Link {
         target: PathBuf,
         link: PathBuf,
@@ -134,7 +135,7 @@ pub enum FsOp {
         from: PathBuf,
         to: PathBuf,
     },
-    /// Delete canonical content. Only reachable via an explicit purge.
+    /// Delete canonical content. Only an explicit purge triggers this action.
     RemoveTree(PathBuf),
 }
 
@@ -149,15 +150,15 @@ pub enum Step {
         cwd: Option<PathBuf>,
     },
     Fs(FsOp),
-    /// Something the user must do themselves, e.g. export an env var. Carried in
-    /// the plan so it is impossible to miss, and reported as skipped rather than
-    /// silently succeeding.
+    /// Something the user must do by hand, for example export an environment
+    /// variable. The plan carries this step so the user cannot miss it, and the
+    /// report marks it as skipped instead of silently succeeding.
     Manual(String),
 }
 
 impl Step {
-    /// Ordering class. Marketplaces must exist before plugins are installed
-    /// from them, and removals must precede adds so a promote/demote never has
+    /// Ordering class. Marketplaces must exist before plugins install from
+    /// them. Removals must precede adds, so a promote or demote never leaves
     /// the same name at two scopes at once.
     fn order(&self) -> u8 {
         match self {
@@ -172,7 +173,7 @@ impl Step {
 
 #[derive(Clone, Debug)]
 pub struct PlannedStep {
-    /// Short human label, e.g. `add kicad to codex`.
+    /// Short label for a human reader, for example `add kicad to codex`.
     pub label: String,
     pub step: Step,
 }
@@ -180,9 +181,9 @@ pub struct PlannedStep {
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
     pub steps: Vec<PlannedStep>,
-    /// Things the user should know that are not steps: capabilities that forced
-    /// a host to be skipped, coverage that was deliberately bounded. Never
-    /// silent.
+    /// Information the user needs, that is not a step: capabilities that forced
+    /// a host to be skipped, or coverage that was deliberately bounded. This
+    /// information is never silent.
     pub notes: Vec<String>,
 }
 
@@ -202,8 +203,9 @@ impl Plan {
         self.steps.is_empty()
     }
 
-    /// Stable-sort into dependency order. Stable so that steps within a class
-    /// keep the order the rows were listed in, which makes the plan readable.
+    /// Sort steps into dependency order. This sort is stable, so steps within
+    /// one class keep the order in which the rows were listed. This keeps the
+    /// plan readable.
     pub fn finalize(&mut self) {
         self.steps.sort_by_key(|s| s.step.order());
     }

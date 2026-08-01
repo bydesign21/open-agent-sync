@@ -1,21 +1,22 @@
 //! The skills domain.
 //!
-//! Skills are the one domain with no CLI: canonical content lives in
-//! `~/.config/agentsync/skills/<name>` and each host's skills directory gets a
-//! symlink pointing in. Both Claude Code and Codex follow symlinked skill
-//! directories, and both read the open Agent Skills layout (`SKILL.md` plus
-//! optional `scripts/`, `references/`, `assets/`), so one directory genuinely
-//! serves both.
+//! Skills are the one domain with no CLI. Canonical content lives in
+//! `~/.config/agentsync/skills/<name>`, and each host's skills directory gets
+//! a symlink that points to it. Both Claude Code and Codex follow symlinked
+//! skill directories, and both read the open Agent Skills layout (`SKILL.md`
+//! plus optional `scripts/`, `references/`, `assets/`). So one directory can
+//! serve both.
 //!
-//! Three states must stay distinguishable, and conflating them is how a sync
-//! tool destroys work:
+//! Three states must stay distinguishable. Conflating them is how a sync tool
+//! destroys work:
 //!
 //! * **Linked** — a symlink into canonical. Synced.
-//! * **RealDir** — the host owns the content. Adopting *moves* it into canonical
-//!   after a backup; it is never silently overwritten.
-//! * **Foreign** — a symlink somewhere else, e.g. another installer's tree.
-//!   Reported. Only rewritten when the user explicitly picks that action, and
-//!   the previous contents are backed up first.
+//! * **RealDir** — the host owns the content. Adopting *moves* it into
+//!   canonical after a backup. agentsync never overwrites it silently.
+//! * **Foreign** — a symlink to somewhere else, for example another
+//!   installer's tree. agentsync reports this state and rewrites it only when
+//!   the user explicitly picks that action. It backs up the previous contents
+//!   first.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -36,13 +37,14 @@ fn present_hosts(states: &BTreeMap<String, LinkState>) -> Vec<String> {
         .collect()
 }
 
-/// Removal actions whose labels say what will actually be destroyed.
+/// Removal actions whose labels state what the action will actually destroy.
 ///
-/// The generic helper would label every one of these "delete", but for skills the
-/// difference is enormous: removing a symlink is trivially reversible, while
-/// removing a host's real directory when nothing else holds the content destroys
-/// the only copy. A row that says "delete everywhere" when it means "delete the
-/// only copy" is how work gets lost, so the two are named differently.
+/// The generic helper would label every one of these "delete". For skills,
+/// the difference matters a great deal: removing a symlink is trivially
+/// reversible, but removing a host's real directory destroys the only copy
+/// when nothing else holds the content. A row that says "delete everywhere"
+/// when it means "delete the only copy" is how work gets lost. So the two
+/// labels stay separate.
 fn skill_removals(
     states: &BTreeMap<String, LinkState>,
     canonical_exists: bool,
@@ -99,7 +101,7 @@ fn skill_removals(
     out
 }
 
-/// Where a skill's canonical content lives, honouring a manifest override.
+/// Where a skill's canonical content lives, honoring a manifest override.
 fn canonical_path(world: &World, name: &str) -> PathBuf {
     match world.manifest.skills.get(name) {
         Some(entry) => entry.resolve(&world.manifest_dir()),
@@ -120,7 +122,8 @@ pub(super) fn rows(world: &World) -> Vec<Row> {
     let mut names: BTreeSet<String> = world.manifest.skills.keys().cloned().collect();
     for snap in world.detected_snapshots() {
         // Plugin-provided skills belong to the plugin manager. Managing them
-        // here would have the two fighting over the same directory.
+        // here would make agentsync and the plugin manager compete for the
+        // same directory.
         let owned_by_plugins: BTreeSet<&String> = snap.plugin_skills.iter().collect();
         names.extend(
             snap.skills
@@ -210,7 +213,7 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
                 .unwrap_or_default();
             if !foreign.is_empty() {
                 detail = format!(
-                    "{detail}   \u{b7}   {} link elsewhere and would be repointed",
+                    "{detail}   \u{b7}   {} link elsewhere, and adopting repoints them",
                     join_hosts(&foreign)
                 );
             }
@@ -236,7 +239,7 @@ fn row_for(world: &World, name: &str) -> Option<Row> {
                         },
                     ),
                     Action::new(
-                        "adopt only, don't link",
+                        "adopt only, do not link",
                         ActionKind::Adopt {
                             push: false,
                             promote: false,
@@ -452,8 +455,8 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                     _ => {}
                 }
             }
-            // Unlinking from one host while the manifest still wants it
-            // everywhere just re-links it next run.
+            // Unlinking from one host does not help when the manifest still
+            // targets every host: agentsync re-links it on the next run.
             if let Some(entry) = world.manifest.skills.get(&name) {
                 let targeted: Vec<String> = world
                     .detected()
@@ -487,7 +490,7 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                 );
             } else if world.manifest.skills.contains_key(&name) || canonical.exists() {
                 plan.note(format!(
-                    "{name}: canonical content kept at {}; re-run with a purge action to delete it",
+                    "{name}: canonical content kept at {}, re-run with a purge action to delete it",
                     paths::contract(&canonical_path(world, &name))
                 ));
             }
@@ -549,7 +552,7 @@ fn adopt(
             return;
         }
         _ => {
-            // Canonical already holds the content; registering it is enough.
+            // Canonical already holds the content, so registering it is enough.
         }
     }
 

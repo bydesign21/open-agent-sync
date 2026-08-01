@@ -7,9 +7,9 @@
 #   VERSION            tag to install (default: the latest release)
 #   AGENTSYNC_BIN_DIR  where to put the binary (default: ~/.local/bin)
 #
-# This verifies the download against the release's SHA256SUMS. If you would
-# rather not pipe a script into a shell, the README has the same steps written
-# out to run by hand.
+# This verifies the download against the release's SHA256SUMS. If you prefer
+# not to pipe a script into a shell, the README has the same steps written out
+# to run by hand.
 set -eu
 
 REPO=${REPO:-bydesign21/open-agent-sync}
@@ -29,7 +29,7 @@ case "$os" in
   MINGW*|MSYS*|CYGWIN*)
     die "Windows is not installable from this script. Download
   agentsync-<version>-x86_64-pc-windows-msvc.zip from
-  https://github.com/$REPO/releases and put agentsync.exe on your PATH." ;;
+  https://github.com/$REPO/releases. Put agentsync.exe on your PATH." ;;
   *) die "unsupported operating system: $os" ;;
 esac
 
@@ -50,16 +50,16 @@ if [ -z "${VERSION:-}" ]; then
     | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
     | head -n 1)
   if [ -z "$VERSION" ]; then
-    # The API permits 60 unauthenticated calls an hour *per IP*, so one busy
-    # machine behind a corporate NAT or CGNAT can exhaust it for everyone
-    # sharing that address — and the install one-liner is exactly the thing
-    # people run on a shared network. The web redirect for /releases/latest
-    # carries the tag in the URL it lands on and is not rate-limited.
+    # The API permits only 60 unauthenticated calls an hour *per IP*. One busy
+    # machine behind a corporate NAT or CGNAT can exhaust it for everyone that
+    # shares the address. The install one-liner is exactly the command people
+    # run on a shared network. The web redirect for /releases/latest carries
+    # the tag in the URL it lands on, and is not rate-limited.
     VERSION=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
       "https://github.com/$REPO/releases/latest" 2>/dev/null \
       | sed -n 's|.*/tag/\([^/]*\)$|\1|p')
   fi
-  [ -n "$VERSION" ] || die "could not determine the latest release; set VERSION=vX.Y.Z"
+  [ -n "$VERSION" ] || die "could not determine the latest release. Set VERSION=vX.Y.Z"
 fi
 
 ASSET="agentsync-$VERSION-$TARGET.tar.gz"
@@ -88,9 +88,9 @@ curl -fsSLO "$BASE/$ASSET" || die "no such release asset: $ASSET
 curl -fsSLO "$BASE/SHA256SUMS" || die "could not download SHA256SUMS"
 
 say "Verifying checksum"
-# The published filename is kept deliberately: SHA256SUMS refers to assets by
-# name, so renaming the download would make --ignore-missing verify nothing and
-# still exit 0.
+# The published filename stays as-is on purpose. SHA256SUMS refers to assets
+# by name, so a renamed download would make --ignore-missing verify nothing,
+# and still exit 0.
 verify SHA256SUMS >/dev/null || die "checksum verification FAILED for $ASSET"
 
 tar -xzf "$ASSET"

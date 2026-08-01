@@ -2,16 +2,16 @@
 //!
 //! Two constraints shape this:
 //!
-//! * **Never block the tool on the network.** `agentsync` and `plan` are local,
-//!   file-based, and fast. They read a cache and never make a request; only
-//!   `doctor` goes out to the network, because "tell me about problems" is
-//!   already the command that costs something.
-//! * **No TLS stack.** Pulling in an HTTP client with its own certificate
-//!   handling to compare two version numbers is more dependency than the feature
-//!   is worth, and it complicates cross-compilation. This shells out to `curl`,
-//!   which is the same thing the tool already does for every other side effect —
-//!   invoke a program the platform has. Where `curl` is missing, the check
-//!   reports that rather than pretending everything is current.
+//! * **Never block the tool on the network.** `agentsync` and `plan` stay
+//!   local, file-based, and fast. They read a cache and never make a request.
+//!   Only `doctor` goes out to the network, because "tell me about problems"
+//!   is already the command that costs something.
+//! * **No TLS stack.** An HTTP client with its own certificate handling, just
+//!   to compare two version numbers, costs more in dependencies than the
+//!   feature is worth. It also complicates cross-compilation. This shells out
+//!   to `curl` instead, the same way the tool invokes a program the platform
+//!   already has for every other side effect. Where `curl` is missing, the
+//!   check reports that, instead of pretending everything is current.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -45,7 +45,7 @@ pub enum Status {
 pub struct Cached {
     /// Unix seconds.
     pub checked_at: u64,
-    /// The newest tag seen, e.g. `v0.0.4`.
+    /// The newest tag seen, for example `v0.0.4`.
     pub latest: String,
 }
 
@@ -153,16 +153,16 @@ fn write_cache(latest: &str) -> Result<()> {
 ///
 /// The JSON API is tried first because it is the documented interface, but it
 /// allows only 60 unauthenticated calls an hour *per IP*. A shared NAT, or one
-/// busy machine, exhausts that for everyone behind the address — and the symptom
-/// is a 403 that has nothing to do with whether an update exists. So a failure
-/// falls back to the web redirect, which is not rate-limited.
+/// busy machine, exhausts that limit for everyone behind the address. The
+/// symptom is a 403 that has nothing to do with whether an update exists. So a
+/// failure falls back to the web redirect, which is not rate-limited.
 fn fetch_latest_tag(slug: &str) -> Result<String> {
     match fetch_tag_via_api(slug) {
         Ok(tag) => Ok(tag),
         Err(api_err) => fetch_tag_via_redirect(slug).map_err(|redirect_err| {
-            // Both paths are named: "403" alone sends people looking for a
-            // problem with the release rather than with their address.
-            anyhow::anyhow!("{api_err}; the release redirect also failed: {redirect_err}")
+            // Name both paths. "403" alone sends people looking for a problem
+            // with the release, not with their address.
+            anyhow::anyhow!("{api_err}. The release redirect also failed: {redirect_err}")
         }),
     }
 }
@@ -193,8 +193,8 @@ fn fetch_tag_via_api(slug: &str) -> Result<String> {
         .context("the GitHub response had no tag_name")
 }
 
-/// `/releases/latest` redirects to `/releases/tag/<tag>`; read the tag off the
-/// URL curl ends up at.
+/// `/releases/latest` redirects to `/releases/tag/<tag>`. Read the tag off
+/// the URL curl ends up at.
 fn fetch_tag_via_redirect(slug: &str) -> Result<String> {
     let url = format!("https://github.com/{slug}/releases/latest");
     let out = curl(

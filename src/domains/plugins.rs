@@ -1,11 +1,10 @@
 //! The plugins domain: marketplaces first, then the plugins installed from them.
 //!
-//! The subtlety here is that the curated registries are genuinely different
-//! between hosts — `superpowers` exists in both `claude-plugins-official` and
-//! `openai-api-curated` under different marketplace names, and plenty of plugins
-//! exist in only one. So:
+//! The curated registries are genuinely different between hosts. `superpowers`
+//! exists in both `claude-plugins-official` and `openai-api-curated` under
+//! different marketplace names, and plenty of plugins exist in only one. So:
 //!
-//! * The manifest stores a **plugin name**, not a `name@marketplace` id, and the
+//! * The manifest stores a **plugin name**, not a `name@marketplace` id. The
 //!   id is resolved per host from that host's marketplace manifests. Neither CLI
 //!   resolves a bare name, so the marketplace must be looked up, never assumed.
 //! * `marketplace = "..."` is an optional pin, for when several of one host's
