@@ -381,6 +381,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             label: format!("write shim for {plugin}"),
             step: Step::Fs(op),
             order_hint: None,
+            guard: None,
         });
     }
     staged.push(PlannedStep {
@@ -394,6 +395,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             cwd: None,
         },
         order_hint: None,
+        guard: None,
     });
 
     // The marketplace manifest lists every shim plugin at once, and applying
@@ -414,11 +416,17 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             &plugins,
         )?),
         order_hint: None,
+        guard: None,
     });
 
     // Order 1 puts the install ahead of the removal below. A failed removal
     // leaves a duplicate hook, which is visible. A failed install after a
     // removal leaves no review at all, which reads as health.
+    //
+    // The guard key ties the two steps together. If the install fails, the
+    // removal below is skipped instead of run, so the ordering actually buys
+    // something: a failed install never leaves the host with no hook at all.
+    let install_guard = format!("shim:{target_name}:{}", generated.shim_plugin);
     staged.push(PlannedStep {
         label: format!("install the {plugin} shim in {target_name}"),
         step: Step::Host {
@@ -428,6 +436,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             cwd: None,
         },
         order_hint: Some(1),
+        guard: Some(install_guard.clone()),
     });
     if world
         .snapshot(target_name)
@@ -441,6 +450,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
                 cwd: None,
             },
             order_hint: None,
+            guard: Some(install_guard),
         });
     }
 

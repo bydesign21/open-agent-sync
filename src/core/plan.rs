@@ -187,6 +187,12 @@ pub struct PlannedStep {
     /// rule is wrong for one case: shim installs must precede the removal of
     /// the plugin they replace.
     pub order_hint: Option<u8>,
+    /// Skip this step when an earlier step sharing this key failed.
+    ///
+    /// Ordering alone is not enough. A shim install that fails must not be
+    /// followed by removing the plugin it was replacing, or the host is left
+    /// with no hook at all — which looks exactly like a clean run.
+    pub guard: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -204,6 +210,7 @@ impl Plan {
             label: label.into(),
             step,
             order_hint: None,
+            guard: None,
         });
     }
 
@@ -213,6 +220,28 @@ impl Plan {
             label: label.into(),
             step,
             order_hint: Some(order),
+            guard: None,
+        });
+    }
+
+    /// Push a step with an explicit ordering class and a guard key.
+    ///
+    /// The guard key links this step to another step sharing the same key. If
+    /// the earlier step with that key fails, this step is skipped instead of
+    /// run. Use this for a removal that must not happen when the install it
+    /// depends on failed.
+    pub fn push_guarded(
+        &mut self,
+        label: impl Into<String>,
+        step: Step,
+        order: u8,
+        guard: impl Into<String>,
+    ) {
+        self.steps.push(PlannedStep {
+            label: label.into(),
+            step,
+            order_hint: Some(order),
+            guard: Some(guard.into()),
         });
     }
 

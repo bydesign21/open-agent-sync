@@ -90,12 +90,31 @@ pub fn run(
     let mut report = Report::default();
     let mut manifest_dirty = false;
     let mut manifest_ops_ok = true;
+    let mut failed_guards: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for (index, planned) in plan.steps.iter().enumerate() {
         progress(Progress::Started {
             index,
             label: &planned.label,
         });
+
+        if let Some(guard) = &planned.guard
+            && failed_guards.contains(guard)
+        {
+            let result = StepResult {
+                label: planned.label.clone(),
+                outcome: Outcome::Skipped,
+                command: None,
+                message: format!(
+                    "skipped: an earlier step guarding \"{guard}\" failed, so this step \
+                     did not run"
+                ),
+            };
+            progress(Progress::Finished(&result));
+            report.results.push(result);
+            continue;
+        }
+
         let result = match &planned.step {
             Step::Manifest(op) => {
                 let r = apply_manifest_op(manifest, op);
@@ -184,6 +203,12 @@ pub fn run(
                 message: text.clone(),
             },
         };
+
+        if result.outcome == Outcome::Failed
+            && let Some(guard) = &planned.guard
+        {
+            failed_guards.insert(guard.clone());
+        }
 
         progress(Progress::Finished(&result));
         report.results.push(result);
@@ -480,6 +505,139 @@ mod tests {
         assert_eq!(report.results.len(), 2, "second step must still run");
         assert_eq!(report.results[0].outcome, Outcome::Failed);
         assert_eq!(report.results[1].outcome, Outcome::Skipped);
+    }
+
+    #[test]
+    fn a_failed_guarded_step_skips_the_later_step_sharing_its_guard() {
+        // A failed shim install must not be followed by removing the plugin it
+        // was replacing. Modelled here with a manifest op that fails, guarding
+        // a manual step that must never run once the guard has failed.
+        let home = tmp_home();
+        let mut plan = Plan::default();
+        plan.push_guarded(
+            "install the shim",
+            Step::Manifest(ManifestOp::SetMcpHosts {
+                name: "nope".into(),
+                hosts: Some(vec!["codex".into()]),
+            }),
+            0,
+            "shim:codex:example",
+        );
+        plan.push_guarded(
+            "remove the original",
+            Step::Manual("remove original plugin".into()),
+            0,
+            "shim:codex:example",
+        );
+
+        let mut manifest = Manifest::default();
+        let report = run(
+            &plan,
+            &mut manifest,
+            &home.path().join("manifest.toml"),
+            &[],
+            |_| {},
+        );
+        assert_eq!(report.results[0].outcome, Outcome::Failed);
+        assert_eq!(report.results[1].outcome, Outcome::Skipped);
+        assert!(
+            report.results[1].message.contains("shim:codex:example"),
+            "the skip message must name the guard that caused it: {}",
+            report.results[1].message
+        );
+    }
+
+    #[test]
+    fn a_succeeding_guarded_step_lets_the_later_step_run() {
+        let home = tmp_home();
+        let mut plan = Plan::default();
+        plan.push_guarded(
+            "install the shim",
+            Step::Manifest(ManifestOp::UpsertSkill {
+                name: "a".into(),
+                source: "skills/a".into(),
+            }),
+            0,
+            "shim:codex:example",
+        );
+        plan.push_guarded(
+            "remove the original",
+            Step::Manual("remove original plugin".into()),
+            0,
+            "shim:codex:example",
+        );
+
+        let mut manifest = Manifest::default();
+        let report = run(
+            &plan,
+            &mut manifest,
+            &home.path().join("manifest.toml"),
+            &[],
+            |_| {},
+        );
+        assert_eq!(report.results[0].outcome, Outcome::Done);
+        assert_eq!(
+            report.results[1].outcome,
+            Outcome::Skipped,
+            "Manual steps are always reported Skipped, but this must be the \
+             'do this by hand' skip, not the guard skip"
+        );
+        assert!(
+            !report.results[1].message.contains("shim:codex:example"),
+            "a successful guard must not produce a guard-skip message: {}",
+            report.results[1].message
+        );
+    }
+
+    #[test]
+    fn an_unguarded_failure_does_not_stop_unrelated_steps() {
+        // Existing behaviour that other domains rely on: a failure with no
+        // guard key must not affect any other step, guarded or not.
+        let home = tmp_home();
+        let mut plan = Plan::default();
+        plan.push(
+            "unrelated failing step",
+            Step::Manifest(ManifestOp::SetMcpHosts {
+                name: "nope".into(),
+                hosts: Some(vec!["codex".into()]),
+            }),
+        );
+        plan.push_guarded(
+            "install the shim",
+            Step::Manifest(ManifestOp::UpsertSkill {
+                name: "a".into(),
+                source: "skills/a".into(),
+            }),
+            0,
+            "shim:codex:example",
+        );
+        plan.push_guarded(
+            "remove the original",
+            Step::Manual("remove original plugin".into()),
+            0,
+            "shim:codex:example",
+        );
+
+        let mut manifest = Manifest::default();
+        let report = run(
+            &plan,
+            &mut manifest,
+            &home.path().join("manifest.toml"),
+            &[],
+            |_| {},
+        );
+        assert_eq!(report.results[0].outcome, Outcome::Failed);
+        assert_eq!(
+            report.results[1].outcome,
+            Outcome::Done,
+            "the unrelated failure must not guard-skip a step with a different key"
+        );
+        assert_eq!(report.results[2].outcome, Outcome::Skipped);
+        assert!(
+            !report.results[2].message.contains("shim:codex:example"),
+            "the guard here never failed, so this must be the plain manual skip: {}",
+            report.results[2].message
+        );
     }
 
     #[test]
