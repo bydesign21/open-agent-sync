@@ -49,8 +49,13 @@ pub fn matches(pattern: &str, tool_name: &str, tool_input: &Value) -> Match {
         return Match::No;
     }
 
+    // The tool name matches, but the field this pattern needs to test is
+    // absent (for example a `Bash(prefix:*)` filter checked against an `Edit`
+    // whose `tool_input` never had a name collision but happens to carry no
+    // `command`). That is not "does not match" — it is "cannot tell" — so it
+    // must fail open and say why, never quietly answer `No`.
     let Some(command) = tool_input.get("command").and_then(Value::as_str) else {
-        return Match::No;
+        return Match::Unparseable;
     };
     yes_if(command_starts_with(command.trim_start(), prefix))
 }
@@ -142,10 +147,18 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_command_field_cannot_match_a_prefix_pattern() {
+    fn a_missing_command_field_is_reported_not_guessed() {
+        // Changed from the previous expectation of `Match::No`. The tool name
+        // matches (`Bash`), but the field the prefix pattern needs to test is
+        // absent. Answering `No` here is indistinguishable from a deliberate
+        // no-match: same exit code 0, no stderr, no output. But this is a
+        // shape we cannot evaluate, not a shape we evaluated and rejected — a
+        // non-Bash tool matched by a `Tool(prefix:*)` filter hits exactly this
+        // path today, and the caller must fail open and say why, per the
+        // module's own "never silently answer No" rule.
         assert_eq!(
             matches("Bash(git commit:*)", "Bash", &serde_json::json!({})),
-            Match::No
+            Match::Unparseable
         );
     }
 
