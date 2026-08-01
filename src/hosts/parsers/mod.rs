@@ -6,6 +6,7 @@
 //! regular, so those stay in the descriptor. A new host normally reuses a parser
 //! here; only a genuinely new file format needs code.
 
+pub mod hooks;
 pub mod mcp;
 pub mod plugins;
 
@@ -54,6 +55,12 @@ pub struct PluginRead {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+pub struct HookRead {
+    pub handlers: Vec<crate::core::model::HookHandler>,
+    pub warnings: Vec<String>,
+}
+
 pub fn read_mcp(parser: &str, text: &str, ctx: &ParseCtx) -> Result<McpRead> {
     match parser {
         "claude_json_v1" => mcp::claude_json_v1(text, ctx),
@@ -69,6 +76,13 @@ pub fn read_plugins(parser: &str, text: &str, ctx: &ParseCtx) -> Result<PluginRe
         "claude_marketplaces_v1" => plugins::claude_marketplaces_v1(text, ctx),
         "codex_plugins_toml_v1" => plugins::codex_plugins_toml_v1(text, ctx),
         other => bail!("unknown plugin parser {other:?} (see `agentsync hosts --parsers`)"),
+    }
+}
+
+pub fn read_hooks(parser: &str, text: &str, ctx: &ParseCtx) -> Result<HookRead> {
+    match parser {
+        "claude_hooks_json_v1" => hooks::claude_hooks_json_v1(text, ctx),
+        other => bail!("unknown hooks parser {other:?} (see `agentsync hosts --parsers`)"),
     }
 }
 
@@ -118,6 +132,10 @@ pub fn registry() -> Vec<(&'static str, &'static str)> {
         (
             "codex_plugins_toml_v1",
             "plugins: ~/.codex/config.toml [plugins.*]",
+        ),
+        (
+            "claude_hooks_json_v1",
+            "hooks: <plugin cache>/<version>/hooks/hooks.json",
         ),
     ]
 }
