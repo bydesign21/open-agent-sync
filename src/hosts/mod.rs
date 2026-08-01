@@ -737,17 +737,27 @@ parser = "claude_settings_hooks_v1"
         // same plugin key to the same id, and the second read silently wins.
         // That must not happen without a warning naming both plugin roots.
         let tmp = tempfile::tempdir().unwrap();
-        let root_v1 = tmp.path().join("cache/mkt/demo/1.0.0");
-        let root_v2 = tmp.path().join("cache/mkt/demo/2.0.0");
+        let root_v1 = tmp
+            .path()
+            .join("cache")
+            .join("mkt")
+            .join("demo")
+            .join("1.0.0");
+        let root_v2 = tmp
+            .path()
+            .join("cache")
+            .join("mkt")
+            .join("demo")
+            .join("2.0.0");
         std::fs::create_dir_all(root_v1.join("hooks")).unwrap();
         std::fs::create_dir_all(root_v2.join("hooks")).unwrap();
         std::fs::write(
-            root_v1.join("hooks/hooks.json"),
+            root_v1.join("hooks").join("hooks.json"),
             r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a"}]}]}}"#,
         )
         .unwrap();
         std::fs::write(
-            root_v2.join("hooks/hooks.json"),
+            root_v2.join("hooks").join("hooks.json"),
             r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a","shell":"bash"}]}]}}"#,
         )
         .unwrap();
