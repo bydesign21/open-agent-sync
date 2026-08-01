@@ -82,6 +82,7 @@ pub fn read_plugins(parser: &str, text: &str, ctx: &ParseCtx) -> Result<PluginRe
 pub fn read_hooks(parser: &str, text: &str, ctx: &ParseCtx) -> Result<HookRead> {
     match parser {
         "claude_hooks_json_v1" => hooks::claude_hooks_json_v1(text, ctx),
+        "claude_settings_hooks_v1" => hooks::claude_settings_hooks_v1(text, ctx),
         other => bail!("unknown hooks parser {other:?} (see `agentsync hosts --parsers`)"),
     }
 }
@@ -136,6 +137,10 @@ pub fn registry() -> Vec<(&'static str, &'static str)> {
         (
             "claude_hooks_json_v1",
             "hooks: <plugin cache>/<version>/hooks/hooks.json",
+        ),
+        (
+            "claude_settings_hooks_v1",
+            "hooks: ~/.claude/settings.json and settings.local.json",
         ),
     ]
 }

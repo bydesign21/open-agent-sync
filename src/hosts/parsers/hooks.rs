@@ -35,6 +35,23 @@ pub fn claude_hooks_json_v1(text: &str, ctx: &ParseCtx) -> Result<HookRead> {
     Ok(out)
 }
 
+/// `~/.claude/settings.json` and `settings.local.json`.
+///
+/// The same `hooks` object as a plugin manifest, embedded in a larger settings
+/// document. A settings file with no `hooks` key is silent: most have none, and
+/// warning about it would bury the warnings that matter.
+pub fn claude_settings_hooks_v1(text: &str, ctx: &ParseCtx) -> Result<HookRead> {
+    let doc: Value =
+        serde_json::from_str(text).with_context(|| format!("parsing {}", ctx.origin.display()))?;
+    let mut out = HookRead::default();
+    if doc.get("hooks").is_none() {
+        return Ok(out);
+    }
+    let source = ctx.origin.to_string_lossy().into_owned();
+    collect(&doc, &source, None, &mut out);
+    Ok(out)
+}
+
 /// Derive `<plugin>@<marketplace>:<relative file>` and the plugin root from a
 /// cache path. Returns a path-based fallback when the layout is unfamiliar,
 /// rather than guessing a plugin name.
@@ -221,5 +238,45 @@ mod tests {
         assert!(read.handlers.is_empty());
         assert_eq!(read.warnings.len(), 1, "a skipped group must be reported");
         assert!(read.warnings[0].contains("has no `hooks` array"));
+    }
+
+    #[test]
+    fn settings_hooks_are_keyed_by_the_settings_file_and_carry_no_plugin_root() {
+        let text = r#"{
+      "model": "opus",
+      "hooks": {
+        "PreToolUse": [
+          { "matcher": "Bash",
+            "hooks": [{ "type": "command", "command": "guard.sh", "timeout": 5 }] }
+        ]
+      }
+    }"#;
+        let ctx = ParseCtx {
+            repo: None,
+            origin: "/home/u/.claude/settings.json".into(),
+        };
+        let read = claude_settings_hooks_v1(text, &ctx).unwrap();
+        assert_eq!(read.handlers.len(), 1);
+        let h = &read.handlers[0];
+        assert_eq!(
+            h.id.to_string(),
+            "/home/u/.claude/settings.json:pre_tool_use:0:0"
+        );
+        assert_eq!(h.timeout, Some(5));
+        assert!(
+            h.plugin_root.is_none(),
+            "settings hooks have no plugin root"
+        );
+    }
+
+    #[test]
+    fn a_settings_file_without_hooks_yields_nothing_and_does_not_warn() {
+        let ctx = ParseCtx {
+            repo: None,
+            origin: "/home/u/.claude/settings.json".into(),
+        };
+        let read = claude_settings_hooks_v1(r#"{"model":"opus"}"#, &ctx).unwrap();
+        assert!(read.handlers.is_empty());
+        assert!(read.warnings.is_empty(), "absent is not divergent");
     }
 }
