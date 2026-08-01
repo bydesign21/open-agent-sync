@@ -26,25 +26,37 @@ pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
     let mut stderr = String::new();
 
     if let Some(pattern) = &spec.if_pattern {
-        let parsed: serde_json::Value = serde_json::from_str(stdin).unwrap_or_default();
-        let tool = parsed
-            .get("tool_name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
-        let empty = serde_json::Value::Object(Default::default());
-        let tool_input = parsed.get("tool_input").unwrap_or(&empty);
-
-        match matcher::matches(pattern, tool, tool_input) {
-            Match::No => return Outcome::default(),
-            Match::Yes => {}
-            Match::Unparseable => {
-                // Fail open, and say so. Silence here would hide a filter we
-                // never understood.
+        match serde_json::from_str::<serde_json::Value>(stdin) {
+            Err(_) => {
+                // The hook input itself is not JSON. Missing data must never
+                // read as a deliberate no-match, so run the hook and say why.
                 stderr.push_str(&format!(
-                    "agentsync: the filter {pattern:?} on {} could not be parsed, \
-                     so the hook ran unfiltered\n",
+                    "agentsync: the hook input for {} is not JSON, so the filter {pattern:?} \
+                     did not run and the hook ran unfiltered\n",
                     spec.source_id
                 ));
+            }
+            Ok(parsed) => {
+                let tool = parsed
+                    .get("tool_name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let empty = serde_json::Value::Object(Default::default());
+                let tool_input = parsed.get("tool_input").unwrap_or(&empty);
+
+                match matcher::matches(pattern, tool, tool_input) {
+                    Match::No => return Outcome::default(),
+                    Match::Yes => {}
+                    Match::Unparseable => {
+                        // Fail open, and say so. Silence here would hide a
+                        // filter we never understood.
+                        stderr.push_str(&format!(
+                            "agentsync: the filter {pattern:?} on {} could not be parsed, \
+                             so the hook ran unfiltered\n",
+                            spec.source_id
+                        ));
+                    }
+                }
             }
         }
     }
@@ -72,10 +84,25 @@ pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
         }
     };
 
-    if let Some(mut pipe) = child.stdin.take() {
-        // A hook that ignores stdin closes the pipe early. That is not an error.
-        let _ = pipe.write_all(stdin.as_bytes());
-    }
+    // Write stdin on its own thread. If the payload is larger than the pipe
+    // buffer and the child fills its own stdout buffer before reading, a
+    // write on this thread and a read on the same thread would deadlock: each
+    // side waits on a buffer the other side must drain first.
+    let pipe = child.stdin.take();
+    let payload = stdin.to_string();
+    let writer = std::thread::spawn(move || {
+        if let Some(mut pipe) = pipe {
+            // A hook that ignores stdin closes the pipe early. That is not an
+            // error. Anything else means the hook ran on truncated input.
+            if let Err(e) = pipe.write_all(payload.as_bytes())
+                && e.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Some(e.to_string());
+            }
+        }
+        // The pipe drops here, which closes the child's stdin.
+        None
+    });
 
     let done = match child.wait_with_output() {
         Ok(o) => o,
@@ -90,12 +117,40 @@ pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
             };
         }
     };
+    let write_error = writer.join().ok().flatten();
 
     stderr.push_str(&String::from_utf8_lossy(&done.stderr));
+    if let Some(e) = write_error {
+        stderr.push_str(&format!(
+            "agentsync: writing stdin to the hook for {} failed: {e}\n",
+            spec.source_id
+        ));
+    }
+
+    let code = match done.status.code() {
+        Some(c) => c,
+        None => {
+            // No exit code means the process was killed by a signal. Name it,
+            // so an operator can tell a signalled hook from a broken shim
+            // instead of seeing the same generic failure code for both.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(sig) = done.status.signal() {
+                    stderr.push_str(&format!(
+                        "agentsync: the hook for {} was killed by signal {sig}\n",
+                        spec.source_id
+                    ));
+                }
+            }
+            1
+        }
+    };
+
     Outcome {
         stdout: output::normalize(&String::from_utf8_lossy(&done.stdout), spec),
         stderr,
-        code: done.status.code().unwrap_or(1),
+        code,
     }
 }
 
@@ -109,9 +164,16 @@ pub fn main(spec_path: &Path) -> Result<i32> {
     })?;
     let mut stdin = String::new();
     // A host may invoke a hook with no input at all. That is not a failure.
-    let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin);
+    // A read that fails partway through is worth naming, though.
+    let read_error = std::io::Read::read_to_string(&mut std::io::stdin(), &mut stdin).err();
 
-    let out = execute(&spec, &stdin);
+    let mut out = execute(&spec, &stdin);
+    if let Some(e) = read_error {
+        out.stderr.push_str(&format!(
+            "agentsync: reading stdin for {} failed: {e}\n",
+            spec.source_id
+        ));
+    }
     print!("{}", out.stdout);
     eprint!("{}", out.stderr);
     Ok(out.code)
@@ -231,5 +293,36 @@ mod tests {
     fn a_command_that_cannot_start_fails_loudly_rather_than_reporting_success() {
         let out = execute(&spec("/nonexistent/binary/xyz", None), &input("Bash", "x"));
         assert_ne!(out.code, 0, "a hook that did not run must not look clean");
+    }
+
+    #[test]
+    fn a_large_stdin_payload_does_not_deadlock_a_command_that_ignores_it() {
+        // If the payload is bigger than the pipe buffer and the child never
+        // reads it, writing on this thread while also waiting on this thread
+        // would deadlock: each side blocks on a buffer the other must drain.
+        let payload = "x".repeat(200_000);
+        let out = execute(&spec("true", None), &payload);
+        assert_eq!(out.code, 0, "must not hang: {out:?}");
+    }
+
+    #[test]
+    fn malformed_stdin_fails_open_and_runs_the_command() {
+        // Missing or broken input must never read as a deliberate no-match.
+        let out = execute(
+            &spec("echo ran", Some("Bash(git commit:*)")),
+            "not-json-stdin",
+        );
+        assert!(out.stdout.contains("ran"), "must fail open: {out:?}");
+        assert!(
+            out.stderr.contains("is not JSON"),
+            "and must say why: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_signal_killed_hook_names_the_signal_rather_than_a_generic_failure() {
+        let out = execute(&spec("kill -9 $$", None), &input("Bash", "x"));
+        assert_ne!(out.code, 0, "got {out:?}");
+        assert!(out.stderr.contains("signal"), "got {out:?}");
     }
 }
