@@ -200,11 +200,53 @@ argv = ["plugin", "marketplace", "add", "{source}"]
 
 [plugins.marketplace_remove]
 argv = ["plugin", "marketplace", "remove", "{name}"]
+
+$5
 EOF
 }
 # claude can express headers; codex cannot — the real capability gap.
-write_descriptor claude "~/.claude/skills" "~/.claude/marketplaces/*/.claude-plugin/marketplace.json" ', "headers"'
-write_descriptor codex  "~/.agents/skills" "~/.claude/marketplaces/official/.claude-plugin/marketplace.json" ''
+# The same split shows up in hooks: claude can express `if` and the rewake
+# fields, codex cannot. Only claude gets a hooks.read source, because only
+# claude's fixture tree has a hooks.json to find.
+CLAUDE_HOOKS=$(cat <<'EOF'
+[hooks]
+events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+          "Stop", "SubagentStop", "PreCompact", "Notification", "SessionEnd"]
+caps   = ["matcher", "if", "timeout", "async_rewake",
+          "rewake_message", "rewake_summary"]
+output = ["hook_specific_output", "system_message", "additional_context",
+          "suppress_output", "rewake_message", "rewake_summary"]
+
+[[hooks.read]]
+glob   = "~/.claude/plugins/cache/*/*/*/hooks/hooks.json"
+parser = "claude_hooks_json_v1"
+
+[[hooks.read]]
+file   = "~/.claude/settings.json"
+parser = "claude_settings_hooks_v1"
+
+[[hooks.read]]
+file   = "~/.claude/settings.local.json"
+parser = "claude_settings_hooks_v1"
+
+[hooks.shim]
+marketplace = "~/.agentsync/shims/claude"
+EOF
+)
+CODEX_HOOKS=$(cat <<'EOF'
+[hooks]
+events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+          "Stop", "SessionEnd"]
+caps   = ["matcher", "timeout", "async_rewake"]
+output = ["hook_specific_output", "system_message", "additional_context",
+          "suppress_output"]
+
+[hooks.shim]
+marketplace = "~/.agentsync/shims/codex"
+EOF
+)
+write_descriptor claude "~/.claude/skills" "~/.claude/marketplaces/*/.claude-plugin/marketplace.json" ', "headers"' "$CLAUDE_HOOKS"
+write_descriptor codex  "~/.agents/skills" "~/.claude/marketplaces/official/.claude-plugin/marketplace.json" '' "$CODEX_HOOKS"
 
 # ---- manifest: enough to produce missing / differs / synced / divergent rows
 cat > "$D/.config/agentsync/manifest.toml" <<EOF
@@ -236,6 +278,64 @@ repos = ["$D/repos/infra"]
 
 [marketplaces.claude-plugins-official]
 github = "anthropics/claude-plugins-official"
+EOF
+
+# ---- hooks: a plugin manifest for hookify, at the real cache layout claude
+# ---- reads. It shows the two gaps this domain exists to report:
+# ---- - three PostToolUse handlers with a byte-identical command, told apart
+# ----   only by `if`. Codex hashes the command alone, so it cannot tell them
+# ----   apart. Codex can host a shim, so this renders as a shimmed gap.
+# ---- - a PreCompact handler. Codex has no PreCompact event, so this renders
+# ----   as blocked.
+HOOKS_DIR="$D/.claude/plugins/cache/claude-plugins-official/hookify/1.0.0/hooks"
+mkdir -p "$HOOKS_DIR"
+cat > "$HOOKS_DIR/hooks.json" <<'EOF'
+{
+  "description": "hookify — turns conversation mistakes into hooks that prevent them",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/check-rule.sh\"",
+            "if": "Bash(git commit:*)",
+            "asyncRewake": true,
+            "rewakeMessage": "A hookify rule flagged this commit. Address or acknowledge the findings below, then continue.",
+            "rewakeSummary": "Commit rule check found issues"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/check-rule.sh\"",
+            "if": "Bash(git push:*)",
+            "asyncRewake": true,
+            "rewakeMessage": "A hookify rule flagged this push. Address or acknowledge the findings below, then continue.",
+            "rewakeSummary": "Push rule check found issues"
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/check-rule.sh\"",
+            "if": "Bash(gt submit:*)",
+            "asyncRewake": true,
+            "rewakeMessage": "A hookify rule flagged this submit. Address or acknowledge the findings below, then continue.",
+            "rewakeSummary": "Submit rule check found issues"
+          }
+        ],
+        "matcher": "Bash"
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/save-rules-context.sh\""
+          }
+        ]
+      }
+    ]
+  }
+}
 EOF
 
 echo "$D"

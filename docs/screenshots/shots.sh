@@ -3,7 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-AS_BIN="$HOME/Documents/Repos/agentsync/target/release/agentsync"
+# Resolve against this checkout, not $HOME. A hardcoded $HOME path picks up a
+# stale binary from the main checkout when this script runs from a worktree.
+AS_BIN="$(cd ../.. && pwd)/target/release/agentsync"
 export AS_BIN
 D=/tmp/agentsync-demo
 OUT=shots
@@ -23,14 +25,18 @@ shot() {
   rm -f "$OUT/$name.raw"
 }
 
-# 1. the default review list: differences only
-shot review ""
+# 1. the default review list: differences only. Taller than the other list
+# shots because five domains (adding HOOKS) no longer fit in 26 rows. Hold is
+# longer too: the HOOKS domain reads a fixture behind the fake codex CLI's
+# auth-status call, which sleeps for 1.1s, and the default hold cut the
+# capture before that row group painted.
+shot review "" 32 1
 
 # 2. accepted rows, showing the marks and the count
-shot review-accepted "Ajjjj "
+shot review-accepted "Ajjjj " 32 1
 
 # 3. in-sync rows revealed, and a per-host removal chosen
-shot removal "vjjjjd"
+shot removal "vjjjjd" 32 1
 
 # 4. the project picker
 shot projects "p" 14

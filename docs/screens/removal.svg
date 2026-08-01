@@ -1,12 +1,12 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="928" height="496" viewBox="0 0 928 496" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12.5">
-<rect width="928" height="496" rx="8" fill="#12141a"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="928" height="598" viewBox="0 0 928 598" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12.5">
+<rect width="928" height="598" rx="8" fill="#12141a"/>
 <circle cx="22" cy="17" r="5.5" fill="#ff5f57"/>
 <circle cx="37" cy="17" r="5.5" fill="#febc2e"/>
 <circle cx="52" cy="17" r="5.5" fill="#28c840"/>
 <text x="464" y="21" fill="#6b7280" text-anchor="middle" font-size="11">agentsync</text>
 <rect x="16.0" y="159.0" width="896.0" height="17.0" fill="#3a3a3a"/>
 <text x="16.0" y="52.5" fill="#d6dae2" font-weight="600" xml:space="preserve">agentsync</text>
-<text x="128.0" y="52.5" fill="#d6dae2" xml:space="preserve">16 to review</text>
+<text x="128.0" y="52.5" fill="#d6dae2" xml:space="preserve">20 to review</text>
 <text x="16.0" y="69.5" fill="#d6dae2" opacity="0.62" xml:space="preserve">hosts:</text>
 <text x="72.0" y="69.5" fill="#d6dae2" xml:space="preserve">claude</text>
 <text x="128.0" y="69.5" fill="#98c379" xml:space="preserve">●</text>
@@ -70,10 +70,27 @@
 <text x="56.0" y="409.5" fill="#5c6370" xml:space="preserve">i-have-adhd</text>
 <text x="344.0" y="409.5" fill="#abb2bf" xml:space="preserve">claude-only; no other host offers it</text>
 <text x="680.0" y="409.5" fill="#61afef" xml:space="preserve">adopt as claude-only</text>
-<text x="16.0" y="426.5" fill="#5c6370" xml:space="preserve">────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
-<text x="16.0" y="443.5" fill="#d6dae2" font-weight="600" xml:space="preserve">pulumi</text>
-<text x="80.0" y="443.5" fill="#d6dae2" xml:space="preserve">—</text>
-<text x="104.0" y="443.5" fill="#abb2bf" xml:space="preserve">http · https://mcp.ai.pulumi.com/sse   ·   url: manifest &quot;https://mcp.ai.pulumi.com/sse&quot; vs claude</text>
-<text x="16.0" y="460.5" fill="#abb2bf" xml:space="preserve">&quot;https://mcp.ai.pulumi.com/mcp&quot;</text>
-<text x="24.0" y="477.5" fill="#e5c07b" xml:space="preserve">pulumi cannot be removed from here</text>
+<text x="56.0" y="426.5" fill="#d6dae2" xml:space="preserve">superpowers</text>
+<text x="344.0" y="426.5" fill="#abb2bf" xml:space="preserve">missing from codex</text>
+<text x="680.0" y="426.5" fill="#61afef" xml:space="preserve">install in codex</text>
+<text x="24.0" y="443.5" fill="#56b6c2" font-weight="600" xml:space="preserve">HOOKS</text>
+<text x="56.0" y="460.5" fill="#d6dae2" xml:space="preserve">hookify@claude-plugins-official:h…</text>
+<text x="344.0" y="460.5" fill="#abb2bf" xml:space="preserve">codex ignores if, rewake_message, rewak…</text>
+<text x="680.0" y="460.5" fill="#5c6370" xml:space="preserve">nothing to do</text>
+<text x="56.0" y="477.5" fill="#d6dae2" xml:space="preserve">hookify@claude-plugins-official:h…</text>
+<text x="344.0" y="477.5" fill="#abb2bf" xml:space="preserve">codex ignores if, rewake_message, rewak…</text>
+<text x="680.0" y="477.5" fill="#5c6370" xml:space="preserve">nothing to do</text>
+<text x="56.0" y="494.5" fill="#d6dae2" xml:space="preserve">hookify@claude-plugins-official:h…</text>
+<text x="344.0" y="494.5" fill="#abb2bf" xml:space="preserve">codex ignores if, rewake_message, rewak…</text>
+<text x="680.0" y="494.5" fill="#5c6370" xml:space="preserve">nothing to do</text>
+<text x="40.0" y="511.5" fill="#5c6370" xml:space="preserve">—</text>
+<text x="56.0" y="511.5" fill="#5c6370" xml:space="preserve">hookify@claude-plugins-official:h…</text>
+<text x="344.0" y="511.5" fill="#abb2bf" xml:space="preserve">codex has no PreCompact event</text>
+<text x="680.0" y="511.5" fill="#5c6370" xml:space="preserve">nothing to do</text>
+<text x="16.0" y="528.5" fill="#5c6370" xml:space="preserve">────────────────────────────────────────────────────────────────────────────────────────────────────────────────</text>
+<text x="16.0" y="545.5" fill="#d6dae2" font-weight="600" xml:space="preserve">pulumi</text>
+<text x="80.0" y="545.5" fill="#d6dae2" xml:space="preserve">—</text>
+<text x="104.0" y="545.5" fill="#abb2bf" xml:space="preserve">http · https://mcp.ai.pulumi.com/sse   ·   url: manifest &quot;https://mcp.ai.pulumi.com/sse&quot; vs claude</text>
+<text x="16.0" y="562.5" fill="#abb2bf" xml:space="preserve">&quot;https://mcp.ai.pulumi.com/mcp&quot;</text>
+<text x="24.0" y="579.5" fill="#e5c07b" xml:space="preserve">pulumi cannot be removed from here</text>
 </svg>
