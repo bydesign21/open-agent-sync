@@ -60,6 +60,13 @@ enum Command {
         #[arg(long)]
         parsers: bool,
     },
+    /// Run one generated hook shim. Invoked by a host, not by a person.
+    #[command(hide = true)]
+    HookShim {
+        /// Path to the generated sidecar describing the original handler.
+        #[arg(long)]
+        spec: PathBuf,
+    },
 }
 
 fn main() {
@@ -103,6 +110,11 @@ fn real_main() -> Result<()> {
         Some(Command::Doctor) => {
             let world = World::load(&manifest_path, &cli.repos)?;
             doctor(&world)
+        }
+
+        Some(Command::HookShim { spec }) => {
+            let code = agentsync::shim::run::main(spec)?;
+            std::process::exit(code);
         }
 
         None => {
