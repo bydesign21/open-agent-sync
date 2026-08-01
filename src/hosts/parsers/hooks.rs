@@ -72,6 +72,9 @@ fn collect(doc: &Value, source: &str, root: Option<&Path>, out: &mut HookRead) {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             let Some(handlers) = group.get("hooks").and_then(Value::as_array) else {
+                out.warnings.push(format!(
+                    "{source}: hooks.{event}[{gi}] has no `hooks` array"
+                ));
                 continue;
             };
             for (hi, h) in handlers.iter().enumerate() {
@@ -209,5 +212,14 @@ mod tests {
             {"type":"command","command":"x","futureThing":true}]}]}}"#;
         let read = claude_hooks_json_v1(text, &ctx()).unwrap();
         assert!(read.handlers[0].unknown_fields.contains("futureThing"));
+    }
+
+    #[test]
+    fn a_matcher_group_with_no_hooks_array_warns_rather_than_vanishing() {
+        let text = r#"{"hooks":{"PostToolUse":[{"matcher":"Bash"}]}}"#;
+        let read = claude_hooks_json_v1(text, &ctx()).unwrap();
+        assert!(read.handlers.is_empty());
+        assert_eq!(read.warnings.len(), 1, "a skipped group must be reported");
+        assert!(read.warnings[0].contains("has no `hooks` array"));
     }
 }
