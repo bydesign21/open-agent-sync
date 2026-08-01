@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand};
 
 use agentsync::core::apply::{self, Outcome, Progress};
 use agentsync::core::diff::{Domain, Row, Severity};
+use agentsync::core::model::HookCap;
 use agentsync::domains::World;
 use agentsync::paths;
 use agentsync::report::{self, Mark};
@@ -67,6 +68,13 @@ enum Command {
         #[arg(long)]
         spec: PathBuf,
     },
+    /// Compare each host's declared hook capabilities against its installed
+    /// binary, and report where they disagree.
+    Hooks {
+        /// Probe the installed host binaries.
+        #[arg(long)]
+        probe: bool,
+    },
 }
 
 fn main() {
@@ -115,6 +123,15 @@ fn real_main() -> Result<()> {
         Some(Command::HookShim { spec }) => {
             let code = agentsync::shim::run::main(spec)?;
             std::process::exit(code);
+        }
+
+        Some(Command::Hooks { probe }) => {
+            if !probe {
+                println!("Nothing to do. Use `agentsync hooks --probe`.");
+                return Ok(());
+            }
+            let world = World::load(&manifest_path, &cli.repos)?;
+            hooks_probe(&world)
         }
 
         None => {
@@ -279,6 +296,66 @@ fn doctor(world: &World) -> Result<()> {
         println!("{} problem(s) need attention.", report.problems);
     }
     Ok(())
+}
+
+/// Compare each detected host's binary against its declared hook capabilities.
+///
+/// This is a human-facing report only. A name found in a binary is evidence
+/// that a feature might exist, never proof that the host honours it — this
+/// project has already seen `codex` mention `asyncRewake` in its string table
+/// while still failing to honour the surrounding hook config. Nothing here
+/// feeds `plan` or `apply`.
+fn hooks_probe(world: &agentsync::domains::World) -> Result<()> {
+    println!("Probing installed host binaries for hook field names.");
+    println!("A name in a binary is evidence, not proof. Nothing here changes behaviour.\n");
+    for (host, _) in world.detected() {
+        let Some(declared) = &host.descriptor.hooks else {
+            continue;
+        };
+        let Ok(bin) = which::which(&host.descriptor.detect.bin) else {
+            continue;
+        };
+        let Ok(bytes) = std::fs::read(&bin) else {
+            continue;
+        };
+        println!("{} ({})", host.descriptor.display, bin.display());
+        for cap in [
+            HookCap::Matcher,
+            HookCap::If,
+            HookCap::Timeout,
+            HookCap::AsyncRewake,
+            HookCap::RewakeMessage,
+            HookCap::RewakeSummary,
+        ] {
+            let needle = wire_name(cap);
+            let present = find_bytes(&bytes, needle.as_bytes());
+            let declared_here = declared.supports(cap);
+            let mark = match (present, declared_here) {
+                (true, true) | (false, false) => continue,
+                (true, false) => "binary mentions it, descriptor does not declare it",
+                (false, true) => "descriptor declares it, binary never mentions it",
+            };
+            println!("  {:<16} {mark}", cap.as_str());
+        }
+    }
+    Ok(())
+}
+
+/// How a capability is spelled in a host's own config, which is what a binary
+/// containing a parser for it would carry.
+fn wire_name(cap: HookCap) -> String {
+    match cap {
+        HookCap::Matcher => "matcher".into(),
+        HookCap::If => "\"if\"".into(),
+        HookCap::Timeout => "timeout".into(),
+        HookCap::AsyncRewake => "asyncRewake".into(),
+        HookCap::RewakeMessage => "rewakeMessage".into(),
+        HookCap::RewakeSummary => "rewakeSummary".into(),
+    }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 fn hosts_command(want_parsers: bool) -> Result<()> {

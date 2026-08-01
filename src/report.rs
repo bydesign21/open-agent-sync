@@ -210,6 +210,23 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
             .collect(),
     );
 
+    let shim_dirs: Vec<std::path::PathBuf> = world
+        .detected()
+        .filter_map(|(h, _)| h.descriptor.hooks.as_ref())
+        .filter_map(|h| h.shim.as_ref())
+        .map(|s| paths::expand(&s.marketplace))
+        .filter(|d| d.is_dir())
+        .collect();
+    if let Ok(agentsync_bin) = std::env::current_exe() {
+        report.push(
+            "SHIM HEALTH",
+            shim_health(&agentsync_bin, &shim_dirs)
+                .into_iter()
+                .map(|text| Line::new(Mark::Problem, text))
+                .collect(),
+        );
+    }
+
     let foreign: Vec<Line> = world
         .detected()
         .flat_map(|(h, s)| {
@@ -512,9 +529,47 @@ pub fn describe_step(world: &World, step: &Step) -> Option<String> {
     }
 }
 
+/// Problems with generated shims, for `doctor`.
+///
+/// A shim whose binary has moved cannot run. It must be reported, because the
+/// host will keep invoking it and every invocation will fail.
+pub fn shim_health(bin: &std::path::Path, shim_dirs: &[std::path::PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    if shim_dirs.is_empty() {
+        return out;
+    }
+    if !bin.exists() {
+        out.push(format!(
+            "generated shims invoke {}, which no longer exists. \
+             Re-run agentsync to regenerate them.",
+            bin.display()
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_reports_a_shim_whose_binary_no_longer_exists() {
+        let lines = shim_health(
+            std::path::Path::new("/nonexistent/agentsync"),
+            &[std::path::PathBuf::from("/nonexistent/shims/demo")],
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("/nonexistent/agentsync"),
+            "must name the missing binary: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_is_quiet_when_there_are_no_shims() {
+        let lines = shim_health(std::path::Path::new("/bin/sh"), &[]);
+        assert!(lines.is_empty(), "no shims means nothing to say: {lines:?}");
+    }
 
     #[test]
     fn empty_sections_are_dropped_rather_than_shown_as_headings() {
