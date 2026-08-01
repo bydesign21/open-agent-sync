@@ -311,9 +311,7 @@ pub const BUILTIN: &[(&str, &str)] = &[
 pub fn parse(text: &str, origin: &str) -> Result<HostDescriptor> {
     let d: HostDescriptor =
         toml::from_str(text).with_context(|| format!("parsing host descriptor {origin}"))?;
-    if let Err(e) = validate(&d) {
-        anyhow::bail!("validating host descriptor {origin}: {e}");
-    }
+    validate(&d).with_context(|| format!("validating host descriptor {origin}"))?;
     Ok(d)
 }
 
@@ -502,7 +500,7 @@ output = []
 [[hooks.read]]
 parser = "claude_hooks_json_v1"
 "#;
-        let err = parse(text, "x").unwrap_err().to_string();
+        let err = format!("{:#}", parse(text, "x").unwrap_err());
         assert!(err.contains("hooks.read"), "unexpected error: {err}");
     }
 }
