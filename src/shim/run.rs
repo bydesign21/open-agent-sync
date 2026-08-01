@@ -322,6 +322,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_signal_killed_hook_names_the_signal_rather_than_a_generic_failure() {
         let out = execute(&spec("kill -9 $$", None), &input("Bash", "x"));
         assert_ne!(out.code, 0, "got {out:?}");

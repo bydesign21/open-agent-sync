@@ -725,6 +725,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_dangling_vendored_symlink_is_reported() {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("agentsync");
@@ -734,7 +735,6 @@ mod tests {
             "agentsync-shim-mkt-demo",
             &bin.to_string_lossy(),
         );
-        #[cfg(unix)]
         std::os::unix::fs::symlink(
             "/nonexistent/skills",
             dir.path().join("agentsync-shim-mkt-demo/skills"),

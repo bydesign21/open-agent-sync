@@ -662,11 +662,11 @@ caps = []
 output = []
 
 [[hooks.read]]
-glob = "{}/cache/*/*/*/hooks/hooks.json"
+glob = '{}/cache/*/*/*/hooks/hooks.json'
 parser = "claude_hooks_json_v1"
 
 [[hooks.read]]
-file = "{}"
+file = '{}'
 parser = "claude_settings_hooks_v1"
 "#,
             tmp.path().display(),
@@ -718,7 +718,7 @@ caps = []
 output = []
 
 [[hooks.read]]
-file = "{}"
+file = '{}'
 parser = "claude_settings_hooks_v1"
 "#,
             bad.display()
@@ -764,7 +764,7 @@ caps = []
 output = []
 
 [[hooks.read]]
-glob = "{}/cache/*/*/*/hooks/hooks.json"
+glob = '{}/cache/*/*/*/hooks/hooks.json'
 parser = "claude_hooks_json_v1"
 "#,
             tmp.path().display(),
