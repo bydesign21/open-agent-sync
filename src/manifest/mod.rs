@@ -37,6 +37,29 @@ pub struct Manifest {
     pub marketplaces: BTreeMap<String, MarketplaceEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugins: BTreeMap<String, PluginEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hosts: BTreeMap<String, HostOverride>,
+}
+
+/// Per-host overrides of what a descriptor declares.
+///
+/// Descriptor capabilities are defaults compiled into the binary. A host CLI can
+/// gain a capability before agentsync ships a release that knows about it, and
+/// waiting for a release is not an acceptable answer, so the manifest wins.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HostOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HookOverride>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HookOverride {
+    /// Replaces the declared list wholesale when present. Not merged: a user
+    /// removing a capability the descriptor wrongly claims must be able to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<Vec<crate::core::model::HookCap>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Vec<crate::core::model::HookOutputField>>,
 }
 
 fn default_scope() -> ScopeKind {
@@ -394,6 +417,25 @@ impl Manifest {
         out
     }
 
+    /// The hook capabilities actually in force for a host: what its descriptor
+    /// declares, with any manifest override substituted.
+    pub fn hooks_for(
+        &self,
+        host: &str,
+        declared: &crate::hosts::descriptor::HooksSection,
+    ) -> crate::hosts::descriptor::HooksSection {
+        let mut effective = declared.clone();
+        if let Some(over) = self.hosts.get(host).and_then(|h| h.hooks.as_ref()) {
+            if let Some(caps) = &over.caps {
+                effective.caps = caps.clone();
+            }
+            if let Some(output) = &over.output {
+                effective.output = output.clone();
+            }
+        }
+        effective
+    }
+
     /// Which capabilities `name` needs, for gating against a host's `caps`.
     pub fn required_caps(&self, name: &str) -> Vec<Cap> {
         match self.mcp.get(name) {
@@ -534,5 +576,42 @@ hosts = ["codex"]
         let m: Manifest = toml::from_str(text).unwrap();
         assert!(m.mcp["unityMCP"].targets_host("codex"));
         assert!(!m.mcp["unityMCP"].targets_host("claude"));
+    }
+
+    #[test]
+    fn a_host_override_replaces_declared_hook_caps() {
+        let text = r#"
+[hosts.codex.hooks]
+caps = ["matcher", "timeout", "async_rewake", "if"]
+"#;
+        let m: Manifest = toml::from_str(text).unwrap();
+        let declared =
+            crate::hosts::descriptor::parse(include_str!("../hosts/builtin/codex.toml"), "codex")
+                .unwrap()
+                .hooks
+                .unwrap();
+        assert!(!declared.supports(crate::core::model::HookCap::If));
+
+        let effective = m.hooks_for("codex", &declared);
+        assert!(
+            effective.supports(crate::core::model::HookCap::If),
+            "the override must win, so a user on a newer Codex is not blocked"
+        );
+        // Untouched lists survive.
+        assert!(!effective.accepts_output(crate::core::model::HookOutputField::RewakeSummary));
+        assert!(effective.can_shim());
+    }
+
+    #[test]
+    fn no_override_leaves_the_declared_section_untouched() {
+        let m = Manifest::default();
+        let declared =
+            crate::hosts::descriptor::parse(include_str!("../hosts/builtin/codex.toml"), "codex")
+                .unwrap()
+                .hooks
+                .unwrap();
+        let effective = m.hooks_for("codex", &declared);
+        assert_eq!(effective.caps, declared.caps);
+        assert_eq!(effective.output, declared.output);
     }
 }

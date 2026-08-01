@@ -206,6 +206,11 @@ fn merge_project(manifest: &mut Manifest, project: Manifest, repo: &str) -> Vec<
     for (name, entry) in project.marketplaces {
         manifest.marketplaces.entry(name).or_insert(entry);
     }
+    if !project.hosts.is_empty() {
+        warnings.push(format!(
+            "{repo}/.agentsync.toml: [hosts.*] overrides are user-scope only and were ignored"
+        ));
+    }
     warnings
 }
 
