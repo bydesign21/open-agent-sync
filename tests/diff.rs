@@ -1328,7 +1328,10 @@ fn unmodelled_fields_are_folded_into_an_existing_gap_row_not_a_second_row() {
         "{:?}",
         hook_rows.iter().map(|r| &r.headline).collect::<Vec<_>>()
     );
-    assert_eq!(hook_rows[0].severity, Severity::Normal);
+    // The unmodelled field carries strictly more unknown risk than the `if`
+    // gap it was folded into, so the merged row cannot end up at a lighter
+    // severity than an unmodelled field alone would produce.
+    assert_eq!(hook_rows[0].severity, Severity::Blocked);
     assert!(
         hook_rows[0].detail.contains("futureThing"),
         "{}",

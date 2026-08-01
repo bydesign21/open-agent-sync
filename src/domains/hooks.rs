@@ -101,7 +101,16 @@ pub fn rows(world: &World) -> Vec<Row> {
                     let fields = unknown_fields_list(&handler.unknown_fields);
                     match &mut row {
                         Some(r) => {
-                            r.detail = format!("{}; unmodelled fields: {fields}", r.detail);
+                            // The unmodelled field carries strictly more unknown
+                            // risk than whatever gap produced this row, so it
+                            // cannot leave the row at a lighter severity — and a
+                            // shim cannot be credited with emulating a field
+                            // whose behaviour we do not know.
+                            r.detail = format!(
+                                "{}; unmodelled fields: {fields} — portability cannot be verified",
+                                r.detail
+                            );
+                            r.severity = Severity::Blocked;
                         }
                         None => {
                             row = Some(unknown_fields_row(handler, target_host.name(), &fields));

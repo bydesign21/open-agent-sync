@@ -293,4 +293,17 @@ mod tests {
         assert!(warnings[0].contains("already in the user manifest"));
         assert_eq!(user.mcp["shared"].command.as_deref(), Some("user-version"));
     }
+
+    #[test]
+    fn a_project_host_override_is_rejected_out_loud() {
+        let mut user = Manifest::default();
+        let mut project = Manifest::default();
+        project
+            .hosts
+            .insert("codex".into(), crate::manifest::HostOverride::default());
+        let warnings = merge_project(&mut user, project, "/repos/x");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("[hosts.*]"));
+        assert!(user.hosts.is_empty());
+    }
 }
