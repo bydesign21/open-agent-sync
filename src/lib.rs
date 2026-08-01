@@ -21,6 +21,7 @@ pub mod manifest;
 pub mod paths;
 pub mod platform;
 pub mod report;
+pub mod shim;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod tui;
