@@ -4,6 +4,7 @@
 //! plan from a chosen action — so the TUI treats them identically and a fourth
 //! domain is a new module rather than a UI change.
 
+pub mod hooks;
 pub mod instructions;
 pub mod mcp;
 pub mod plugins;
@@ -136,6 +137,7 @@ impl World {
                 Domain::Skills => skills::rows(self),
                 Domain::Instructions => instructions::rows(self),
                 Domain::Plugins => plugins::rows(self),
+                Domain::Hooks => hooks::rows(self),
             });
         }
         out
@@ -150,6 +152,7 @@ impl World {
                 Domain::Skills => skills::plan_row(self, row, &mut plan),
                 Domain::Instructions => instructions::plan_row(self, row, &mut plan),
                 Domain::Plugins => plugins::plan_row(self, row, &mut plan),
+                Domain::Hooks => hooks::plan_row(self, row, &mut plan),
             }
         }
         plan.finalize();
