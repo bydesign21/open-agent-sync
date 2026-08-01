@@ -66,7 +66,7 @@ tar -xzf "$ASSET"
 mkdir -p ~/.local/bin && mv agentsync ~/.local/bin/ && rm "$ASSET" SHA256SUMS
 ```
 
-That prints `...tar.gz: OK`. Make sure `~/.local/bin` is on your `PATH`.
+That must print `...tar.gz: OK`. Make sure `~/.local/bin` is on your `PATH`.
 
 </details>
 
@@ -225,7 +225,7 @@ MEMORIES (reported, never synced)
 
 **Hooks are reported, not yet fixed.** A bash hook can carry an `if` guard, or
 set `rewakeMessage` / `rewakeSummary`. Codex's hook config has no field for
-either. Its own `trusted_hash` proves it: that hash covers only the command,
+any of them. Its own `trusted_hash` proves it: that hash covers only the command,
 so five differently-guarded handlers hash identically once installed.
 `agentsync plan --only hooks` names exactly which fields a target would drop.
 It also blocks the row outright when the whole event has no counterpart on
