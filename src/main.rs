@@ -318,27 +318,61 @@ fn hooks_probe(world: &agentsync::domains::World) -> Result<()> {
         let Ok(bytes) = std::fs::read(&bin) else {
             continue;
         };
+        let lines = probe_lines(&bytes, declared);
+        if lines.is_empty() {
+            continue;
+        }
         println!("{} ({})", host.descriptor.display, bin.display());
-        for cap in [
-            HookCap::Matcher,
-            HookCap::If,
-            HookCap::Timeout,
-            HookCap::AsyncRewake,
-            HookCap::RewakeMessage,
-            HookCap::RewakeSummary,
-        ] {
-            let needle = wire_name(cap);
-            let present = find_bytes(&bytes, needle.as_bytes());
-            let declared_here = declared.supports(cap);
-            let mark = match (present, declared_here) {
-                (true, true) | (false, false) => continue,
-                (true, false) => "binary mentions it, descriptor does not declare it",
-                (false, true) => "descriptor declares it, binary never mentions it",
-            };
-            println!("  {:<16} {mark}", cap.as_str());
+        for line in lines {
+            println!("  {line}");
         }
     }
     Ok(())
+}
+
+/// The capabilities a hook engine can declare or mention, checked in this
+/// fixed order so output is stable across runs.
+const HOOK_CAPS: [HookCap; 6] = [
+    HookCap::Matcher,
+    HookCap::If,
+    HookCap::Timeout,
+    HookCap::AsyncRewake,
+    HookCap::RewakeMessage,
+    HookCap::RewakeSummary,
+];
+
+/// Compare one host binary's bytes against its declared capabilities.
+///
+/// A file that mentions none of the wire names at all is far more likely
+/// something this probe cannot read for this purpose — a launcher script, a
+/// wrapper, a stripped binary — than a host with zero hook support. Reporting
+/// every declared capability as absent in that case would manufacture a
+/// conclusion from input the probe never actually saw, so it says plainly
+/// that it could not read the file instead of enumerating false absences.
+fn probe_lines(bytes: &[u8], declared: &agentsync::hosts::descriptor::HooksSection) -> Vec<String> {
+    let found_any = HOOK_CAPS
+        .iter()
+        .any(|c| find_bytes(bytes, wire_name(*c).as_bytes()));
+    if !found_any {
+        return vec![
+            "could not read hook field names from this file. \
+             It may be a launcher script rather than the host binary."
+                .to_string(),
+        ];
+    }
+    let mut out = Vec::new();
+    for cap in HOOK_CAPS {
+        let needle = wire_name(cap);
+        let present = find_bytes(bytes, needle.as_bytes());
+        let declared_here = declared.supports(cap);
+        let mark = match (present, declared_here) {
+            (true, true) | (false, false) => continue,
+            (true, false) => "binary mentions it, descriptor does not declare it",
+            (false, true) => "descriptor declares it, binary never mentions it",
+        };
+        out.push(format!("{:<16} {mark}", cap.as_str()));
+    }
+    out
 }
 
 /// How a capability is spelled in a host's own config, which is what a binary
@@ -373,4 +407,58 @@ fn hosts_command(want_parsers: bool) -> Result<()> {
     }
     print_report(&report);
     Ok(())
+}
+
+#[cfg(test)]
+mod hooks_probe_tests {
+    use super::*;
+    use agentsync::hosts::descriptor::HooksSection;
+
+    fn declared(caps: Vec<HookCap>) -> HooksSection {
+        HooksSection {
+            events: Vec::new(),
+            caps,
+            output: Vec::new(),
+            read: Vec::new(),
+            shim: None,
+        }
+    }
+
+    #[test]
+    fn a_file_mentioning_none_of_the_wire_names_reports_unreadable_not_absent() {
+        let declared = declared(vec![HookCap::Matcher, HookCap::Timeout]);
+        let lines = probe_lines(b"this is a node launcher script, not a binary", &declared);
+        assert_eq!(
+            lines.len(),
+            1,
+            "must not enumerate per-capability absences: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("could not read"),
+            "must say it could not read the file: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_file_mentioning_at_least_one_name_gets_per_capability_lines() {
+        let declared = declared(vec![HookCap::Timeout]);
+        // Mentions "matcher" but the descriptor does not declare it, and
+        // never mentions "timeout" though the descriptor declares it.
+        let lines = probe_lines(b"...matcher...", &declared);
+        assert!(
+            lines.iter().any(|l| l.contains("matcher")
+                && l.contains("binary mentions it, descriptor does not declare it")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("timeout") && l.contains("binary never mentions it")),
+            "{lines:?}"
+        );
+        assert!(
+            !lines.iter().any(|l| l.contains("could not read")),
+            "a file with at least one hit must not claim it is unreadable: {lines:?}"
+        );
+    }
 }
