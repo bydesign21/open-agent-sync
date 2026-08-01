@@ -18,7 +18,7 @@ pub enum Match {
 pub fn matches(pattern: &str, tool_name: &str, tool_input: &Value) -> Match {
     let pattern = pattern.trim();
 
-    // Bare tool name, e.g. `Bash`.
+    // Bare tool name, for example `Bash`.
     let Some(open) = pattern.find('(') else {
         if pattern.is_empty() || pattern.contains(')') || pattern.contains('|') {
             return Match::Unparseable;

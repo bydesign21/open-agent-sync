@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// What one generated shim handler needs in order to stand in for the original.
+/// What one generated shim handler needs to stand in for the original.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShimSpec {
     /// The original handler's full `HookId`, for warnings and for tracing a
