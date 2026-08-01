@@ -32,7 +32,7 @@ struct Cli {
     #[arg(long = "repo", global = true)]
     repos: Vec<String>,
 
-    /// Only this domain: mcp, skills, instructions, or plugins (repeatable).
+    /// Only this domain: mcp, skills, instructions, plugins, or hooks (repeatable).
     #[arg(long = "only", global = true)]
     only: Vec<String>,
 
@@ -133,10 +133,11 @@ fn filtered_rows(world: &World, only: &[String]) -> Vec<Row> {
             "skills" | "skill" => Some(Domain::Skills),
             "instructions" | "instruction" | "prompts" | "prompt" => Some(Domain::Instructions),
             "plugins" | "plugin" => Some(Domain::Plugins),
+            "hooks" | "hook" => Some(Domain::Hooks),
             other => {
                 eprintln!(
                     "agentsync: unknown domain {other:?}. Expected mcp, skills, \
-                     instructions, or plugins"
+                     instructions, plugins, or hooks"
                 );
                 None
             }

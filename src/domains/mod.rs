@@ -4,6 +4,7 @@
 //! plan from a chosen action — so the TUI treats them identically and a fourth
 //! domain is a new module rather than a UI change.
 
+pub mod hooks;
 pub mod instructions;
 pub mod mcp;
 pub mod plugins;
@@ -136,6 +137,7 @@ impl World {
                 Domain::Skills => skills::rows(self),
                 Domain::Instructions => instructions::rows(self),
                 Domain::Plugins => plugins::rows(self),
+                Domain::Hooks => hooks::rows(self),
             });
         }
         out
@@ -150,6 +152,7 @@ impl World {
                 Domain::Skills => skills::plan_row(self, row, &mut plan),
                 Domain::Instructions => instructions::plan_row(self, row, &mut plan),
                 Domain::Plugins => plugins::plan_row(self, row, &mut plan),
+                Domain::Hooks => hooks::plan_row(self, row, &mut plan),
             }
         }
         plan.finalize();
@@ -205,6 +208,11 @@ fn merge_project(manifest: &mut Manifest, project: Manifest, repo: &str) -> Vec<
     }
     for (name, entry) in project.marketplaces {
         manifest.marketplaces.entry(name).or_insert(entry);
+    }
+    if !project.hosts.is_empty() {
+        warnings.push(format!(
+            "{repo}/.agentsync.toml: [hosts.*] overrides are user-scope only and were ignored"
+        ));
     }
     warnings
 }
@@ -284,5 +292,18 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("already in the user manifest"));
         assert_eq!(user.mcp["shared"].command.as_deref(), Some("user-version"));
+    }
+
+    #[test]
+    fn a_project_host_override_is_rejected_out_loud() {
+        let mut user = Manifest::default();
+        let mut project = Manifest::default();
+        project
+            .hosts
+            .insert("codex".into(), crate::manifest::HostOverride::default());
+        let warnings = merge_project(&mut user, project, "/repos/x");
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("[hosts.*]"));
+        assert!(user.hosts.is_empty());
     }
 }

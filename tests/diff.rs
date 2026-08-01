@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use agentsync::core::diff::{ActionKind, Domain, Row, Severity};
 use agentsync::core::model::{
-    HostSnapshot, HttpServer, McpServer, Scope, ScopeKind, StdioServer, Transport,
+    HookHandler, HookId, HostSnapshot, HttpServer, McpServer, Scope, ScopeKind, StdioServer,
+    Transport,
 };
 use agentsync::core::plan::Step;
 use agentsync::domains::World;
@@ -1095,5 +1096,245 @@ fn an_uninstalled_host_produces_no_rows_and_no_steps() {
         Severity::Synced,
         "an absent host is not a divergence: {}",
         row.headline
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Hooks domain
+// ---------------------------------------------------------------------------
+
+fn hook_id(source: &str, event: &str) -> HookId {
+    HookId {
+        source: source.to_string(),
+        event: event.to_string(),
+        group: 0,
+        index: 0,
+    }
+}
+
+fn hooks_snapshot(name: &str, hooks: Vec<HookHandler>) -> HostSnapshot {
+    let mut snap = HostSnapshot {
+        host: name.to_string(),
+        display: name.to_string(),
+        detected: true,
+        ..Default::default()
+    };
+    for h in hooks {
+        snap.hooks.insert(h.id.clone(), h);
+    }
+    snap
+}
+
+/// A detected host whose descriptor has no `[hooks]` section at all — the
+/// shape a user descriptor takes when it replaces a builtin wholesale without
+/// carrying the hooks table forward.
+fn host_without_hooks(name: &str) -> Host {
+    let text =
+        format!("name = \"{name}\"\ndisplay = \"{name}\"\ndetect = {{ bin = \"{name}\" }}\n");
+    Host {
+        descriptor: descriptor::parse(&text, name).unwrap(),
+        bin: Some(PathBuf::from(format!("/usr/bin/{name}"))),
+    }
+}
+
+fn hooks_world(hosts: Vec<Host>, snapshots: Vec<HostSnapshot>) -> World {
+    World {
+        manifest: Manifest::default(),
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts,
+        snapshots,
+        repos: vec!["/repos/one".to_string()],
+        warnings: Vec::new(),
+    }
+}
+
+fn hook_rows(rows: &[Row]) -> Vec<&Row> {
+    rows.iter().filter(|r| r.domain == Domain::Hooks).collect()
+}
+
+#[test]
+fn an_if_only_gap_from_claude_to_codex_is_a_single_normal_row() {
+    // Codex declares `caps` without `if`, but does declare a shim target, so
+    // the gap is exactly the "actionable" case: shimmable and hostable.
+    let mut h = HookHandler::new(
+        hook_id("claude-settings", "PreToolUse"),
+        "PreToolUse",
+        "echo hi",
+    );
+    h.if_pattern = Some("Bash(git commit:*)".into());
+
+    let w = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![
+            hooks_snapshot("claude", vec![h]),
+            hooks_snapshot("codex", vec![]),
+        ],
+    );
+
+    let rows = w.rows();
+    let hook_rows = hook_rows(&rows);
+    assert_eq!(
+        hook_rows.len(),
+        1,
+        "{:?}",
+        hook_rows.iter().map(|r| &r.headline).collect::<Vec<_>>()
+    );
+    assert_eq!(hook_rows[0].severity, Severity::Normal);
+}
+
+#[test]
+fn an_event_the_target_cannot_express_is_blocked_and_names_the_event() {
+    // Codex has no `PreCompact` event at all; claude does.
+    let h = HookHandler::new(
+        hook_id("claude-settings", "PreCompact"),
+        "PreCompact",
+        "echo bye",
+    );
+
+    let w = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![
+            hooks_snapshot("claude", vec![h]),
+            hooks_snapshot("codex", vec![]),
+        ],
+    );
+
+    let rows = w.rows();
+    let hook_rows = hook_rows(&rows);
+    assert_eq!(hook_rows.len(), 1);
+    assert_eq!(hook_rows[0].severity, Severity::Blocked);
+    assert!(
+        hook_rows[0].headline.contains("PreCompact"),
+        "{}",
+        hook_rows[0].headline
+    );
+}
+
+#[test]
+fn a_handler_with_no_gaps_produces_no_row() {
+    // Plain handler: no matcher, if, timeout, or rewake fields, so
+    // `required_caps()` is empty and both hosts support `PreToolUse`.
+    let h = HookHandler::new(
+        hook_id("claude-settings", "PreToolUse"),
+        "PreToolUse",
+        "echo hi",
+    );
+
+    let w = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![
+            hooks_snapshot("claude", vec![h]),
+            hooks_snapshot("codex", vec![]),
+        ],
+    );
+
+    let rows = w.rows();
+    let hook_rows = hook_rows(&rows);
+    assert!(
+        hook_rows.is_empty(),
+        "{:?}",
+        hook_rows.iter().map(|r| &r.headline).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_target_with_no_hooks_section_is_blocked_not_silently_skipped() {
+    // Regression for the case where a descriptor with `hooks = None` produced
+    // zero rows — output byte-identical to full compatibility.
+    let h = HookHandler::new(
+        hook_id("claude-settings", "PreToolUse"),
+        "PreToolUse",
+        "echo hi",
+    );
+    let bare = host_without_hooks("bare");
+
+    let w = hooks_world(
+        vec![host("claude"), bare],
+        vec![
+            hooks_snapshot("claude", vec![h]),
+            hooks_snapshot("bare", vec![]),
+        ],
+    );
+
+    let rows = w.rows();
+    let hook_rows = hook_rows(&rows);
+    assert_eq!(hook_rows.len(), 1);
+    assert_eq!(hook_rows[0].severity, Severity::Blocked);
+    assert!(
+        hook_rows[0].headline.contains("no hook engine"),
+        "{}",
+        hook_rows[0].headline
+    );
+}
+
+#[test]
+fn unmodelled_fields_are_reported_even_with_no_other_gap() {
+    // Regression for `unknown_fields` being collected but never surfaced: a
+    // handler with a field agentsync does not model must never look portable.
+    let mut h = HookHandler::new(
+        hook_id("claude-settings", "PreToolUse"),
+        "PreToolUse",
+        "echo hi",
+    );
+    h.unknown_fields.insert("futureThing".into());
+
+    let w = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![
+            hooks_snapshot("claude", vec![h]),
+            hooks_snapshot("codex", vec![]),
+        ],
+    );
+
+    let rows = w.rows();
+    let hook_rows = hook_rows(&rows);
+    assert_eq!(hook_rows.len(), 1);
+    assert_eq!(hook_rows[0].severity, Severity::Blocked);
+    assert!(
+        hook_rows[0].headline.contains("futureThing")
+            || hook_rows[0].detail.contains("futureThing"),
+        "{}: {}",
+        hook_rows[0].headline,
+        hook_rows[0].detail
+    );
+}
+
+#[test]
+fn unmodelled_fields_are_folded_into_an_existing_gap_row_not_a_second_row() {
+    // There is exactly one row per name per domain: an unmodelled field found
+    // alongside a real capability gap must append to that row's detail
+    // rather than emit a second row for the same handler/target pair.
+    let mut h = HookHandler::new(
+        hook_id("claude-settings", "PreToolUse"),
+        "PreToolUse",
+        "echo hi",
+    );
+    h.if_pattern = Some("Bash(git commit:*)".into());
+    h.unknown_fields.insert("futureThing".into());
+
+    let w = hooks_world(
+        vec![host("claude"), host("codex")],
+        vec![
+            hooks_snapshot("claude", vec![h]),
+            hooks_snapshot("codex", vec![]),
+        ],
+    );
+
+    let rows = w.rows();
+    let hook_rows = hook_rows(&rows);
+    assert_eq!(
+        hook_rows.len(),
+        1,
+        "{:?}",
+        hook_rows.iter().map(|r| &r.headline).collect::<Vec<_>>()
+    );
+    // The unmodelled field carries strictly more unknown risk than the `if`
+    // gap it was folded into, so the merged row cannot end up at a lighter
+    // severity than an unmodelled field alone would produce.
+    assert_eq!(hook_rows[0].severity, Severity::Blocked);
+    assert!(
+        hook_rows[0].detail.contains("futureThing"),
+        "{}",
+        hook_rows[0].detail
     );
 }

@@ -89,3 +89,26 @@ argv = ["plugin", "marketplace", "add", "{source}"]
 
 [plugins.marketplace_remove]
 argv = ["plugin", "marketplace", "remove", "{name}"]
+
+# Hooks. Verified against codex-cli 0.146.0, whose hook config field table is
+# `async asyncRewake shell timeout statusMessage matcher timeoutSec`.
+#
+# `if` is absent, and this is visible from Codex's own state: [hooks.state]
+# records the five security-guidance Bash handlers — distinguished only by
+# `if` — as post_tool_use:1:0 through :1:4 with five *identical* trusted_hash
+# values. Codex hashes only the command, so one commit launches all five.
+#
+# `rewake_message` and `rewake_summary` are absent from both lists: neither
+# string occurs anywhere in the binary.
+[hooks]
+events = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse",
+          "Stop", "SessionEnd"]
+caps   = ["matcher", "timeout", "async_rewake"]
+output = ["hook_specific_output", "system_message", "additional_context",
+          "suppress_output"]
+
+# Codex has no user-level hook file; hooks reach it only through plugins. A
+# hook synced here is therefore delivered as a generated plugin in a local
+# marketplace agentsync owns, via `codex plugin marketplace add`.
+[hooks.shim]
+marketplace = "~/.agentsync/shims/codex"

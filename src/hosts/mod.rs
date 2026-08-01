@@ -203,6 +203,53 @@ impl Host {
             }
         }
 
+        if let Some(hooks) = &self.descriptor.hooks {
+            for source in &hooks.read {
+                let paths = match (&source.glob, &source.file) {
+                    (Some(g), _) => expand_glob(g),
+                    (_, Some(f)) => vec![paths::expand(f)],
+                    // validate() guarantees exactly one is set.
+                    (None, None) => continue,
+                };
+                for path in paths {
+                    let Some(text) = read_if_present(&path)? else {
+                        continue;
+                    };
+                    let ctx = ParseCtx {
+                        repo: None,
+                        origin: path.clone(),
+                    };
+                    match parsers::read_hooks(&source.parser, &text, &ctx) {
+                        Ok(read) => {
+                            snap.warnings.extend(read.warnings);
+                            for handler in read.handlers {
+                                let new_root = handler
+                                    .plugin_root
+                                    .as_deref()
+                                    .map(|p| p.display().to_string());
+                                if let Some(prev) = snap.hooks.insert(handler.id.clone(), handler) {
+                                    snap.warnings.push(format!(
+                                        "{}: hook {} was already read from {}; the later \
+                                         definition from {} wins",
+                                        path.display(),
+                                        prev.id,
+                                        prev.plugin_root
+                                            .as_deref()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_else(|| "an earlier source".into()),
+                                        new_root.unwrap_or_else(|| "this source".into()),
+                                    ));
+                                }
+                            }
+                        }
+                        // A malformed hook manifest must not abort the whole
+                        // read: the other domains are still worth reporting.
+                        Err(e) => snap.warnings.push(format!("{}: {e:#}", path.display())),
+                    }
+                }
+            }
+        }
+
         Ok(snap)
     }
 
@@ -456,6 +503,10 @@ impl Host {
 
 /// Expand a `*`-containing path. A pattern that matches nothing yields nothing,
 /// which is normal — a host may simply have no marketplaces cached yet.
+///
+/// Output is sorted so that any "last one wins" behaviour downstream (e.g. two
+/// cached plugin versions keying to the same `HookId`) is deterministic rather
+/// than dependent on filesystem iteration order.
 fn expand_glob(pattern: &str) -> Vec<PathBuf> {
     let expanded = paths::expand(pattern);
     let text = expanded.to_string_lossy();
@@ -463,7 +514,11 @@ fn expand_glob(pattern: &str) -> Vec<PathBuf> {
         return vec![expanded];
     }
     match glob::glob(&text) {
-        Ok(paths) => paths.filter_map(Result::ok).collect(),
+        Ok(paths) => {
+            let mut out: Vec<PathBuf> = paths.filter_map(Result::ok).collect();
+            out.sort();
+            out
+        }
         Err(_) => Vec::new(),
     }
 }
@@ -569,6 +624,183 @@ mod tests {
             descriptor: descriptor::parse(text, name).unwrap(),
             bin: Some(PathBuf::from(name)),
         }
+    }
+
+    fn host_from_toml(text: &str) -> Host {
+        Host {
+            descriptor: descriptor::parse(text, "test").unwrap(),
+            bin: Some(PathBuf::from("test")),
+        }
+    }
+
+    #[test]
+    fn hook_sources_are_read_from_both_globs_and_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache/mkt/demo/1.0.0/hooks");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a"}]}]}}"#,
+        )
+        .unwrap();
+        let settings = tmp.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"b"}]}]}}"#,
+        )
+        .unwrap();
+
+        let text = format!(
+            r#"
+name = "t"
+display = "T"
+detect = {{ bin = "t" }}
+
+[hooks]
+events = ["Stop"]
+caps = []
+output = []
+
+[[hooks.read]]
+glob = "{}/cache/*/*/*/hooks/hooks.json"
+parser = "claude_hooks_json_v1"
+
+[[hooks.read]]
+file = "{}"
+parser = "claude_settings_hooks_v1"
+"#,
+            tmp.path().display(),
+            settings.display()
+        );
+
+        let snap = host_from_toml(&text).read(&[]).unwrap();
+        let commands: std::collections::BTreeSet<&str> =
+            snap.hooks.values().map(|h| h.command.as_str()).collect();
+        assert!(commands.contains("a"), "glob source was not read");
+        assert!(commands.contains("b"), "file source was not read");
+    }
+
+    #[test]
+    fn a_missing_hook_source_is_silent_rather_than_an_error() {
+        let text = r#"
+name = "t"
+display = "T"
+detect = { bin = "t" }
+
+[hooks]
+events = ["Stop"]
+caps = []
+output = []
+
+[[hooks.read]]
+file = "/nonexistent/settings.json"
+parser = "claude_settings_hooks_v1"
+"#;
+        let snap = host_from_toml(text).read(&[]).unwrap();
+        assert!(snap.hooks.is_empty());
+        assert!(snap.warnings.is_empty(), "absent is not divergent");
+    }
+
+    #[test]
+    fn a_malformed_hook_manifest_warns_without_aborting_the_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join("settings.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        let text = format!(
+            r#"
+name = "t"
+display = "T"
+detect = {{ bin = "t" }}
+
+[hooks]
+events = ["Stop"]
+caps = []
+output = []
+
+[[hooks.read]]
+file = "{}"
+parser = "claude_settings_hooks_v1"
+"#,
+            bad.display()
+        );
+        let snap = host_from_toml(&text).read(&[]).unwrap();
+        assert!(snap.hooks.is_empty());
+        assert_eq!(snap.warnings.len(), 1, "the problem must be reported");
+    }
+
+    #[test]
+    fn two_cached_plugin_versions_collapse_with_a_warning_naming_both_roots() {
+        // Claude's plugin cache keeps every version it has ever fetched:
+        // `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/hooks/hooks.json`.
+        // `plugin_identity` deliberately drops the version segment from the
+        // `HookId` (Codex's own state is versionless), so two versions of the
+        // same plugin key to the same id and the second read silently wins.
+        // That must not happen without a warning naming both plugin roots.
+        let tmp = tempfile::tempdir().unwrap();
+        let root_v1 = tmp.path().join("cache/mkt/demo/1.0.0");
+        let root_v2 = tmp.path().join("cache/mkt/demo/2.0.0");
+        std::fs::create_dir_all(root_v1.join("hooks")).unwrap();
+        std::fs::create_dir_all(root_v2.join("hooks")).unwrap();
+        std::fs::write(
+            root_v1.join("hooks/hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a"}]}]}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root_v2.join("hooks/hooks.json"),
+            r#"{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"a","shell":"bash"}]}]}}"#,
+        )
+        .unwrap();
+
+        let text = format!(
+            r#"
+name = "t"
+display = "T"
+detect = {{ bin = "t" }}
+
+[hooks]
+events = ["Stop"]
+caps = []
+output = []
+
+[[hooks.read]]
+glob = "{}/cache/*/*/*/hooks/hooks.json"
+parser = "claude_hooks_json_v1"
+"#,
+            tmp.path().display(),
+        );
+
+        let snap = host_from_toml(&text).read(&[]).unwrap();
+        assert_eq!(
+            snap.hooks.len(),
+            1,
+            "both versions key to the same HookId, so exactly one survives"
+        );
+        assert_eq!(
+            snap.warnings.len(),
+            1,
+            "the collapse must be reported: {:?}",
+            snap.warnings
+        );
+        assert!(
+            snap.warnings[0].contains(&root_v1.display().to_string()),
+            "{}",
+            snap.warnings[0]
+        );
+        assert!(
+            snap.warnings[0].contains(&root_v2.display().to_string()),
+            "{}",
+            snap.warnings[0]
+        );
+    }
+
+    #[test]
+    fn a_host_with_no_hooks_section_reads_no_hooks() {
+        let snap = host("codex").read(&[]).unwrap();
+        assert!(
+            snap.hooks.is_empty(),
+            "codex declares no hooks.read sources"
+        );
     }
 
     #[test]

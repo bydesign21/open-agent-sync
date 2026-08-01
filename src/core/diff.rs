@@ -21,6 +21,7 @@ pub enum Domain {
     /// Instruction files: CLAUDE.md, AGENTS.md, and their per-repo counterparts.
     Instructions,
     Plugins,
+    Hooks,
 }
 
 impl Domain {
@@ -30,13 +31,15 @@ impl Domain {
             Domain::Skills => "SKILLS",
             Domain::Instructions => "INSTRUCTIONS",
             Domain::Plugins => "PLUGINS",
+            Domain::Hooks => "HOOKS",
         }
     }
-    pub const ALL: [Domain; 4] = [
+    pub const ALL: [Domain; 5] = [
         Domain::Mcp,
         Domain::Skills,
         Domain::Instructions,
         Domain::Plugins,
+        Domain::Hooks,
     ];
 }
 

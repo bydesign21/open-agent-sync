@@ -126,6 +126,184 @@ impl fmt::Display for Cap {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hooks
+// ---------------------------------------------------------------------------
+
+/// A feature a hook handler requires from a host's hook engine.
+///
+/// Same role as [`Cap`] for MCP: a capability the target lacks makes the row
+/// blocked or shimmable, never silently dropped. Codex ignores `if` entirely —
+/// it hashes only the command, so five handlers distinguished only by `if`
+/// collapse to five identical entries in its `[hooks.state]` table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookCap {
+    /// Coarse per-event tool filter.
+    Matcher,
+    /// Fine-grained permission-style filter, e.g. `Bash(git commit:*)`.
+    If,
+    Timeout,
+    AsyncRewake,
+    RewakeMessage,
+    RewakeSummary,
+}
+
+impl HookCap {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HookCap::Matcher => "matcher",
+            HookCap::If => "if",
+            HookCap::Timeout => "timeout",
+            HookCap::AsyncRewake => "async_rewake",
+            HookCap::RewakeMessage => "rewake_message",
+            HookCap::RewakeSummary => "rewake_summary",
+        }
+    }
+}
+
+impl fmt::Display for HookCap {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A top-level key a host accepts on a hook's stdout.
+///
+/// Separate vocabulary from [`HookCap`] on purpose: `caps` is what the host
+/// understands in the *manifest*, `output` is what it accepts back on *stdout*.
+/// The observed Codex failure is one of each.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookOutputField {
+    HookSpecificOutput,
+    SystemMessage,
+    AdditionalContext,
+    SuppressOutput,
+    RewakeMessage,
+    RewakeSummary,
+}
+
+impl HookOutputField {
+    /// The literal JSON key, which is camelCase on the wire.
+    pub fn json_key(self) -> &'static str {
+        match self {
+            HookOutputField::HookSpecificOutput => "hookSpecificOutput",
+            HookOutputField::SystemMessage => "systemMessage",
+            HookOutputField::AdditionalContext => "additionalContext",
+            HookOutputField::SuppressOutput => "suppressOutput",
+            HookOutputField::RewakeMessage => "rewakeMessage",
+            HookOutputField::RewakeSummary => "rewakeSummary",
+        }
+    }
+}
+
+/// Stable identity for one hook handler.
+///
+/// Deliberately the scheme Codex records in `[hooks.state]`, so a row can be
+/// traced to a host's own state without a translation step.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct HookId {
+    /// `<plugin>@<marketplace>:<relative file>` for plugin hooks, or the
+    /// settings file path for user-level hooks.
+    pub source: String,
+    pub event: String,
+    /// Index of the matcher group within the event.
+    pub group: usize,
+    /// Index of the handler within its group.
+    pub index: usize,
+}
+
+/// `PostToolUse` -> `post_tool_use`.
+pub fn event_key(event: &str) -> String {
+    let mut out = String::with_capacity(event.len() + 4);
+    for (i, c) in event.char_indices() {
+        if c.is_uppercase() && i != 0 {
+            out.push('_');
+        }
+        out.extend(c.to_lowercase());
+    }
+    out
+}
+
+impl fmt::Display for HookId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}:{}",
+            self.source,
+            event_key(&self.event),
+            self.group,
+            self.index
+        )
+    }
+}
+
+/// One hook handler, normalised away from any host's spelling.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookHandler {
+    pub id: HookId,
+    pub event: String,
+    pub command: String,
+    pub matcher: Option<String>,
+    pub if_pattern: Option<String>,
+    pub timeout: Option<u64>,
+    pub async_rewake: bool,
+    pub rewake_message: Option<String>,
+    pub rewake_summary: Option<String>,
+    /// Absolute root the command's `${CLAUDE_PLUGIN_ROOT}` refers to. `None`
+    /// for handlers that came from a settings file rather than a plugin.
+    pub plugin_root: Option<PathBuf>,
+    /// Keys present in the source that this model does not know. Reported
+    /// rather than dropped, so an unrecognised field can never look handled.
+    pub unknown_fields: BTreeSet<String>,
+}
+
+impl HookHandler {
+    pub fn new(id: HookId, event: impl Into<String>, command: impl Into<String>) -> Self {
+        HookHandler {
+            id,
+            event: event.into(),
+            command: command.into(),
+            matcher: None,
+            if_pattern: None,
+            timeout: None,
+            async_rewake: false,
+            rewake_message: None,
+            rewake_summary: None,
+            plugin_root: None,
+            unknown_fields: BTreeSet::new(),
+        }
+    }
+
+    /// Capabilities this handler needs from whatever host runs it.
+    ///
+    /// Derived from which fields are present. What the hook *prints* is not
+    /// knowable statically, so output compatibility is handled separately.
+    pub fn required_caps(&self) -> Vec<HookCap> {
+        let mut caps = Vec::new();
+        if self.matcher.is_some() {
+            caps.push(HookCap::Matcher);
+        }
+        if self.if_pattern.is_some() {
+            caps.push(HookCap::If);
+        }
+        if self.timeout.is_some() {
+            caps.push(HookCap::Timeout);
+        }
+        if self.async_rewake {
+            caps.push(HookCap::AsyncRewake);
+        }
+        if self.rewake_message.is_some() {
+            caps.push(HookCap::RewakeMessage);
+        }
+        if self.rewake_summary.is_some() {
+            caps.push(HookCap::RewakeSummary);
+        }
+        caps
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct StdioServer {
     pub command: String,
@@ -443,6 +621,7 @@ pub struct HostSnapshot {
     /// `claude plugin install` fails outright when no configured marketplace
     /// carries the name.
     pub catalog: BTreeMap<String, BTreeSet<String>>,
+    pub hooks: BTreeMap<HookId, HookHandler>,
     /// Non-fatal problems hit while reading, surfaced by `doctor`.
     pub warnings: Vec<String>,
 }
@@ -564,5 +743,66 @@ mod tests {
         assert_eq!(short_repo("/tmp"), "tmp");
         assert_eq!(short_repo("/a/b/"), "a/b");
         assert_eq!(short_repo(""), "");
+    }
+
+    #[test]
+    fn required_caps_come_from_the_fields_that_are_present() {
+        let h = HookHandler {
+            id: HookId {
+                source: "security-guidance@claude-plugins-official:hooks/hooks.json".into(),
+                event: "PostToolUse".into(),
+                group: 1,
+                index: 0,
+            },
+            event: "PostToolUse".into(),
+            command: "bash review.sh".into(),
+            matcher: Some("Bash".into()),
+            if_pattern: Some("Bash(git commit:*)".into()),
+            timeout: None,
+            async_rewake: true,
+            rewake_message: Some("findings:".into()),
+            rewake_summary: Some("Commit security review found issues".into()),
+            plugin_root: None,
+            unknown_fields: BTreeSet::new(),
+        };
+        assert_eq!(
+            h.required_caps(),
+            vec![
+                HookCap::Matcher,
+                HookCap::If,
+                HookCap::AsyncRewake,
+                HookCap::RewakeMessage,
+                HookCap::RewakeSummary,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bare_handler_requires_nothing() {
+        let h = HookHandler::new(
+            HookId {
+                source: "s".into(),
+                event: "Stop".into(),
+                group: 0,
+                index: 0,
+            },
+            "Stop",
+            "echo hi",
+        );
+        assert!(h.required_caps().is_empty());
+    }
+
+    #[test]
+    fn hook_id_renders_the_scheme_codex_uses_in_its_own_state_table() {
+        let id = HookId {
+            source: "security-guidance@claude-plugins-official:hooks/hooks.json".into(),
+            event: "PostToolUse".into(),
+            group: 1,
+            index: 4,
+        };
+        assert_eq!(
+            id.to_string(),
+            "security-guidance@claude-plugins-official:hooks/hooks.json:post_tool_use:1:4"
+        );
     }
 }
