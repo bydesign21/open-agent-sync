@@ -30,7 +30,7 @@ curl -fsSL https://raw.githubusercontent.com/bydesign21/open-agent-sync/master/i
 
 That detects your platform, installs the latest release to `~/.local/bin`, and
 **verifies the download against the release's `SHA256SUMS`** before installing
-anything. `VERSION=v0.0.7` pins a version. `AGENTSYNC_BIN_DIR=/usr/local/bin`
+anything. `VERSION=v0.0.8` pins a version. `AGENTSYNC_BIN_DIR=/usr/local/bin`
 changes where it lands.
 
 Then:
@@ -45,7 +45,7 @@ agentsync --version
 `uname -m` prints `arm64`/`aarch64` on Apple Silicon and arm, `x86_64` elsewhere.
 
 ```sh
-VERSION=v0.0.7
+VERSION=v0.0.8
 REPO=https://github.com/bydesign21/open-agent-sync
 
 case "$(uname -s)-$(uname -m)" in
@@ -77,7 +77,7 @@ installed by hand and it refuses to run:
 xattr -d com.apple.quarantine ~/.local/bin/agentsync
 ```
 
-On Windows, download `agentsync-v0.0.7-x86_64-pc-windows-msvc.zip` from the
+On Windows, download `agentsync-v0.0.8-x86_64-pc-windows-msvc.zip` from the
 [releases page](https://github.com/bydesign21/open-agent-sync/releases), extract
 `agentsync.exe`, and put it somewhere on your `PATH`. The installer script does not
 cover Windows and says so rather than half-working.
@@ -95,7 +95,7 @@ edition 2024. CI checks that against the `rust-version` in `Cargo.toml`, so it i
 not a guess. `rustup` is the easy way to get it.
 
 ```sh
-cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.7
+cargo install --git https://github.com/bydesign21/open-agent-sync --tag v0.0.8
 ```
 
 Or from a clone, which is what you want if you plan to change anything:
@@ -274,6 +274,11 @@ rm -rf ~/.agentsync/shims
 The first command restores the original plugin. The other three remove the
 generated shim and its marketplace. This removal has no backup — see the note
 on destructive changes below.
+
+**Shims need a POSIX shell, so they do not work on Windows.** A generated shim
+runs its hook through `sh -c`. Windows has no `sh` unless Git Bash or WSL put
+one on `PATH`. Everything else in agentsync works on Windows. Only the hook
+shims need a shell, so do not generate them there.
 
 **A canonical manifest, adopted from either side.** `~/.config/agentsync/manifest.toml`
 records what you decided to keep. Symlink it into your dotfiles to version
@@ -534,7 +539,7 @@ Set `version` in `Cargo.toml` equal to the tag — so `agentsync --version` and 
 release you downloaded agree — then push the tag:
 
 ```sh
-git tag v0.0.7 && git push origin v0.0.7
+git tag v0.0.8 && git push origin v0.0.8
 ```
 
 `.github/workflows/release.yml` builds all five targets, packages them, writes
