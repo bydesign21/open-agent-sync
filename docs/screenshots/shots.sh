@@ -41,13 +41,18 @@ shot removal "vjjjjd" 32 1
 # 4. the project picker
 shot projects "p" 14
 
-# 5. the plan gate
-shot plan "Ajjj$(printf '\r')" 30
+# 5. the plan gate. Accept MCP SERVERS with the first `A`, then walk the
+# cursor down through SKILLS and PLUGINS (16 rows) into HOOKS and accept
+# that section too, so the plan includes the shim steps — otherwise they're
+# in a section the cursor never touched and the gate only shows MCP work.
+shot plan "AjjjjjjjjjjjjjjjjA$(printf '\r')" 30
 
 # 6. streaming progress mid-run
 shot running "A$(printf '\r')yzzzz" 24 0.1
 
-# 7. the result screen
-shot result "A$(printf '\r')yzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" 30 3
+# 7. the result screen. Hold long enough for all 21 steps to actually finish
+# (each host-CLI call sleeps 1.1s) — the previous hold of 3s cut the capture
+# while steps were still running, so "result" showed an in-progress run.
+shot result "A$(printf '\r')yzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz" 30 8
 
 ls -1 "$OUT"

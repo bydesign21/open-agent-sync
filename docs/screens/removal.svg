@@ -76,13 +76,13 @@
 <text x="24.0" y="443.5" fill="#56b6c2" font-weight="600" xml:space="preserve">HOOKS</text>
 <text x="56.0" y="460.5" fill="#d6dae2" xml:space="preserve">hookify:post_tool_use:0:0</text>
 <text x="344.0" y="460.5" fill="#abb2bf" xml:space="preserve">codex ignores if, rewake_message, rewak…</text>
-<text x="680.0" y="460.5" fill="#5c6370" xml:space="preserve">nothing to do</text>
+<text x="680.0" y="460.5" fill="#61afef" xml:space="preserve">generate a shim for codex</text>
 <text x="56.0" y="477.5" fill="#d6dae2" xml:space="preserve">hookify:post_tool_use:0:1</text>
 <text x="344.0" y="477.5" fill="#abb2bf" xml:space="preserve">codex ignores if, rewake_message, rewak…</text>
-<text x="680.0" y="477.5" fill="#5c6370" xml:space="preserve">nothing to do</text>
+<text x="680.0" y="477.5" fill="#61afef" xml:space="preserve">generate a shim for codex</text>
 <text x="56.0" y="494.5" fill="#d6dae2" xml:space="preserve">hookify:post_tool_use:0:2</text>
 <text x="344.0" y="494.5" fill="#abb2bf" xml:space="preserve">codex ignores if, rewake_message, rewak…</text>
-<text x="680.0" y="494.5" fill="#5c6370" xml:space="preserve">nothing to do</text>
+<text x="680.0" y="494.5" fill="#61afef" xml:space="preserve">generate a shim for codex</text>
 <text x="40.0" y="511.5" fill="#5c6370" xml:space="preserve">—</text>
 <text x="56.0" y="511.5" fill="#5c6370" xml:space="preserve">hookify:pre_compact:0:0</text>
 <text x="344.0" y="511.5" fill="#abb2bf" xml:space="preserve">codex has no PreCompact event</text>
