@@ -2,9 +2,9 @@
 //!
 //! A capability gap is only actionable when every missing capability has a named
 //! shim strategy *and* the target can host a shim at all. Anything else is
-//! blocked and names the capability, in the same spirit as `headers` for MCP —
-//! a hook that silently does not run looks exactly like a hook that found
-//! nothing, which is the worst available outcome for a security review.
+//! blocked and names the capability, in the same spirit as `headers` for MCP.
+//! A hook that silently does not run looks exactly like a hook that found
+//! nothing, which is the worst outcome available for a security review.
 
 use crate::core::diff::{Action, ActionKind, Domain, Row, Severity};
 use crate::core::model::HookCap;
@@ -70,8 +70,8 @@ pub fn rows(world: &World) -> Vec<Row> {
                 let Some(declared) = &target_host.descriptor.hooks else {
                     // A host that declares no `[hooks]` section at all can run
                     // no hooks whatsoever. That is not "nothing to report" —
-                    // it is the most severe gap this domain can describe, and
-                    // skipping it here would make a host that can run nothing
+                    // it is the most severe gap this domain can describe.
+                    // Skipping it here would make a host that can run nothing
                     // look byte-identical to one that runs everything.
                     out.push(no_hook_engine_row(handler, target_host.name()));
                     continue;
@@ -92,8 +92,8 @@ pub fn rows(world: &World) -> Vec<Row> {
                 };
 
                 // A field this model does not know the meaning of can hide any
-                // capability requirement, so it is folded into whatever row
-                // already exists for this handler/target — or, when there is
+                // capability requirement. So it is folded into whatever row
+                // already exists for this handler/target. When there is
                 // otherwise nothing to report, it becomes its own blocked row.
                 // Reporting it as portable would be inventing a verdict for a
                 // field whose behaviour we cannot know.
@@ -102,12 +102,12 @@ pub fn rows(world: &World) -> Vec<Row> {
                     match &mut row {
                         Some(r) => {
                             // The unmodelled field carries strictly more unknown
-                            // risk than whatever gap produced this row, so it
-                            // cannot leave the row at a lighter severity — and a
+                            // risk than whatever gap produced this row. So it
+                            // cannot leave the row at a lighter severity, and a
                             // shim cannot be credited with emulating a field
                             // whose behaviour we do not know.
                             r.detail = format!(
-                                "{}; unmodelled fields: {fields} — portability cannot be verified",
+                                "{}. Unmodelled fields: {fields} — portability cannot be verified",
                                 r.detail
                             );
                             r.severity = Severity::Blocked;
@@ -162,7 +162,7 @@ fn unknown_fields_row(
         domain: Domain::Hooks,
         name: handler.id.to_string(),
         headline: format!("uses fields agentsync does not model ({fields})"),
-        detail: format!("unmodelled fields: {fields}; portability to {target} cannot be verified"),
+        detail: format!("unmodelled fields: {fields} — portability to {target} cannot be verified"),
         severity: Severity::Blocked,
         actions: vec![Action::new("nothing to do", ActionKind::Nothing)],
         chosen: 0,
@@ -219,7 +219,7 @@ fn shim_row(handler: &crate::core::model::HookHandler, target: &str, missing: &[
         name: handler.id.to_string(),
         headline: format!("{target} ignores {}", caps_list(missing)),
         detail: format!(
-            "runs on {target} without honouring {}; a shim can emulate it",
+            "runs on {target} without honouring {} — a shim can emulate it",
             caps_list(missing)
         ),
         severity: Severity::Normal,

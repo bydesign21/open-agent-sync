@@ -1,4 +1,4 @@
-//! The canonical manifest: what you have decided should exist, as opposed to
+//! The canonical manifest: what you have decided to keep, as opposed to
 //! what any given host happens to contain right now.
 
 pub mod secrets;
@@ -44,8 +44,8 @@ pub struct Manifest {
 /// Per-host overrides of what a descriptor declares.
 ///
 /// Descriptor capabilities are defaults compiled into the binary. A host CLI can
-/// gain a capability before agentsync ships a release that knows about it, and
-/// waiting for a release is not an acceptable answer, so the manifest wins.
+/// gain a capability before agentsync ships a release that knows about it.
+/// Waiting for a release is not an acceptable answer, so the manifest wins.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct HostOverride {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,9 +298,9 @@ impl MarketplaceEntry {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PluginEntry {
-    /// Pin the marketplace. Omit it and the marketplace is *derived* per host,
-    /// because the curated registries genuinely differ between hosts and one
-    /// hardcoded id would produce phantom drift on the other.
+    /// Pin the marketplace. Omit it and the marketplace is *derived* per host.
+    /// The curated registries genuinely differ between hosts, and one hardcoded
+    /// id would produce phantom drift on the other.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub marketplace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -383,8 +383,8 @@ impl Manifest {
         out
     }
 
-    /// Entries whose `command` is an absolute path. Not an error — just a thing
-    /// that will break on a different machine, so `doctor` says so.
+    /// Entries whose `command` is an absolute path. Not an error, but a thing
+    /// that breaks on a different machine, so `doctor` reports it.
     pub fn non_portable(&self) -> Vec<(String, String)> {
         self.mcp
             .iter()

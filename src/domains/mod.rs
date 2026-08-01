@@ -1,8 +1,8 @@
 //! Domain glue: reads the world, produces rows, turns accepted rows into a plan.
 //!
 //! Each domain implements the same three-stage shape — read, diff into rows,
-//! plan from a chosen action — so the TUI treats them identically and a fourth
-//! domain is a new module rather than a UI change.
+//! plan from a chosen action. This lets the TUI treat them identically, so a
+//! fourth domain is a new module rather than a UI change.
 
 pub mod hooks;
 pub mod instructions;
@@ -38,8 +38,9 @@ impl World {
     /// Read the manifest and every detected host.
     ///
     /// Repo discovery is two-pass because per-repo config paths are themselves
-    /// derived from a repo list: pass one uses what the manifest and the current
-    /// directory imply, pass two adds any repo a host turned out to mention.
+    /// derived from a repo list. Pass one uses what the manifest and the
+    /// current directory imply. Pass two adds any repo a host turned out to
+    /// mention.
     pub fn load(manifest_path: &Path, extra_repos: &[String]) -> Result<World> {
         let mut manifest = Manifest::load(manifest_path)?;
         let mut warnings = Vec::new();
