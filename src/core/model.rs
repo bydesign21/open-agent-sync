@@ -780,7 +780,12 @@ mod tests {
     #[test]
     fn a_bare_handler_requires_nothing() {
         let h = HookHandler::new(
-            HookId { source: "s".into(), event: "Stop".into(), group: 0, index: 0 },
+            HookId {
+                source: "s".into(),
+                event: "Stop".into(),
+                group: 0,
+                index: 0,
+            },
             "Stop",
             "echo hi",
         );

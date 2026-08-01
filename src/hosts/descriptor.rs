@@ -452,11 +452,7 @@ argv_http = ["mcp", "add", "{name}", "--url", "{url}"]
 
     #[test]
     fn codex_declares_hook_caps_that_exclude_if() {
-        let d = parse(
-            include_str!("builtin/codex.toml"),
-            "builtin/codex.toml",
-        )
-        .unwrap();
+        let d = parse(include_str!("builtin/codex.toml"), "builtin/codex.toml").unwrap();
         let hooks = d.hooks.expect("codex declares a hooks section");
         assert!(hooks.supports(HookCap::Matcher));
         assert!(hooks.supports(HookCap::AsyncRewake));
