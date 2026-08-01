@@ -239,6 +239,29 @@ impl fmt::Display for HookId {
     }
 }
 
+impl HookId {
+    /// A short form for display, where the full id would truncate before the
+    /// part that distinguishes one handler from its siblings.
+    ///
+    /// `HookId`'s `Display` is the wire-compatible identity and stays as it is:
+    /// warnings want the unambiguous form. A list column does not have room for
+    /// it, and the prefix is identical across every handler from one source.
+    pub fn short(&self) -> String {
+        let origin = match self.source.split_once('@') {
+            // `<plugin>@<marketplace>:<relative file>` -> `<plugin>`
+            Some((plugin, _)) => plugin,
+            // A settings file path -> its file name.
+            None => self.source.rsplit('/').next().unwrap_or(&self.source),
+        };
+        format!(
+            "{origin}:{}:{}:{}",
+            event_key(&self.event),
+            self.group,
+            self.index
+        )
+    }
+}
+
 /// One hook handler, normalised away from any host's spelling.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HookHandler {
@@ -793,6 +816,42 @@ mod tests {
 
     #[test]
     fn hook_id_renders_the_scheme_codex_uses_in_its_own_state_table() {
+        let id = HookId {
+            source: "security-guidance@claude-plugins-official:hooks/hooks.json".into(),
+            event: "PostToolUse".into(),
+            group: 1,
+            index: 4,
+        };
+        assert_eq!(
+            id.to_string(),
+            "security-guidance@claude-plugins-official:hooks/hooks.json:post_tool_use:1:4"
+        );
+    }
+
+    #[test]
+    fn short_keeps_only_the_plugin_name_for_a_plugin_id() {
+        let id = HookId {
+            source: "hookify@claude-plugins-official:hooks/hooks.json".into(),
+            event: "PostToolUse".into(),
+            group: 0,
+            index: 0,
+        };
+        assert_eq!(id.short(), "hookify:post_tool_use:0:0");
+    }
+
+    #[test]
+    fn short_keeps_only_the_file_name_for_a_settings_file_id() {
+        let id = HookId {
+            source: "/home/u/.claude/settings.json".into(),
+            event: "PreToolUse".into(),
+            group: 0,
+            index: 0,
+        };
+        assert_eq!(id.short(), "settings.json:pre_tool_use:0:0");
+    }
+
+    #[test]
+    fn short_does_not_change_display() {
         let id = HookId {
             source: "security-guidance@claude-plugins-official:hooks/hooks.json".into(),
             event: "PostToolUse".into(),

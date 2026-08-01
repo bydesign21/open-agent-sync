@@ -142,7 +142,7 @@ fn unknown_fields_list(fields: &std::collections::BTreeSet<String>) -> String {
 fn no_hook_engine_row(handler: &crate::core::model::HookHandler, target: &str) -> Row {
     Row {
         domain: Domain::Hooks,
-        name: handler.id.to_string(),
+        name: handler.id.short(),
         headline: format!("{target} has no hook engine"),
         detail: format!("{target} declares no [hooks] section, so no hook can run there"),
         severity: Severity::Blocked,
@@ -160,7 +160,7 @@ fn unknown_fields_row(
 ) -> Row {
     Row {
         domain: Domain::Hooks,
-        name: handler.id.to_string(),
+        name: handler.id.short(),
         headline: format!("uses fields agentsync does not model ({fields})"),
         detail: format!("unmodelled fields: {fields} — portability to {target} cannot be verified"),
         severity: Severity::Blocked,
@@ -174,7 +174,7 @@ fn unknown_fields_row(
 fn blocked_event_row(handler: &crate::core::model::HookHandler, target: &str) -> Row {
     Row {
         domain: Domain::Hooks,
-        name: handler.id.to_string(),
+        name: handler.id.short(),
         headline: format!("{target} has no {} event", handler.event),
         detail: "the event does not exist on the target; nothing can emulate it".into(),
         severity: Severity::Blocked,
@@ -202,7 +202,7 @@ fn blocked_cap_row(
     };
     Row {
         domain: Domain::Hooks,
-        name: handler.id.to_string(),
+        name: handler.id.short(),
         headline: format!("{target} cannot run this hook ({})", caps_list(missing)),
         detail: reason,
         severity: Severity::Blocked,
@@ -216,7 +216,7 @@ fn blocked_cap_row(
 fn shim_row(handler: &crate::core::model::HookHandler, target: &str, missing: &[HookCap]) -> Row {
     Row {
         domain: Domain::Hooks,
-        name: handler.id.to_string(),
+        name: handler.id.short(),
         headline: format!("{target} ignores {}", caps_list(missing)),
         detail: format!(
             "runs on {target} without honouring {} — a shim can emulate it",
