@@ -68,21 +68,49 @@ pub fn rows(world: &World) -> Vec<Row> {
                     continue;
                 }
                 let Some(declared) = &target_host.descriptor.hooks else {
+                    // A host that declares no `[hooks]` section at all can run
+                    // no hooks whatsoever. That is not "nothing to report" —
+                    // it is the most severe gap this domain can describe, and
+                    // skipping it here would make a host that can run nothing
+                    // look byte-identical to one that runs everything.
+                    out.push(no_hook_engine_row(handler, target_host.name()));
                     continue;
                 };
                 let target = world.manifest.hooks_for(target_host.name(), declared);
 
-                if !target.supports_event(&handler.event) {
-                    out.push(blocked_event_row(handler, target_host.name()));
-                    continue;
-                }
-                let missing = target.missing_caps(&handler.required_caps());
-                match classify(&missing, target.can_shim()) {
-                    Severity::Synced => {}
-                    Severity::Blocked => {
-                        out.push(blocked_cap_row(handler, target_host.name(), &missing))
+                let mut row = if !target.supports_event(&handler.event) {
+                    Some(blocked_event_row(handler, target_host.name()))
+                } else {
+                    let missing = target.missing_caps(&handler.required_caps());
+                    match classify(&missing, target.can_shim()) {
+                        Severity::Synced => None,
+                        Severity::Blocked => {
+                            Some(blocked_cap_row(handler, target_host.name(), &missing))
+                        }
+                        _ => Some(shim_row(handler, target_host.name(), &missing)),
                     }
-                    _ => out.push(shim_row(handler, target_host.name(), &missing)),
+                };
+
+                // A field this model does not know the meaning of can hide any
+                // capability requirement, so it is folded into whatever row
+                // already exists for this handler/target — or, when there is
+                // otherwise nothing to report, it becomes its own blocked row.
+                // Reporting it as portable would be inventing a verdict for a
+                // field whose behaviour we cannot know.
+                if !handler.unknown_fields.is_empty() {
+                    let fields = unknown_fields_list(&handler.unknown_fields);
+                    match &mut row {
+                        Some(r) => {
+                            r.detail = format!("{}; unmodelled fields: {fields}", r.detail);
+                        }
+                        None => {
+                            row = Some(unknown_fields_row(handler, target_host.name(), &fields));
+                        }
+                    }
+                }
+
+                if let Some(r) = row {
+                    out.push(r);
                 }
             }
         }
@@ -96,6 +124,42 @@ fn caps_list(missing: &[HookCap]) -> String {
         .map(|c| c.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn unknown_fields_list(fields: &std::collections::BTreeSet<String>) -> String {
+    fields.iter().cloned().collect::<Vec<_>>().join(", ")
+}
+
+fn no_hook_engine_row(handler: &crate::core::model::HookHandler, target: &str) -> Row {
+    Row {
+        domain: Domain::Hooks,
+        name: handler.id.to_string(),
+        headline: format!("{target} has no hook engine"),
+        detail: format!("{target} declares no [hooks] section, so no hook can run there"),
+        severity: Severity::Blocked,
+        actions: vec![Action::new("nothing to do", ActionKind::Nothing)],
+        chosen: 0,
+        accepted: false,
+        key: Default::default(),
+    }
+}
+
+fn unknown_fields_row(
+    handler: &crate::core::model::HookHandler,
+    target: &str,
+    fields: &str,
+) -> Row {
+    Row {
+        domain: Domain::Hooks,
+        name: handler.id.to_string(),
+        headline: format!("uses fields agentsync does not model ({fields})"),
+        detail: format!("unmodelled fields: {fields}; portability to {target} cannot be verified"),
+        severity: Severity::Blocked,
+        actions: vec![Action::new("nothing to do", ActionKind::Nothing)],
+        chosen: 0,
+        accepted: false,
+        key: Default::default(),
+    }
 }
 
 fn blocked_event_row(handler: &crate::core::model::HookHandler, target: &str) -> Row {
