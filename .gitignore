@@ -5,6 +5,7 @@ dist/
 # Intermediate screenshot captures. `shots.sh` writes SVG and PNG here, and
 # only the SVGs get copied into docs/screens/.
 docs/screenshots/shots/
+docs/superpowers/
 
 # Scratch space for the subagent-driven development workflow.
 .superpowers/
