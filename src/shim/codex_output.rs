@@ -16,13 +16,67 @@ pub fn translate(stdout: &str, event: &str, spec: &ShimSpec) -> Result<String> {
         return Ok(String::new());
     }
 
-    let response = select_response(stdout)?;
-    let mut response = response.unwrap_or_default();
+    let mut response = select_response(stdout)?.unwrap_or_default();
     response.remove("metrics");
-    validate_response(&response, event, spec)?;
 
-    let json = serde_json::to_string(&Value::Object(response))?;
-    Ok(crate::shim::output::normalize_legacy(&json, spec))
+    // Claude's rewake fields carry text for a person, but Codex does not
+    // accept either key on stdout. Move their values into systemMessage before
+    // validating the final object. A wrong-typed value is malformed output,
+    // not an excuse to silently discard a finding.
+    let mut folded = Vec::new();
+    let mut fold_keys: std::collections::BTreeSet<&str> = spec
+        .fold_into_system_message
+        .iter()
+        .map(String::as_str)
+        .collect();
+    fold_keys.insert("rewakeMessage");
+    fold_keys.insert("rewakeSummary");
+    for key in fold_keys {
+        take_text(&mut response, key, &mut folded)?;
+    }
+
+    validate_response(&response, event)?;
+
+    // A metrics-only record means the hook had nothing for Codex. Static
+    // rewake text must not manufacture a finding in that case.
+    if !response.is_empty() || !folded.is_empty() {
+        let mut messages = Vec::new();
+        push_unique(&mut messages, spec.rewake_message.as_deref());
+        push_unique(&mut messages, spec.rewake_summary.as_deref());
+        if let Some(existing) = response.get("systemMessage").and_then(Value::as_str) {
+            push_unique(&mut messages, Some(existing));
+        }
+        for text in &folded {
+            push_unique(&mut messages, Some(text));
+        }
+        if !messages.is_empty() {
+            response.insert("systemMessage".into(), Value::String(messages.join("\n\n")));
+        }
+    }
+
+    // This is already the final, event-validated Codex object. Passing it
+    // through the legacy allow-list would discard valid common controls and
+    // event-specific fields that the old, event-blind model does not know.
+    Ok(serde_json::to_string(&Value::Object(response))?)
+}
+
+fn take_text(response: &mut Map<String, Value>, key: &str, out: &mut Vec<String>) -> Result<()> {
+    let Some(value) = response.remove(key) else {
+        return Ok(());
+    };
+    let Value::String(text) = value else {
+        bail!("{key} must be a string");
+    };
+    out.push(text);
+    Ok(())
+}
+
+fn push_unique(messages: &mut Vec<String>, text: Option<&str>) {
+    if let Some(text) = text
+        && !messages.iter().any(|existing| existing == text)
+    {
+        messages.push(text.to_string());
+    }
 }
 
 fn select_response(stdout: &str) -> Result<Option<Map<String, Value>>> {
@@ -92,19 +146,32 @@ fn is_transport_record(record: &Map<String, Value>) -> bool {
             .all(|key| matches!(key.as_str(), "async" | "asyncTimeout"))
 }
 
-fn validate_response(response: &Map<String, Value>, event: &str, spec: &ShimSpec) -> Result<()> {
+fn validate_response(response: &Map<String, Value>, event: &str) -> Result<()> {
     let allowed = top_level_keys(event)?;
     for key in response.keys() {
-        if key == "metrics"
-            || allowed.contains(&key.as_str())
-            || spec
-                .fold_into_system_message
-                .iter()
-                .any(|field| field == key)
-        {
+        if allowed.contains(&key.as_str()) {
             continue;
         }
         bail!("{event} hook output does not allow top-level {key}");
+    }
+
+    require_bool(response, "continue")?;
+    require_string(response, "stopReason")?;
+    require_bool(response, "suppressOutput")?;
+    require_string(response, "systemMessage")?;
+    require_string(response, "reason")?;
+    if let Some(decision) = response.get("decision") {
+        let decision = decision
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("decision must be a string"))?;
+        let allowed = match event {
+            "PreToolUse" => &["approve", "block"][..],
+            "UserPromptSubmit" | "PostToolUse" | "Stop" => &["block"][..],
+            _ => &[][..],
+        };
+        if !allowed.contains(&decision) {
+            bail!("{event} decision does not allow {decision}");
+        }
     }
 
     if let Some(output) = response.get("hookSpecificOutput") {
@@ -126,16 +193,50 @@ fn validate_response(response: &Map<String, Value>, event: &str, spec: &ShimSpec
                 bail!("{event} hookSpecificOutput does not allow {key}");
             }
         }
+        require_string(nested, "additionalContext")?;
+        require_string(nested, "permissionDecisionReason")?;
+        if let Some(decision) = nested.get("permissionDecision") {
+            let decision = decision
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("permissionDecision must be a string"))?;
+            if !["allow", "deny", "ask"].contains(&decision) {
+                bail!("PreToolUse permissionDecision does not allow {decision}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn require_bool(object: &Map<String, Value>, key: &str) -> Result<()> {
+    if object.get(key).is_some_and(|value| !value.is_boolean()) {
+        bail!("{key} must be a boolean");
+    }
+    Ok(())
+}
+
+fn require_string(object: &Map<String, Value>, key: &str) -> Result<()> {
+    if object.get(key).is_some_and(|value| !value.is_string()) {
+        bail!("{key} must be a string");
     }
     Ok(())
 }
 
 fn top_level_keys(event: &str) -> Result<&'static [&'static str]> {
     match event {
-        "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "SessionEnd" => Ok(&[
+        "SessionStart" | "SessionEnd" => Ok(&[
             "continue",
+            "stopReason",
             "suppressOutput",
             "systemMessage",
+            "hookSpecificOutput",
+        ]),
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Ok(&[
+            "continue",
+            "stopReason",
+            "suppressOutput",
+            "systemMessage",
+            "decision",
+            "reason",
             "hookSpecificOutput",
         ]),
         "Stop" => Ok(&[
@@ -143,7 +244,8 @@ fn top_level_keys(event: &str) -> Result<&'static [&'static str]> {
             "stopReason",
             "suppressOutput",
             "systemMessage",
-            "hookSpecificOutput",
+            "decision",
+            "reason",
         ]),
         _ => bail!("unsupported Codex hook event {event}"),
     }
@@ -153,12 +255,12 @@ fn nested_keys(event: &str) -> Result<&'static [&'static str]> {
     match event {
         "SessionStart" | "UserPromptSubmit" => Ok(&["additionalContext"]),
         "PreToolUse" => Ok(&[
+            "additionalContext",
             "permissionDecision",
             "permissionDecisionReason",
             "updatedInput",
         ]),
         "PostToolUse" => Ok(&["additionalContext", "updatedMCPToolOutput"]),
-        "Stop" => Ok(&["decision", "reason"]),
         "SessionEnd" => Ok(&[]),
         _ => bail!("unsupported Codex hook event {event}"),
     }
@@ -202,6 +304,145 @@ mod tests {
             object.is_empty(),
             "metrics without a user message must not survive: {parsed}"
         );
+    }
+
+    #[test]
+    fn security_guidance_post_tool_use_findings_become_one_codex_object() {
+        // Verbatim shape emitted by security-guidance 2.0.6 when a pattern
+        // finding survives its baseline and de-duplication filters.
+        let stdout = r#"{"metrics":{"pattern_hits":1,"rule_id":7,"rule_mask":128,"pv":20006},"rewakeSummary":"Commit security review found issues","hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"[from security-guidance@claude-code-plugins plugin]\n\nDo not deserialize untrusted data."}}"#;
+
+        let output = super::translate(stdout, "PostToolUse", &spec()).unwrap();
+        let parsed: Value = serde_json::from_str(&output).expect("one JSON object");
+        assert_eq!(
+            parsed["hookSpecificOutput"],
+            serde_json::json!({
+                "hookEventName": "PostToolUse",
+                "additionalContext": "[from security-guidance@claude-code-plugins plugin]\n\nDo not deserialize untrusted data."
+            })
+        );
+        assert_eq!(
+            parsed["systemMessage"], "Commit security review found issues",
+            "the human-facing finding summary must survive in a Codex field"
+        );
+        assert!(
+            parsed.get("metrics").is_none(),
+            "telemetry must not survive"
+        );
+        assert!(
+            parsed.get("rewakeSummary").is_none(),
+            "Claude-only fields must not survive"
+        );
+    }
+
+    #[test]
+    fn security_guidance_stop_findings_keep_the_top_level_block() {
+        // Verbatim shape built by security-guidance 2.0.6 emit_metrics() for
+        // Stop findings. Stop deliberately does not use hookSpecificOutput.
+        let stdout = r#"{"metrics":{"vulns_found":1,"pv":20006},"rewakeSummary":"Background security review found issues","decision":"block","reason":"[from security-guidance@claude-code-plugins plugin]\n\nPotential command injection."}"#;
+
+        let output = super::translate(stdout, "Stop", &spec()).unwrap();
+        let parsed: Value = serde_json::from_str(&output).expect("one JSON object");
+        assert_eq!(parsed["decision"], "block");
+        assert_eq!(
+            parsed["reason"],
+            "[from security-guidance@claude-code-plugins plugin]\n\nPotential command injection."
+        );
+        assert_eq!(
+            parsed["systemMessage"],
+            "Background security review found issues"
+        );
+        assert!(
+            parsed.get("metrics").is_none(),
+            "telemetry must not survive"
+        );
+        assert!(parsed.get("rewakeSummary").is_none());
+        assert!(parsed.get("hookSpecificOutput").is_none());
+    }
+
+    #[test]
+    fn valid_common_control_fields_are_preserved() {
+        let output = super::translate(
+            r#"{"continue":false,"stopReason":"operator requested stop","suppressOutput":true,"systemMessage":"stopping"}"#,
+            "SessionStart",
+            &spec(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&output).expect("one JSON object");
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "continue": false,
+                "stopReason": "operator requested stop",
+                "suppressOutput": true,
+                "systemMessage": "stopping"
+            })
+        );
+    }
+
+    #[test]
+    fn configured_human_text_is_folded_before_final_codex_validation() {
+        let mut configured = spec();
+        configured.fold_into_system_message = vec!["customSummary".into()];
+
+        let output = super::translate(
+            r#"{"customSummary":"review completed with findings"}"#,
+            "SessionStart",
+            &configured,
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&output).expect("one JSON object");
+        assert_eq!(
+            parsed,
+            serde_json::json!({"systemMessage": "review completed with findings"}),
+            "a configured fold key must not leak into the final Codex object"
+        );
+    }
+
+    #[test]
+    fn wrong_typed_codex_fields_are_rejected_by_name() {
+        let fixtures = [
+            ("SessionStart", r#"{"continue":"false"}"#, "continue"),
+            ("SessionStart", r#"{"stopReason":false}"#, "stopReason"),
+            (
+                "SessionStart",
+                r#"{"suppressOutput":"yes"}"#,
+                "suppressOutput",
+            ),
+            ("SessionStart", r#"{"systemMessage":5}"#, "systemMessage"),
+            ("PostToolUse", r#"{"decision":5}"#, "decision"),
+            ("PostToolUse", r#"{"reason":false}"#, "reason"),
+            (
+                "PostToolUse",
+                r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":7}}"#,
+                "additionalContext",
+            ),
+            (
+                "PreToolUse",
+                r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":true}}"#,
+                "permissionDecision",
+            ),
+            (
+                "PreToolUse",
+                r#"{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecisionReason":[]}}"#,
+                "permissionDecisionReason",
+            ),
+            (
+                "PostToolUse",
+                r#"{"rewakeSummary":9,"hookSpecificOutput":{"hookEventName":"PostToolUse"}}"#,
+                "rewakeSummary",
+            ),
+        ];
+
+        for (event, stdout, field) in fixtures {
+            let error = super::translate(stdout, event, &spec())
+                .expect_err("wrong-typed structured output must fail")
+                .to_string();
+            assert!(
+                error.contains(field),
+                "{event} error must name {field}, got {error}"
+            );
+        }
     }
 
     #[test]
@@ -319,10 +560,7 @@ mod tests {
                 "PostToolUse",
                 r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":"result"}}"#,
             ),
-            (
-                "Stop",
-                r#"{"hookSpecificOutput":{"hookEventName":"Stop","decision":"block","reason":"findings"}}"#,
-            ),
+            ("Stop", r#"{"decision":"block","reason":"findings"}"#),
             (
                 "SessionEnd",
                 r#"{"hookSpecificOutput":{"hookEventName":"SessionEnd"}}"#,

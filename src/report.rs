@@ -609,19 +609,27 @@ pub fn shim_health(shim_dirs: &[std::path::PathBuf]) -> Vec<String> {
 /// identity. Generated names are never parsed back into marketplace and plugin
 /// components because hyphens make that operation ambiguous.
 pub fn shim_installation_health(world: &World) -> Vec<String> {
-    crate::domains::hooks::shim_substitutions(world)
+    crate::domains::hooks::observed_shim_installations(world)
         .into_iter()
-        .filter(|substitution| {
+        .filter_map(|observation| {
+            let substitution = observation.substitution;
+            if let Some(error) = observation.artifact_error {
+                return Some(format!(
+                    "{}: installed shim {} fails the current generation contract: {error}. \
+                     Re-run agentsync to regenerate it.",
+                    substitution.target_host, substitution.shim_plugin
+                ));
+            }
             world
                 .snapshot(&substitution.target_host)
                 .and_then(|snapshot| snapshot.plugins.get(&substitution.plugin))
                 .is_some_and(|installed| installed.marketplace == substitution.marketplace)
-        })
-        .map(|substitution| {
-            format!(
-                "{}: original plugin {} and matching shim {} are both installed",
-                substitution.target_host, substitution.plugin, substitution.shim_plugin
-            )
+                .then(|| {
+                    format!(
+                        "{}: original plugin {} and matching shim {} are both installed",
+                        substitution.target_host, substitution.plugin, substitution.shim_plugin
+                    )
+                })
         })
         .collect()
 }
@@ -673,7 +681,11 @@ fn first_single_quoted_token(s: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn duplicate_installation_world(original_marketplace: &str) -> World {
+    fn duplicate_installation_world(
+        original_marketplace: &str,
+        marketplace_dir: &std::path::Path,
+        manifest_intent: bool,
+    ) -> World {
         use crate::core::model::{HookHandler, HookId, HostSnapshot, InstalledPlugin};
         use crate::hosts::{Host, descriptor};
         use crate::manifest::Manifest;
@@ -727,16 +739,91 @@ mod tests {
                 },
             );
         }
+        codex.marketplaces.insert(
+            crate::shim::generate::MARKETPLACE_NAME.into(),
+            crate::core::model::MarketplaceSource::Directory(
+                marketplace_dir.to_string_lossy().into_owned(),
+            ),
+        );
         let mut manifest = Manifest::default();
-        manifest.plugins.insert(plugin.into(), Default::default());
-        World {
+        if manifest_intent {
+            manifest.plugins.insert(plugin.into(), Default::default());
+        }
+        let mut codex_host = host("codex");
+        codex_host
+            .descriptor
+            .hooks
+            .as_mut()
+            .expect("codex hooks")
+            .shim
+            .as_mut()
+            .expect("codex shim")
+            .marketplace = marketplace_dir.to_string_lossy().into_owned();
+        let world = World {
             manifest,
             manifest_path: std::path::PathBuf::from("/tmp/agentsync-test/manifest.toml"),
-            hosts: vec![host("claude"), host("codex")],
+            hosts: vec![host("claude"), codex_host],
             snapshots: vec![claude, codex],
             repos: Vec::new(),
             warnings: Vec::new(),
+        };
+
+        let declared = world
+            .host("codex")
+            .unwrap()
+            .descriptor
+            .hooks
+            .as_ref()
+            .unwrap();
+        let effective = world.manifest.hooks_for("codex", declared);
+        let shim_config = effective.shim.as_ref().unwrap();
+        let handlers = world
+            .snapshot("claude")
+            .unwrap()
+            .hooks
+            .values()
+            .cloned()
+            .collect();
+        let generated = crate::shim::generate::plan_shim(&crate::shim::generate::ShimInput {
+            marketplace_dir: marketplace_dir.to_path_buf(),
+            plugin: plugin.into(),
+            marketplace: marketplace.into(),
+            handlers,
+            allowed_output: effective
+                .output
+                .iter()
+                .map(|field| field.json_key().to_string())
+                .collect(),
+            fold_into_system_message: vec!["rewakeMessage".into()],
+            output_strategy: shim_config.output_strategy,
+            agentsync_bin: std::env::current_exe().unwrap(),
+            target_caps: effective.caps,
+            vendor: vec![],
+        })
+        .unwrap();
+        let shim_plugin = generated.shim_plugin.clone();
+        for op in generated.ops {
+            match op {
+                crate::core::plan::FsOp::WriteFile { path, contents } => {
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, contents).unwrap();
+                }
+                other => panic!("doctor fixture has no generated links: {other:?}"),
+            }
         }
+        let marketplace = crate::shim::generate::marketplace_manifest_op(
+            marketplace_dir,
+            std::slice::from_ref(&shim_plugin),
+        )
+        .unwrap();
+        match marketplace {
+            crate::core::plan::FsOp::WriteFile { path, contents } => {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, contents).unwrap();
+            }
+            other => panic!("marketplace must be a file: {other:?}"),
+        }
+        world
     }
 
     /// Writes a working shim plugin under `marketplace_dir/{plugin_name}`,
@@ -783,9 +870,10 @@ mod tests {
 
     #[test]
     fn doctor_reports_original_and_shim_on_one_host() {
+        let dir = tempfile::tempdir().unwrap();
         let plugin = "security-guidance";
         let shim = "agentsync-shim-claude-plugins-official-security-guidance";
-        let world = duplicate_installation_world("claude-plugins-official");
+        let world = duplicate_installation_world("claude-plugins-official", dir.path(), true);
 
         let report = doctor(&world, false);
         let lines = report
@@ -811,13 +899,64 @@ mod tests {
 
     #[test]
     fn doctor_ignores_a_same_named_original_from_another_marketplace() {
-        let world = duplicate_installation_world("another-marketplace");
+        let dir = tempfile::tempdir().unwrap();
+        let world = duplicate_installation_world("another-marketplace", dir.path(), true);
 
         let lines = shim_installation_health(&world);
 
         assert!(
             lines.is_empty(),
             "a shim for one marketplace does not duplicate the same name from another: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_reports_a_duplicate_without_manifest_intent() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = duplicate_installation_world("claude-plugins-official", dir.path(), false);
+
+        let lines = shim_installation_health(&world);
+
+        assert_eq!(
+            lines.len(),
+            1,
+            "observed duplicates must not depend on manifest intent: {lines:?}"
+        );
+        assert!(lines[0].contains("codex"));
+        assert!(lines[0].contains("security-guidance"));
+    }
+
+    #[test]
+    fn doctor_reports_an_installed_shim_that_fails_the_generation_contract() {
+        let dir = tempfile::tempdir().unwrap();
+        let world = duplicate_installation_world("claude-plugins-official", dir.path(), true);
+        let sidecar = dir.path().join(
+            "agentsync-shim-claude-plugins-official-security-guidance/specs/pre_tool_use-0-0.json",
+        );
+        let changed = std::fs::read_to_string(&sidecar)
+            .unwrap()
+            .replace("echo hi", "echo stale review");
+        std::fs::write(sidecar, changed).unwrap();
+
+        let report = doctor(&world, false);
+        let lines = report
+            .sections
+            .iter()
+            .find(|section| section.title == "SHIM HEALTH")
+            .expect("contract drift must be visible in SHIM HEALTH");
+
+        assert!(
+            lines.lines.iter().any(|line| {
+                line.text
+                    .contains("agentsync-shim-claude-plugins-official-security-guidance")
+                    && line.text.contains("generation contract")
+            }),
+            "doctor must name the drifting shim and shared contract: {:?}",
+            lines
+                .lines
+                .iter()
+                .map(|line| &line.text)
+                .collect::<Vec<_>>()
         );
     }
 

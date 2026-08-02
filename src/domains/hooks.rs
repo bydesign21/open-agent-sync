@@ -21,12 +21,43 @@ pub struct ShimSubstitution {
     pub shim_plugin: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShimInstallationObservation {
+    pub substitution: ShimSubstitution,
+    /// Why the installed candidate cannot be trusted as generated state.
+    /// `None` means it matches the current generation contract exactly.
+    pub artifact_error: Option<String>,
+}
+
 /// Installed shims that stand in for a desired original plugin.
 ///
 /// The generated name is derived from the original hook identity. It is never
 /// parsed back into its components: marketplace and plugin names may both
 /// contain hyphens, so that reverse operation is ambiguous.
 pub fn shim_substitutions(world: &World) -> Vec<ShimSubstitution> {
+    observed_shim_installations(world)
+        .into_iter()
+        .filter(|observation| observation.artifact_error.is_none())
+        .map(|observation| observation.substitution)
+        .filter(|substitution| {
+            world
+                .manifest
+                .plugins
+                .get(&substitution.plugin)
+                .is_some_and(|entry| {
+                    entry
+                        .marketplace
+                        .as_deref()
+                        .is_none_or(|pin| pin == substitution.marketplace)
+                })
+        })
+        .collect()
+}
+
+/// Installed shim candidates derived only from observable source hook
+/// identities. Manifest intent is deliberately not consulted: doctor must be
+/// able to report a duplicate that exists outside the canonical manifest.
+pub fn observed_shim_installations(world: &World) -> Vec<ShimInstallationObservation> {
     let originals: std::collections::BTreeSet<(String, String)> = world
         .detected_snapshots()
         .flat_map(|snapshot| snapshot.hooks.values())
@@ -34,32 +65,152 @@ pub fn shim_substitutions(world: &World) -> Vec<ShimSubstitution> {
         .filter(|(plugin, marketplace)| {
             !plugin.starts_with("agentsync-shim-")
                 && !crate::shim::generate::is_internal_marketplace(marketplace)
-                && world.manifest.plugins.get(plugin).is_some_and(|entry| {
-                    entry
-                        .marketplace
-                        .as_deref()
-                        .is_none_or(|pin| pin == marketplace)
-                })
         })
         .collect();
 
-    let mut substitutions = std::collections::BTreeSet::new();
+    let mut observations = Vec::new();
     for (target, snapshot) in world.detected() {
         for (plugin, marketplace) in &originals {
             let shim_plugin = crate::shim::generate::shim_plugin_name(marketplace, plugin);
             if snapshot.plugins.get(&shim_plugin).is_some_and(|installed| {
                 crate::shim::generate::is_internal_marketplace(&installed.marketplace)
-            }) {
-                substitutions.insert(ShimSubstitution {
-                    target_host: target.name().to_string(),
-                    plugin: plugin.clone(),
-                    marketplace: marketplace.clone(),
-                    shim_plugin,
+            }) && let Some(handlers) = source_handlers(world, target.name(), plugin, marketplace)
+            {
+                let artifact_error =
+                    verify_shim_artifact(world, target.name(), plugin, marketplace, handlers)
+                        .err()
+                        .map(|error| format!("{error:#}"));
+                observations.push(ShimInstallationObservation {
+                    substitution: ShimSubstitution {
+                        target_host: target.name().to_string(),
+                        plugin: plugin.clone(),
+                        marketplace: marketplace.clone(),
+                        shim_plugin,
+                    },
+                    artifact_error,
                 });
             }
         }
     }
-    substitutions.into_iter().collect()
+    observations
+}
+
+/// The observable handlers for one original plugin, preferring a source host
+/// other than the target whose shim is being checked. This mirrors generation:
+/// a shim on Codex is built from the Claude-side source, including that
+/// source's `${CLAUDE_PLUGIN_ROOT}`, rather than from Codex's installed copy.
+fn source_handlers(
+    world: &World,
+    target_name: &str,
+    plugin: &str,
+    marketplace: &str,
+) -> Option<Vec<crate::core::model::HookHandler>> {
+    for prefer_other_host in [true, false] {
+        for (host, snapshot) in world.detected() {
+            if (host.name() != target_name) != prefer_other_host {
+                continue;
+            }
+            let handlers: Vec<_> = snapshot
+                .hooks
+                .values()
+                .filter(|handler| {
+                    split_source(&handler.id.source).is_some_and(|origin| {
+                        origin == (plugin.to_string(), marketplace.to_string())
+                    })
+                })
+                .cloned()
+                .collect();
+            if !handlers.is_empty() {
+                return Some(handlers);
+            }
+        }
+    }
+    None
+}
+
+/// Build the one authoritative generation contract used both when planning a
+/// shim and when deciding whether an installed artifact may substitute for the
+/// original.
+fn shim_input(
+    world: &World,
+    target_name: &str,
+    plugin: &str,
+    marketplace: &str,
+    handlers: Vec<crate::core::model::HookHandler>,
+) -> anyhow::Result<crate::shim::generate::ShimInput> {
+    let target = world.host(target_name).context("target host is unknown")?;
+    let declared = target
+        .descriptor
+        .hooks
+        .as_ref()
+        .context("target declares no [hooks] section")?;
+    let effective = world.manifest.hooks_for(target_name, declared);
+    let shim = effective
+        .shim
+        .as_ref()
+        .context("target declares no [hooks.shim] marketplace")?;
+    let marketplace_dir = crate::paths::expand(&shim.marketplace);
+    let vendor = handlers
+        .first()
+        .and_then(|handler| handler.plugin_root.as_ref())
+        .map(|root| {
+            ["skills", "commands", "agents"]
+                .iter()
+                .map(|directory| root.join(directory))
+                .filter(|directory| directory.is_dir())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(crate::shim::generate::ShimInput {
+        marketplace_dir,
+        plugin: plugin.to_string(),
+        marketplace: marketplace.to_string(),
+        handlers,
+        allowed_output: effective
+            .output
+            .iter()
+            .map(|field| field.json_key().to_string())
+            .collect(),
+        fold_into_system_message: vec!["rewakeMessage".to_string()],
+        output_strategy: shim.output_strategy,
+        target_caps: effective.caps,
+        agentsync_bin: std::env::current_exe()
+            .context("cannot find the agentsync binary to invoke from the shim")?,
+        vendor,
+    })
+}
+
+fn verify_shim_artifact(
+    world: &World,
+    target_name: &str,
+    plugin: &str,
+    marketplace: &str,
+    handlers: Vec<crate::core::model::HookHandler>,
+) -> anyhow::Result<()> {
+    let input = shim_input(world, target_name, plugin, marketplace, handlers)?;
+    let registered = world
+        .snapshot(target_name)
+        .and_then(|snapshot| {
+            snapshot
+                .marketplaces
+                .get(crate::shim::generate::MARKETPLACE_NAME)
+        })
+        .context("the generated shim marketplace is not registered")?;
+    match registered {
+        crate::core::model::MarketplaceSource::Directory(path)
+            if std::path::Path::new(path) == input.marketplace_dir => {}
+        _ => anyhow::bail!(
+            "the generated shim marketplace is not registered from {}",
+            input.marketplace_dir.display()
+        ),
+    }
+    if target_name == "codex"
+        && input.output_strategy != crate::core::model::HookOutputStrategy::CodexV1
+    {
+        anyhow::bail!("the Codex shim does not use the codex_v1 output strategy");
+    }
+    crate::shim::generate::plan_shim(&input)?.verify_on_disk()
 }
 
 /// How the shim emulates a capability the target lacks.
@@ -407,16 +558,6 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
         .snapshot(source_name)
         .context("source host is not detected")?;
     let target = world.host(target_name).context("target host is unknown")?;
-    let declared = target
-        .descriptor
-        .hooks
-        .as_ref()
-        .context("target declares no [hooks] section")?;
-    let effective = world.manifest.hooks_for(target_name, declared);
-    let shim = effective
-        .shim
-        .as_ref()
-        .context("target declares no [hooks.shim] marketplace")?;
 
     // The row records the handler's own full source (not its `short()` name),
     // because two same-named plugins from different marketplaces collapse to
@@ -427,7 +568,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
         .marketplace
         .clone()
         .context("row does not record which plugin the hook came from")?;
-    let handler = source
+    source
         .hooks
         .values()
         .find(|h| h.id.source == origin)
@@ -435,8 +576,18 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
 
     let (plugin, marketplace) =
         split_source(&origin).context("only plugin hooks can be shimmed today")?;
-    let marketplace_dir = crate::paths::expand(&shim.marketplace);
     let shim_plugin = crate::shim::generate::shim_plugin_name(&marketplace, &plugin);
+
+    // Every handler from the same source plugin travels together: the shim
+    // replaces the original wholesale, so a partial shim would drop the rest.
+    let handlers: Vec<_> = source
+        .hooks
+        .values()
+        .filter(|h| h.id.source == origin)
+        .cloned()
+        .collect();
+    let input = shim_input(world, target_name, &plugin, &marketplace, handlers)?;
+    let marketplace_dir = input.marketplace_dir.clone();
 
     // A plugin with two shimmable handlers (for example a PreToolUse and a
     // PostToolUse handler) produces two rows, since `rows()` emits one row per
@@ -447,47 +598,6 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
     if shim_plugin_names(&marketplace_dir, &plan.steps).any(|p| p == shim_plugin) {
         return Ok(());
     }
-
-    // Every handler from the same source plugin travels together: the shim
-    // replaces the original wholesale, so a partial shim would drop the rest.
-    let handlers: Vec<_> = source
-        .hooks
-        .values()
-        .filter(|h| h.id.source == origin)
-        .cloned()
-        .collect();
-
-    let input = crate::shim::generate::ShimInput {
-        marketplace_dir: marketplace_dir.clone(),
-        plugin: plugin.clone(),
-        marketplace: marketplace.clone(),
-        handlers,
-        allowed_output: effective
-            .output
-            .iter()
-            .map(|f| f.json_key().to_string())
-            .collect(),
-        fold_into_system_message: vec!["rewakeMessage".to_string()],
-        output_strategy: shim.output_strategy,
-        target_caps: effective.caps.clone(),
-        agentsync_bin: std::env::current_exe()
-            .context("cannot find the agentsync binary to invoke from the shim")?,
-        // The shim supersedes the original, so its other content has to travel
-        // with it. Only directories that actually exist are linked, which is a
-        // filesystem question and therefore answered here, not in the pure
-        // generator.
-        vendor: handler
-            .plugin_root
-            .as_ref()
-            .map(|root| {
-                ["skills", "commands", "agents"]
-                    .iter()
-                    .map(|d| root.join(d))
-                    .filter(|d| d.is_dir())
-                    .collect()
-            })
-            .unwrap_or_default(),
-    };
     let generated = crate::shim::generate::plan_shim(&input)?;
 
     // The guard that ties every step of this shim's install together. If the

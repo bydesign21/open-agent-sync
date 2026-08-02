@@ -1152,7 +1152,58 @@ fn hook_rows(rows: &[Row]) -> Vec<&Row> {
     rows.iter().filter(|r| r.domain == Domain::Hooks).collect()
 }
 
-fn shim_substitution_world(original_on_codex: bool, internal_manifest_entries: bool) -> World {
+fn write_fs_op(op: agentsync::core::plan::FsOp) {
+    match op {
+        agentsync::core::plan::FsOp::WriteFile { path, contents } => {
+            std::fs::create_dir_all(path.parent().expect("generated file parent")).unwrap();
+            std::fs::write(path, contents).unwrap();
+        }
+        other => panic!("the substitution fixture has no vendored links: {other:?}"),
+    }
+}
+
+fn materialize_valid_shim(world: &World, marketplace_dir: &std::path::Path) {
+    let source = world.snapshot("claude").expect("claude snapshot");
+    let target = world.host("codex").expect("codex host");
+    let declared = target.descriptor.hooks.as_ref().expect("codex hooks");
+    let effective = world.manifest.hooks_for("codex", declared);
+    let shim = effective.shim.as_ref().expect("codex shim config");
+    let handlers: Vec<_> = source.hooks.values().cloned().collect();
+    let input = agentsync::shim::generate::ShimInput {
+        marketplace_dir: marketplace_dir.to_path_buf(),
+        plugin: "security-guidance".into(),
+        marketplace: "claude-plugins-official".into(),
+        handlers,
+        allowed_output: effective
+            .output
+            .iter()
+            .map(|field| field.json_key().to_string())
+            .collect(),
+        fold_into_system_message: vec!["rewakeMessage".into()],
+        output_strategy: shim.output_strategy,
+        agentsync_bin: std::env::current_exe().expect("test binary path"),
+        target_caps: effective.caps,
+        vendor: vec![],
+    };
+    let generated = agentsync::shim::generate::plan_shim(&input).unwrap();
+    let shim_plugin = generated.shim_plugin.clone();
+    for op in generated.ops {
+        write_fs_op(op);
+    }
+    write_fs_op(
+        agentsync::shim::generate::marketplace_manifest_op(
+            marketplace_dir,
+            std::slice::from_ref(&shim_plugin),
+        )
+        .unwrap(),
+    );
+}
+
+fn shim_substitution_world(
+    marketplace_dir: &std::path::Path,
+    original_on_codex: bool,
+    internal_manifest_entries: bool,
+) -> World {
     let plugin = "security-guidance";
     let marketplace = "claude-plugins-official";
     let shim = agentsync::shim::generate::shim_plugin_name(marketplace, plugin);
@@ -1186,7 +1237,7 @@ fn shim_substitution_world(original_on_codex: bool, internal_manifest_entries: b
     codex.marketplaces.insert(
         "agentsync-shims".into(),
         agentsync::core::model::MarketplaceSource::Directory(
-            "/tmp/agentsync-test/shims/codex".into(),
+            marketplace_dir.to_string_lossy().into_owned(),
         ),
     );
 
@@ -1197,7 +1248,7 @@ fn shim_substitution_world(original_on_codex: bool, internal_manifest_entries: b
         manifest.marketplaces.insert(
             "agentsync-shims".into(),
             agentsync::manifest::MarketplaceEntry {
-                directory: Some("/tmp/agentsync-test/shims/codex".into()),
+                directory: Some(marketplace_dir.to_string_lossy().into_owned()),
                 github: None,
                 url: None,
                 hosts: None,
@@ -1205,19 +1256,32 @@ fn shim_substitution_world(original_on_codex: bool, internal_manifest_entries: b
         );
     }
 
-    World {
+    let mut codex_host = host("codex");
+    codex_host
+        .descriptor
+        .hooks
+        .as_mut()
+        .expect("codex hooks")
+        .shim
+        .as_mut()
+        .expect("codex shim config")
+        .marketplace = marketplace_dir.to_string_lossy().into_owned();
+    let world = World {
         manifest,
         manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
-        hosts: vec![host("claude"), host("codex")],
+        hosts: vec![host("claude"), codex_host],
         snapshots: vec![claude, codex],
         repos: vec!["/repos/one".to_string()],
         warnings: Vec::new(),
-    }
+    };
+    materialize_valid_shim(&world, marketplace_dir);
+    world
 }
 
 #[test]
 fn shim_substitution_satisfies_the_original_plugin_on_its_target_host() {
-    let world = shim_substitution_world(false, false);
+    let dir = tempfile::tempdir().unwrap();
+    let world = shim_substitution_world(dir.path(), false, false);
     let rows = world.rows();
     let original = plugin_row(&rows, "security-guidance");
 
@@ -1231,7 +1295,8 @@ fn shim_substitution_satisfies_the_original_plugin_on_its_target_host() {
 
 #[test]
 fn shim_substitution_removes_an_original_that_is_still_installed() {
-    let world = shim_substitution_world(true, false);
+    let dir = tempfile::tempdir().unwrap();
+    let world = shim_substitution_world(dir.path(), true, false);
     let plan = world.plan(&[]);
 
     assert!(
@@ -1251,7 +1316,8 @@ fn shim_substitution_removes_an_original_that_is_still_installed() {
 
 #[test]
 fn shim_substitution_keeps_a_same_named_plugin_from_another_marketplace() {
-    let mut world = shim_substitution_world(true, false);
+    let dir = tempfile::tempdir().unwrap();
+    let mut world = shim_substitution_world(dir.path(), true, false);
     world.snapshots[1]
         .plugins
         .get_mut("security-guidance")
@@ -1277,7 +1343,8 @@ fn shim_substitution_keeps_a_same_named_plugin_from_another_marketplace() {
 
 #[test]
 fn shim_substitution_cleans_internal_entries_out_of_the_manifest() {
-    let world = shim_substitution_world(false, true);
+    let dir = tempfile::tempdir().unwrap();
+    let world = shim_substitution_world(dir.path(), false, true);
     let shim =
         agentsync::shim::generate::shim_plugin_name("claude-plugins-official", "security-guidance");
     let plan = world.plan(&[]);
@@ -1360,7 +1427,8 @@ fn shim_substitution_sweeps_stale_internal_manifest_entries_without_runtime_stat
 
 #[test]
 fn shim_substitution_internal_state_never_becomes_an_adoption_row() {
-    let world = shim_substitution_world(false, false);
+    let dir = tempfile::tempdir().unwrap();
+    let world = shim_substitution_world(dir.path(), false, false);
     let rows = world.rows();
 
     assert!(
@@ -1375,6 +1443,123 @@ fn shim_substitution_internal_state_never_becomes_an_adoption_row() {
             .map(|row| (&row.name, &row.headline))
             .collect::<Vec<_>>()
     );
+}
+
+fn assert_invalid_shim_plans_guarded_regeneration(world: World) {
+    assert!(
+        agentsync::domains::hooks::shim_substitutions(&world).is_empty(),
+        "a broken artifact must not satisfy the source plugin"
+    );
+
+    let cleanup = world.plan(&[]);
+    assert!(
+        !cleanup.steps.iter().any(|step| matches!(&step.step,
+            Step::Host { host, argv, .. }
+                if host == "codex"
+                    && argv.iter().any(|arg| arg == "remove" || arg == "uninstall")
+                    && argv.iter().any(|arg| arg.contains("security-guidance"))
+        )),
+        "an invalid shim must not remove the working original: {:?}",
+        cleanup
+            .steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+
+    let mut rows = world.rows();
+    let row = rows
+        .iter_mut()
+        .find(|row| row.domain == Domain::Hooks && row.actionable())
+        .expect("the broken shim must plan regeneration under the existing hook gap");
+    row.accepted = true;
+    let plan = world.plan(&rows);
+    let install = plan
+        .steps
+        .iter()
+        .find(|step| {
+            matches!(&step.step,
+                Step::Host { argv, .. }
+                    if !argv.iter().any(|arg| arg == "marketplace")
+                        && argv.iter().any(|arg| arg.starts_with("agentsync-shim-"))
+            )
+        })
+        .expect("regeneration must reinstall the shim");
+    let remove = plan
+        .steps
+        .iter()
+        .find(|step| {
+            matches!(&step.step,
+                Step::Host { argv, .. }
+                    if argv.iter().any(|arg| arg == "remove" || arg == "uninstall")
+            )
+        })
+        .expect("the original is removed only after regeneration succeeds");
+    assert!(install.guard.is_some());
+    assert_eq!(
+        install.guard, remove.guard,
+        "install and removal must share the guard"
+    );
+}
+
+#[test]
+fn a_shim_registered_from_the_wrong_host_path_does_not_substitute() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut world = shim_substitution_world(dir.path(), true, false);
+    world.snapshots[1].marketplaces.insert(
+        "agentsync-shims".into(),
+        agentsync::core::model::MarketplaceSource::Directory(
+            dir.path()
+                .join("wrong-host-path")
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    );
+
+    assert_invalid_shim_plans_guarded_regeneration(world);
+}
+
+#[test]
+fn a_shim_with_changed_handler_content_does_not_substitute() {
+    let dir = tempfile::tempdir().unwrap();
+    let world = shim_substitution_world(dir.path(), true, false);
+    let sidecar = dir.path().join(
+        "agentsync-shim-claude-plugins-official-security-guidance/specs/pre_tool_use-0-0.json",
+    );
+    let changed = std::fs::read_to_string(&sidecar)
+        .unwrap()
+        .replace("echo hi", "echo stale review");
+    std::fs::write(sidecar, changed).unwrap();
+
+    assert_invalid_shim_plans_guarded_regeneration(world);
+}
+
+#[test]
+fn a_shim_missing_a_required_sidecar_does_not_substitute() {
+    let dir = tempfile::tempdir().unwrap();
+    let world = shim_substitution_world(dir.path(), true, false);
+    std::fs::remove_file(dir.path().join(
+        "agentsync-shim-claude-plugins-official-security-guidance/specs/pre_tool_use-0-0.json",
+    ))
+    .unwrap();
+
+    assert_invalid_shim_plans_guarded_regeneration(world);
+}
+
+#[test]
+fn a_shim_recording_a_stale_agentsync_binary_does_not_substitute() {
+    let dir = tempfile::tempdir().unwrap();
+    let world = shim_substitution_world(dir.path(), true, false);
+    let hooks = dir
+        .path()
+        .join("agentsync-shim-claude-plugins-official-security-guidance/hooks/hooks.json");
+    let current = std::env::current_exe().unwrap();
+    let stale = std::fs::read_to_string(&hooks)
+        .unwrap()
+        .replace(&current.to_string_lossy().into_owned(), "/stale/agentsync");
+    std::fs::write(hooks, stale).unwrap();
+
+    assert_invalid_shim_plans_guarded_regeneration(world);
 }
 
 #[test]
