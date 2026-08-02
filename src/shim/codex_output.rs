@@ -39,6 +39,9 @@ fn select_response(stdout: &str) -> Result<Option<Map<String, Value>>> {
     for line in &lines {
         match serde_json::from_str::<Value>(line) {
             Ok(value) => records.push(as_object(value)?),
+            Err(error) if line.trim_start().starts_with('{') => {
+                bail!("malformed JSON hook output: {error}")
+            }
             Err(_) => plain += 1,
         }
     }
@@ -256,6 +259,29 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(error.contains("mixed"), "got {error}");
+    }
+
+    #[test]
+    fn malformed_json_is_rejected_instead_of_becoming_a_system_message() {
+        // A missing closing brace is a broken response record, not human text.
+        let error = super::translate(r#"{"systemMessage":"unterminated"#, "SessionStart", &spec())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("JSON"), "got {error}");
+    }
+
+    #[test]
+    fn nested_fields_are_rejected_when_the_discriminator_matches_the_wrong_event() {
+        // Keep `hookEventName` correct so this reaches the event-specific
+        // nested field validation instead of failing only at the discriminator.
+        let error = super::translate(
+            r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","permissionDecision":"deny"}}"#,
+            "SessionStart",
+            &spec(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("permissionDecision"), "got {error}");
     }
 
     #[test]
