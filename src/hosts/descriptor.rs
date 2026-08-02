@@ -19,7 +19,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::core::model::{Cap, HookCap, HookOutputField, ScopeKind};
+use crate::core::model::{Cap, HookCap, HookOutputField, HookOutputStrategy, ScopeKind};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostDescriptor {
@@ -254,6 +254,9 @@ pub struct HookSource {
 pub struct HooksShim {
     /// Directory agentsync owns and registers as a local marketplace.
     pub marketplace: String,
+    /// The stdout contract the generated shim must emit for this target.
+    #[serde(default)]
+    pub output_strategy: HookOutputStrategy,
 }
 
 /// What a host's hook engine can represent.

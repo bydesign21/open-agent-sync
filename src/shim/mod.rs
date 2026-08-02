@@ -7,6 +7,7 @@
 //! agentsync binary, so a fix to a strategy ships with the binary instead of
 //! requiring every generated shim to be rewritten.
 
+pub mod codex_output;
 pub mod generate;
 pub mod matcher;
 pub mod output;
@@ -16,6 +17,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+
+use crate::core::model::HookOutputStrategy;
 
 /// What one generated shim handler needs to stand in for the original.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,6 +38,14 @@ pub struct ShimSpec {
     /// exits without running the command when it does not match.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub if_pattern: Option<String>,
+    /// The source event. Codex validates stdout differently per event, so this
+    /// belongs in the sidecar rather than being inferred from its file name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// The target's stdout contract. Missing means an old sidecar and keeps
+    /// the original legacy normalisation behaviour.
+    #[serde(default)]
+    pub output_strategy: HookOutputStrategy,
     /// Top-level stdout keys the target accepts. Anything else is dropped.
     pub allowed_output: Vec<String>,
     /// Keys whose value carries text meant for a person. When the target does
@@ -78,6 +89,8 @@ mod tests {
             command: "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/review.sh\"".into(),
             plugin_root: Some("/cache/claude-plugins-official/security-guidance/2.0.6".into()),
             if_pattern: Some("Bash(git commit:*)".into()),
+            event: Some("PostToolUse".into()),
+            output_strategy: HookOutputStrategy::Legacy,
             allowed_output: vec!["systemMessage".into(), "additionalContext".into()],
             fold_into_system_message: vec!["rewakeMessage".into()],
             rewake_message: Some("findings follow".into()),

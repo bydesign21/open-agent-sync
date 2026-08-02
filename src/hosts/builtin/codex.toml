@@ -113,3 +113,4 @@ output = ["hook_specific_output", "system_message", "additional_context",
 # marketplace agentsync owns, via `codex plugin marketplace add`.
 [hooks.shim]
 marketplace = "~/.agentsync/shims/codex"
+output_strategy = "codex_v1"

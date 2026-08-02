@@ -147,8 +147,25 @@ pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
         }
     };
 
+    let stdout = match output::normalize(&String::from_utf8_lossy(&done.stdout), spec) {
+        Ok(stdout) => stdout,
+        Err(error) => {
+            stderr.push_str(&format!(
+                "agentsync: translating hook output for {} failed: {error}\n",
+                spec.source_id
+            ));
+            return Outcome {
+                stdout: String::new(),
+                stderr,
+                // A command failure carries more diagnostic value than the
+                // translation failure it also happened to produce.
+                code: if code == 0 { 1 } else { code },
+            };
+        }
+    };
+
     Outcome {
-        stdout: output::normalize(&String::from_utf8_lossy(&done.stdout), spec),
+        stdout,
         stderr,
         code,
     }
@@ -190,6 +207,8 @@ mod tests {
             command: command.into(),
             plugin_root: None,
             if_pattern: if_pattern.map(str::to_string),
+            event: None,
+            output_strategy: crate::core::model::HookOutputStrategy::Legacy,
             allowed_output: vec!["systemMessage".into()],
             fold_into_system_message: vec![],
             rewake_message: None,
@@ -327,5 +346,40 @@ mod tests {
         let out = execute(&spec("kill -9 $$", None), &input("Bash", "x"));
         assert_ne!(out.code, 0, "got {out:?}");
         assert!(out.stderr.contains("signal"), "got {out:?}");
+    }
+
+    #[test]
+    fn invalid_codex_output_fails_loudly_with_the_source_id() {
+        // A future change that prints invalid JSON to stdout or converts this
+        // to success would make a broken security hook look healthy.
+        let mut s = spec("echo '{\"additionalContext\":\"wrong level\"}'", None);
+        s.event = Some("SessionStart".into());
+        s.output_strategy = crate::core::model::HookOutputStrategy::CodexV1;
+        let out = execute(&s, &input("Bash", "x"));
+        assert_eq!(
+            out.code, 1,
+            "translation errors must fail the hook: {out:?}"
+        );
+        assert_eq!(
+            out.stdout, "",
+            "invalid output must not reach Codex: {out:?}"
+        );
+        assert!(out.stderr.contains(&s.source_id), "got {out:?}");
+        assert!(out.stderr.contains("additionalContext"), "got {out:?}");
+    }
+
+    #[test]
+    fn command_failure_keeps_its_nonzero_exit_code_when_translation_also_fails() {
+        let mut s = spec(
+            "printf '{\"additionalContext\":\"wrong level\"}'; exit 3",
+            None,
+        );
+        s.event = Some("SessionStart".into());
+        s.output_strategy = crate::core::model::HookOutputStrategy::CodexV1;
+        let out = execute(&s, &input("Bash", "x"));
+        assert_eq!(
+            out.code, 3,
+            "the hook command's failure code must survive: {out:?}"
+        );
     }
 }

@@ -355,6 +355,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
             .map(|f| f.json_key().to_string())
             .collect(),
         fold_into_system_message: vec!["rewakeMessage".to_string()],
+        output_strategy: shim.output_strategy,
         target_caps: effective.caps.clone(),
         agentsync_bin: std::env::current_exe()
             .context("cannot find the agentsync binary to invoke from the shim")?,

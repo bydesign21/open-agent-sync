@@ -184,6 +184,18 @@ pub enum HookOutputField {
     RewakeSummary,
 }
 
+/// How a shim serializes hook stdout for its target host.
+///
+/// Old sidecars predate host-specific output contracts, so their missing
+/// strategy remains the behaviour they were generated with: [`Legacy`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookOutputStrategy {
+    #[default]
+    Legacy,
+    CodexV1,
+}
+
 impl HookOutputField {
     /// The literal JSON key, which is camelCase on the wire.
     pub fn json_key(self) -> &'static str {

@@ -4,8 +4,10 @@
 //! Text moves into `systemMessage` where the target accepts one, and where it
 //! does not, the drop is still named rather than performed quietly.
 
+use anyhow::{Context, Result};
 use serde_json::{Map, Value};
 
+use crate::core::model::HookOutputStrategy;
 use crate::shim::ShimSpec;
 
 const SYSTEM_MESSAGE: &str = "systemMessage";
@@ -15,7 +17,22 @@ const SYSTEM_MESSAGE: &str = "systemMessage";
 /// Output that is not a JSON object passes through unchanged. A hook is free to
 /// print plain text, and inventing a JSON envelope around it would be a claim
 /// the hook never made.
-pub fn normalize(stdout: &str, spec: &ShimSpec) -> String {
+pub fn normalize(stdout: &str, spec: &ShimSpec) -> Result<String> {
+    match spec.output_strategy {
+        HookOutputStrategy::Legacy => Ok(normalize_legacy(stdout, spec)),
+        HookOutputStrategy::CodexV1 => {
+            let event = spec
+                .event
+                .as_deref()
+                .context("Codex shim sidecar is missing its event")?;
+            crate::shim::codex_output::translate(stdout, event, spec)
+        }
+    }
+}
+
+/// Preserve the original output-filtering semantics for old sidecars and for
+/// the already schema-validated object emitted by the Codex translator.
+pub(super) fn normalize_legacy(stdout: &str, spec: &ShimSpec) -> String {
     let Ok(Value::Object(original)) = serde_json::from_str::<Value>(stdout) else {
         return stdout.to_string();
     };
@@ -91,6 +108,8 @@ mod tests {
             command: "true".into(),
             plugin_root: None,
             if_pattern: None,
+            event: None,
+            output_strategy: HookOutputStrategy::Legacy,
             allowed_output: allowed.iter().map(|s| s.to_string()).collect(),
             fold_into_system_message: fold.iter().map(|s| s.to_string()).collect(),
             rewake_message: None,
@@ -107,7 +126,8 @@ mod tests {
         let out = normalize(
             r#"{"systemMessage":"keep me","rewakeSummary":"drop me"}"#,
             &spec(&["systemMessage"], &[]),
-        );
+        )
+        .unwrap();
         let v = parse(&out);
         assert!(v.get("rewakeSummary").is_none(), "the key must not survive");
         let msg = v["systemMessage"].as_str().unwrap();
@@ -123,7 +143,8 @@ mod tests {
         let out = normalize(
             r#"{"rewakeMessage":"security findings follow"}"#,
             &spec(&["systemMessage"], &["rewakeMessage"]),
-        );
+        )
+        .unwrap();
         let v = parse(&out);
         assert!(
             v["systemMessage"]
@@ -139,7 +160,8 @@ mod tests {
         let out = normalize(
             r#"{"systemMessage":"first","rewakeMessage":"second"}"#,
             &spec(&["systemMessage"], &["rewakeMessage"]),
-        );
+        )
+        .unwrap();
         let msg = parse(&out)["systemMessage"].as_str().unwrap().to_string();
         assert!(msg.contains("first"), "existing text lost: {msg}");
         assert!(msg.contains("second"), "folded text lost: {msg}");
@@ -150,7 +172,8 @@ mod tests {
         let out = normalize(
             r#"{"systemMessage":"hi","metrics":{"n":1}}"#,
             &spec(&["systemMessage"], &[]),
-        );
+        )
+        .unwrap();
         let msg = parse(&out)["systemMessage"].as_str().unwrap().to_string();
         assert!(msg.contains("metrics"), "suppression must be named: {msg}");
     }
@@ -162,7 +185,8 @@ mod tests {
         let out = normalize(
             r#"{"systemMessage":"hi","metrics":1}"#,
             &spec(&["additionalContext"], &[]),
-        );
+        )
+        .unwrap();
         let v = parse(&out);
         assert!(v.get("systemMessage").is_none());
         assert!(v.get("metrics").is_none());
@@ -172,7 +196,7 @@ mod tests {
     fn a_configured_rewake_message_is_folded_into_system_message_when_the_hook_has_output() {
         let mut s = spec(&["systemMessage"], &[]);
         s.rewake_message = Some("a rewake would have followed up here".into());
-        let out = normalize(r#"{"systemMessage":"ran clean"}"#, &s);
+        let out = normalize(r#"{"systemMessage":"ran clean"}"#, &s).unwrap();
         let v = parse(&out);
         let msg = v["systemMessage"].as_str().unwrap();
         assert!(
@@ -192,7 +216,7 @@ mod tests {
         // for a hook that had none.
         let mut s = spec(&["systemMessage"], &[]);
         s.rewake_message = Some("should not appear".into());
-        let out = normalize("{}", &s);
+        let out = normalize("{}", &s).unwrap();
         let v = parse(&out);
         assert!(
             v.get("systemMessage").is_none(),
@@ -205,7 +229,7 @@ mod tests {
         let mut s = spec(&["systemMessage"], &[]);
         s.rewake_message = Some("message text".into());
         s.rewake_summary = Some("summary text".into());
-        let out = normalize(r#"{"systemMessage":"ran"}"#, &s);
+        let out = normalize(r#"{"systemMessage":"ran"}"#, &s).unwrap();
         let msg = parse(&out)["systemMessage"].as_str().unwrap().to_string();
         assert!(msg.contains("message text"), "got {msg}");
         assert!(msg.contains("summary text"), "got {msg}");
@@ -215,16 +239,35 @@ mod tests {
     fn non_json_output_passes_through_untouched() {
         // Never wrap plain text in a fabricated JSON envelope.
         let text = "plain text warning\n";
-        assert_eq!(normalize(text, &spec(&["systemMessage"], &[])), text);
+        assert_eq!(
+            normalize(text, &spec(&["systemMessage"], &[])).unwrap(),
+            text
+        );
     }
 
     #[test]
     fn empty_output_stays_empty() {
-        assert_eq!(normalize("", &spec(&["systemMessage"], &[])), "");
+        assert_eq!(normalize("", &spec(&["systemMessage"], &[])).unwrap(), "");
     }
 
     #[test]
     fn json_that_is_not_an_object_passes_through_untouched() {
-        assert_eq!(normalize("[1,2]", &spec(&["systemMessage"], &[])), "[1,2]");
+        assert_eq!(
+            normalize("[1,2]", &spec(&["systemMessage"], &[])).unwrap(),
+            "[1,2]"
+        );
+    }
+
+    #[test]
+    fn codex_v1_uses_the_event_aware_translator() {
+        // A regression to the legacy path would leave this as bare text,
+        // which Codex cannot unambiguously treat as hook output.
+        let mut s = spec(&["systemMessage"], &[]);
+        s.event = Some("SessionStart".into());
+        s.output_strategy = crate::core::model::HookOutputStrategy::CodexV1;
+        assert_eq!(
+            normalize("security guidance", &s).unwrap(),
+            r#"{"systemMessage":"security guidance"}"#
+        );
     }
 }

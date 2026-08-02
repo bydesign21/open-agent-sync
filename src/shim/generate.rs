@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
-use crate::core::model::{HookCap, HookHandler, event_key};
+use crate::core::model::{HookCap, HookHandler, HookOutputStrategy, event_key};
 use crate::core::plan::FsOp;
 use crate::shim::ShimSpec;
 
@@ -30,6 +30,8 @@ pub struct ShimInput {
     pub allowed_output: Vec<String>,
     /// Keys whose human-readable text moves into `systemMessage`.
     pub fold_into_system_message: Vec<String>,
+    /// The target host's event-aware output contract.
+    pub output_strategy: HookOutputStrategy,
     /// Absolute path of the agentsync binary the generated commands invoke.
     pub agentsync_bin: PathBuf,
     /// The target host's declared hook capabilities. A handler config field is
@@ -88,6 +90,8 @@ pub fn plan_shim(input: &ShimInput) -> Result<Generated> {
             command: handler.command.clone(),
             plugin_root: handler.plugin_root.clone(),
             if_pattern: handler.if_pattern.clone(),
+            event: Some(handler.event.clone()),
+            output_strategy: input.output_strategy,
             allowed_output: input.allowed_output.clone(),
             fold_into_system_message: input.fold_into_system_message.clone(),
             // Only carried into the spec (and folded into `systemMessage` at
@@ -263,6 +267,7 @@ mod tests {
             handlers,
             allowed_output: vec!["systemMessage".into()],
             fold_into_system_message: vec!["rewakeMessage".into()],
+            output_strategy: HookOutputStrategy::Legacy,
             agentsync_bin: "/usr/local/bin/agentsync".into(),
             vendor: vec![],
             target_caps: vec![crate::core::model::HookCap::AsyncRewake],
@@ -579,5 +584,21 @@ mod tests {
         let spec: crate::shim::ShimSpec =
             serde_json::from_str(&written(&g.ops, "post_tool_use-1-0.json")).unwrap();
         assert!(spec.plugin_root.is_none());
+    }
+
+    #[test]
+    fn sidecars_record_the_handler_event_and_the_target_output_strategy() {
+        // Losing either value falls back to legacy, event-blind output at
+        // runtime, where Codex accepts malformed data without a clear error.
+        let mut i = input(vec![handler(0, None)]);
+        i.output_strategy = crate::core::model::HookOutputStrategy::CodexV1;
+        let g = plan_shim(&i).unwrap();
+        let spec: crate::shim::ShimSpec =
+            serde_json::from_str(&written(&g.ops, "post_tool_use-1-0.json")).unwrap();
+        assert_eq!(spec.event.as_deref(), Some("PostToolUse"));
+        assert_eq!(
+            spec.output_strategy,
+            crate::core::model::HookOutputStrategy::CodexV1
+        );
     }
 }
