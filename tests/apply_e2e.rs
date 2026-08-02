@@ -49,6 +49,13 @@ def without(name, text):
     return re.sub(r"\[mcp_servers\." + re.escape(name) + r"\][^\[]*", "", text)
 
 
+def without_plugin(name, text):
+    # Plugin keys are fully qualified as name@marketplace. The removal command
+    # may carry either that id or the bare name, so match the optional suffix.
+    pattern = r'\[plugins\."' + re.escape(name) + r'(?:@[^\"]+)?"\][^\[]*'
+    return re.sub(pattern, "", text)
+
+
 if argv[:2] == ["mcp", "add"]:
     name = argv[2]
     rest = argv[3:]
@@ -72,6 +79,19 @@ elif argv[:2] == ["mcp", "remove"]:
     text = without(argv[2], load())
     with open(CFG, "w") as fh:
         fh.write(text)
+elif argv[:3] == ["plugin", "marketplace", "add"]:
+    text = load() + '\n[marketplaces.agentsync-shims]\nsource = "' + argv[3] + '"\nsource_type = "local"\n'
+    with open(CFG, "w") as fh:
+        fh.write(text)
+elif argv[:2] == ["plugin", "add"]:
+    text = without_plugin(argv[2], load())
+    text += '\n[plugins."' + argv[2] + '"]\nenabled = true\n'
+    with open(CFG, "w") as fh:
+        fh.write(text)
+elif argv[:2] == ["plugin", "remove"]:
+    text = without_plugin(argv[2], load())
+    with open(CFG, "w") as fh:
+        fh.write(text)
 elif argv[:1] == ["touch"]:
     # Proof-of-execution for the guard test below: if this process ever
     # runs, the path named in argv[1] exists afterward.
@@ -90,7 +110,7 @@ fn write_exec(path: &Path, body: &str) {
 }
 
 #[test]
-fn the_plan_is_what_actually_runs() {
+fn shim_reconciliation_converges_after_two_full_passes() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
@@ -98,10 +118,26 @@ fn the_plan_is_what_actually_runs() {
     let bindir = root.join("bin");
     let hostcfg = root.join("fake-config.toml");
     let hostskills = root.join("fake-skills");
+    let shim_marketplace = home.join("shims/fakehost");
+    let plugin_catalog = home.join("catalog/marketplace.json");
+    let source_hook =
+        home.join("plugin-cache/claude-plugins-official/security-guidance/1.0.0/hooks/hooks.json");
     let log = root.join("calls.log");
     std::fs::create_dir_all(home.join("hosts")).unwrap();
     std::fs::create_dir_all(&bindir).unwrap();
     std::fs::create_dir_all(&hostskills).unwrap();
+    std::fs::create_dir_all(plugin_catalog.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(source_hook.parent().unwrap()).unwrap();
+    std::fs::write(
+        &plugin_catalog,
+        r#"{"name":"claude-plugins-official","plugins":[{"name":"security-guidance"}]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &source_hook,
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo review","if":"Bash(git commit:*)"}]}]}}"#,
+    )
+    .unwrap();
 
     // A host CLI that records how it was called *and* actually maintains its
     // config file. Recording alone would not prove convergence: a second run has
@@ -128,7 +164,8 @@ fn the_plan_is_what_actually_runs() {
     std::fs::write(
         &hostcfg,
         "[mcp_servers.obsolete]\ncommand = \"old-thing\"\n\n\
-         [mcp_servers.adoptme]\ncommand = \"keeper\"\nargs = [\"--serve\"]\n",
+         [mcp_servers.adoptme]\ncommand = \"keeper\"\nargs = [\"--serve\"]\n\n\
+         [plugins.\"security-guidance@claude-plugins-official\"]\nenabled = true\n",
     )
     .unwrap();
 
@@ -165,16 +202,62 @@ dirs = ["{skills}"]
             skills = hostskills.display(),
         )
     };
-    std::fs::write(
-        home.join("hosts/fakehost.toml"),
+    let fakehost_descriptor = format!(
+        r#"{}
+
+[plugins]
+
+[[plugins.read]]
+file = "{}"
+parser = "codex_plugins_toml_v1"
+
+[[plugins.catalog]]
+glob = "{}"
+parser = "marketplace_manifest_v1"
+
+[plugins.install]
+argv = ["plugin", "add", "{{id}}"]
+
+[plugins.remove]
+argv = ["plugin", "remove", "{{id}}"]
+
+[plugins.marketplace_add]
+argv = ["plugin", "marketplace", "add", "{{source}}"]
+
+[plugins.marketplace_remove]
+argv = ["plugin", "marketplace", "remove", "{{name}}"]
+
+[hooks]
+events = ["PreToolUse"]
+caps = ["matcher"]
+output = ["system_message"]
+
+[hooks.shim]
+marketplace = "{}"
+"#,
         descriptor("fakehost", "fakehost"),
-    )
-    .unwrap();
-    std::fs::write(
-        home.join("hosts/brokenhost.toml"),
+        hostcfg.display(),
+        plugin_catalog.display(),
+        shim_marketplace.display(),
+    );
+    std::fs::write(home.join("hosts/fakehost.toml"), fakehost_descriptor).unwrap();
+
+    let brokenhost_descriptor = format!(
+        r#"{}
+
+[hooks]
+events = ["PreToolUse"]
+caps = ["matcher", "if"]
+output = ["system_message"]
+
+[[hooks.read]]
+file = "{}"
+parser = "claude_hooks_json_v1"
+"#,
         descriptor("brokenhost", "brokenhost"),
-    )
-    .unwrap();
+        source_hook.display(),
+    );
+    std::fs::write(home.join("hosts/brokenhost.toml"), brokenhost_descriptor).unwrap();
 
     // Canonical skill content that should get linked into the host.
     let canonical = home.join("skills/my-skill");
@@ -197,6 +280,9 @@ hosts = ["fakehost"]
 
 [skills.my-skill]
 source = "skills/my-skill"
+hosts = ["fakehost"]
+
+[plugins.security-guidance]
 hosts = ["fakehost"]
 "#,
     )
@@ -247,7 +333,7 @@ hosts = ["fakehost"]
     assert_eq!(skill.headline, "missing from fakehost");
 
     // Accept: push `wanted`, adopt `adoptme`, delete `obsolete` everywhere,
-    // link `my-skill`.
+    // link `my-skill`, and replace the original security plugin with its shim.
     for row in rows.iter_mut() {
         match row.name.as_str() {
             "wanted" | "my-skill" | "adoptme" => row.accepted = true,
@@ -259,6 +345,7 @@ hosts = ["fakehost"]
                     .expect("a delete action");
                 row.accepted = true;
             }
+            _ if row.domain == Domain::Hooks && row.actionable() => row.accepted = true,
             _ => {}
         }
     }
@@ -278,6 +365,16 @@ hosts = ["fakehost"]
     assert!(
         calls.contains("mcp remove obsolete"),
         "the removal must have reached the CLI. log:\n{calls}"
+    );
+    let shim =
+        agentsync::shim::generate::shim_plugin_name("claude-plugins-official", "security-guidance");
+    assert!(
+        calls.contains(&format!("plugin add {shim}@agentsync-shims")),
+        "the shim install must have reached the CLI. log:\n{calls}"
+    );
+    assert!(
+        calls.contains("plugin remove security-guidance@claude-plugins-official"),
+        "the original removal must have reached the CLI. log:\n{calls}"
     );
 
     // ---- the filesystem side ----
@@ -334,7 +431,7 @@ hosts = ["fakehost"]
 
     // A second pass must converge: the things we just fixed stop being reported.
     let world2 = World::load(&manifest_path, &[]).unwrap();
-    let rows2 = world2.rows();
+    let mut rows2 = world2.rows();
     let still_open: Vec<String> = rows2
         .iter()
         .filter(|r| {
@@ -349,6 +446,44 @@ hosts = ["fakehost"]
     assert!(
         still_open.is_empty(),
         "a second run must not re-report work already done: {still_open:?}"
+    );
+
+    for row in rows2.iter_mut() {
+        if row.actionable() {
+            row.accepted = true;
+        }
+    }
+    let plan2 = world2.plan(&rows2);
+    let plugin_steps: Vec<_> = plan2
+        .steps
+        .iter()
+        .filter(|step| matches!(&step.step,
+            agentsync::core::plan::Step::Host { argv, .. }
+                if argv.iter().any(|arg| arg.contains("security-guidance") || arg == &shim)
+                    && argv.iter().any(|arg| {
+                        arg == "add" || arg == "install" || arg == "remove" || arg == "uninstall"
+                    })
+        ))
+        .map(|step| step.label.as_str())
+        .collect();
+    assert!(
+        plugin_steps.is_empty(),
+        "the second complete plan must not install or remove either copy: {plugin_steps:?}"
+    );
+
+    let mut manifest2 = world2.manifest.clone();
+    let report2 = apply::run(
+        &plan2,
+        &mut manifest2,
+        &manifest_path,
+        &world2.hosts,
+        |_| {},
+    );
+    assert_eq!(
+        report2.count(Outcome::Failed),
+        0,
+        "the converged second plan must apply cleanly: {:?}",
+        report2.results
     );
 
     // ---- a guarded step whose guard failed must never be spawned ----

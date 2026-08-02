@@ -59,6 +59,11 @@ pub struct Generated {
 /// The marketplace agentsync owns. Named so it cannot collide with a real one.
 pub const MARKETPLACE_NAME: &str = "agentsync-shims";
 
+/// Whether a marketplace is generated and owned by agentsync itself.
+pub fn is_internal_marketplace(name: &str) -> bool {
+    name == MARKETPLACE_NAME
+}
+
 /// The generated plugin's name. Keyed by marketplace as well as plugin name,
 /// so two plugins named the same from different marketplaces do not resolve
 /// to the same directory and overwrite each other's `hooks.json`.

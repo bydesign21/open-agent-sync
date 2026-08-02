@@ -156,6 +156,7 @@ impl World {
                 Domain::Hooks => hooks::plan_row(self, row, &mut plan),
             }
         }
+        hooks::plan_substitution_cleanup(self, &mut plan);
         plan.finalize();
         plan
     }

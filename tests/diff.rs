@@ -1152,6 +1152,153 @@ fn hook_rows(rows: &[Row]) -> Vec<&Row> {
     rows.iter().filter(|r| r.domain == Domain::Hooks).collect()
 }
 
+fn shim_substitution_world(original_on_codex: bool, internal_manifest_entries: bool) -> World {
+    let plugin = "security-guidance";
+    let marketplace = "claude-plugins-official";
+    let shim = agentsync::shim::generate::shim_plugin_name(marketplace, plugin);
+
+    let mut hook = HookHandler::new(
+        hook_id(
+            "security-guidance@claude-plugins-official:hooks/hooks.json",
+            "PreToolUse",
+        ),
+        "PreToolUse",
+        "echo hi",
+    );
+    hook.if_pattern = Some("Bash(git commit:*)".into());
+
+    let mut claude = hooks_snapshot("claude", vec![hook]);
+    with_plugins(
+        &mut claude,
+        &[(plugin, marketplace)],
+        &[(marketplace, &[plugin])],
+    );
+
+    let mut codex = hooks_snapshot("codex", vec![]);
+    with_plugins(
+        &mut codex,
+        &[(shim.as_str(), "agentsync-shims")],
+        &[(marketplace, &[plugin])],
+    );
+    if original_on_codex {
+        with_plugins(&mut codex, &[(plugin, marketplace)], &[]);
+    }
+    codex.marketplaces.insert(
+        "agentsync-shims".into(),
+        agentsync::core::model::MarketplaceSource::Directory(
+            "/tmp/agentsync-test/shims/codex".into(),
+        ),
+    );
+
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(plugin.into(), Default::default());
+    if internal_manifest_entries {
+        manifest.plugins.insert(shim, Default::default());
+        manifest.marketplaces.insert(
+            "agentsync-shims".into(),
+            agentsync::manifest::MarketplaceEntry {
+                directory: Some("/tmp/agentsync-test/shims/codex".into()),
+                github: None,
+                url: None,
+                hosts: None,
+            },
+        );
+    }
+
+    World {
+        manifest,
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![host("claude"), host("codex")],
+        snapshots: vec![claude, codex],
+        repos: vec!["/repos/one".to_string()],
+        warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn shim_substitution_satisfies_the_original_plugin_on_its_target_host() {
+    let world = shim_substitution_world(false, false);
+    let rows = world.rows();
+    let original = plugin_row(&rows, "security-guidance");
+
+    assert_eq!(
+        original.severity,
+        Severity::Synced,
+        "the installed shim must satisfy the original on codex: {}",
+        original.headline
+    );
+}
+
+#[test]
+fn shim_substitution_removes_an_original_that_is_still_installed() {
+    let world = shim_substitution_world(true, false);
+    let plan = world.plan(&[]);
+
+    assert!(
+        plan.steps.iter().any(|step| matches!(&step.step,
+            Step::Host { host, argv, .. }
+                if host == "codex"
+                    && argv.iter().any(|arg| arg == "remove" || arg == "uninstall")
+                    && argv.iter().any(|arg| arg.contains("security-guidance"))
+        )),
+        "finding both copies must remove the original: {:?}",
+        plan.steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shim_substitution_cleans_internal_entries_out_of_the_manifest() {
+    let world = shim_substitution_world(false, true);
+    let shim =
+        agentsync::shim::generate::shim_plugin_name("claude-plugins-official", "security-guidance");
+    let plan = world.plan(&[]);
+
+    assert!(
+        plan.steps.iter().any(|step| matches!(&step.step,
+            Step::Manifest(agentsync::core::plan::ManifestOp::RemovePlugin(name))
+                if name == &shim
+        )),
+        "the generated plugin is runtime state, not manifest state: {:?}",
+        plan.steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        plan.steps.iter().any(|step| matches!(&step.step,
+            Step::Manifest(agentsync::core::plan::ManifestOp::RemoveMarketplace(name))
+                if name == "agentsync-shims"
+        )),
+        "the generated marketplace is runtime state, not manifest state: {:?}",
+        plan.steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shim_substitution_internal_state_never_becomes_an_adoption_row() {
+    let world = shim_substitution_world(false, false);
+    let rows = world.rows();
+
+    assert!(
+        !rows.iter().any(|row| {
+            row.domain == Domain::Plugins
+                && (row.name.starts_with("agentsync-shim-")
+                    || row.name == "marketplace agentsync-shims")
+        }),
+        "internal shim state must stay out of ordinary plugin reconciliation: {:?}",
+        rows.iter()
+            .filter(|row| row.domain == Domain::Plugins)
+            .map(|row| (&row.name, &row.headline))
+            .collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn an_if_only_gap_from_claude_to_codex_is_a_single_normal_row() {
     // Codex declares `caps` without `if`, but does declare a shim target, so

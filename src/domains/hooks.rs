@@ -13,6 +13,55 @@ use crate::core::model::HookCap;
 use crate::core::plan::{FsOp, Plan, PlannedStep, Step};
 use crate::domains::World;
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct ShimSubstitution {
+    pub target_host: String,
+    pub plugin: String,
+    pub marketplace: String,
+    pub shim_plugin: String,
+}
+
+/// Installed shims that stand in for a desired original plugin.
+///
+/// The generated name is derived from the original hook identity. It is never
+/// parsed back into its components: marketplace and plugin names may both
+/// contain hyphens, so that reverse operation is ambiguous.
+pub fn shim_substitutions(world: &World) -> Vec<ShimSubstitution> {
+    let originals: std::collections::BTreeSet<(String, String)> = world
+        .detected_snapshots()
+        .flat_map(|snapshot| snapshot.hooks.values())
+        .filter_map(|handler| split_source(&handler.id.source))
+        .filter(|(plugin, marketplace)| {
+            !plugin.starts_with("agentsync-shim-")
+                && !crate::shim::generate::is_internal_marketplace(marketplace)
+                && world.manifest.plugins.get(plugin).is_some_and(|entry| {
+                    entry
+                        .marketplace
+                        .as_deref()
+                        .is_none_or(|pin| pin == marketplace)
+                })
+        })
+        .collect();
+
+    let mut substitutions = std::collections::BTreeSet::new();
+    for (target, snapshot) in world.detected() {
+        for (plugin, marketplace) in &originals {
+            let shim_plugin = crate::shim::generate::shim_plugin_name(marketplace, plugin);
+            if snapshot.plugins.get(&shim_plugin).is_some_and(|installed| {
+                crate::shim::generate::is_internal_marketplace(&installed.marketplace)
+            }) {
+                substitutions.insert(ShimSubstitution {
+                    target_host: target.name().to_string(),
+                    plugin: plugin.clone(),
+                    marketplace: marketplace.clone(),
+                    shim_plugin,
+                });
+            }
+        }
+    }
+    substitutions.into_iter().collect()
+}
+
 /// How the shim emulates a capability the target lacks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Strategy {
@@ -66,10 +115,23 @@ pub fn classify(missing: &[HookCap], target_can_shim: bool) -> Severity {
 
 pub fn rows(world: &World) -> Vec<Row> {
     let mut out = Vec::new();
+    let substitutions = shim_substitutions(world);
     for (source_host, source_snap) in world.detected() {
         for handler in source_snap.hooks.values() {
             for (target_host, _) in world.detected() {
                 if target_host.name() == source_host.name() {
+                    continue;
+                }
+                if split_source(&handler.id.source).is_some_and(|(plugin, marketplace)| {
+                    let shim_plugin =
+                        crate::shim::generate::shim_plugin_name(&marketplace, &plugin);
+                    substitutions.iter().any(|substitution| {
+                        substitution.target_host == target_host.name()
+                            && substitution.plugin == plugin
+                            && substitution.marketplace == marketplace
+                            && substitution.shim_plugin == shim_plugin
+                    })
+                }) {
                     continue;
                 }
                 let Some(declared) = &target_host.descriptor.hooks else {
@@ -284,6 +346,51 @@ pub fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
     }
 }
 
+/// Reconcile already-installed substitutions even when they need no decision
+/// row. Generated shims stay installed and their marketplace stays on disk;
+/// only a duplicate original and stale durable manifest entries are removed.
+pub(super) fn plan_substitution_cleanup(world: &World, plan: &mut Plan) {
+    for substitution in shim_substitutions(world) {
+        if world
+            .snapshot(&substitution.target_host)
+            .is_some_and(|snapshot| snapshot.plugins.contains_key(&substitution.plugin))
+            && let Some(target) = world.host(&substitution.target_host)
+        {
+            match target.plugin_remove_argv(&substitution.plugin, Some(&substitution.marketplace)) {
+                Ok(argv) => plan.push(
+                    format!(
+                        "remove the original {} from {}",
+                        substitution.plugin, substitution.target_host
+                    ),
+                    Step::Host {
+                        host: substitution.target_host.clone(),
+                        argv,
+                        cwd: None,
+                    },
+                ),
+                Err(error) => plan.note(format!(
+                    "{}: {} — {error:#}",
+                    substitution.plugin, substitution.target_host
+                )),
+            }
+        }
+        plan_internal_manifest_cleanup(world, &substitution.shim_plugin, plan);
+    }
+}
+
+fn plan_internal_manifest_cleanup(world: &World, shim_plugin: &str, plan: &mut Plan) {
+    if world.manifest.plugins.contains_key(shim_plugin) {
+        plan.remove_plugin_from_manifest(shim_plugin);
+    }
+    if world
+        .manifest
+        .marketplaces
+        .contains_key(crate::shim::generate::MARKETPLACE_NAME)
+    {
+        plan.remove_marketplace_from_manifest(crate::shim::generate::MARKETPLACE_NAME);
+    }
+}
+
 fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> anyhow::Result<()> {
     let source_name = row
         .key
@@ -473,6 +580,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
         |s| !matches!(&s.step, Step::Fs(FsOp::WriteFile { path, .. }) if path == &manifest_path),
     );
     plan.steps.extend(staged);
+    plan_internal_manifest_cleanup(world, &generated.shim_plugin, plan);
     // `current_exe()` resolves symlinks, so a package manager that swaps the
     // binary on upgrade (for example Homebrew's Cellar path) leaves every
     // generated shim invoking a binary that no longer exists. Silently

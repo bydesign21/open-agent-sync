@@ -249,6 +249,32 @@ impl Plan {
         self.notes.push(note.into());
     }
 
+    /// Remove generated runtime state from the durable manifest once.
+    pub fn remove_plugin_from_manifest(&mut self, name: &str) {
+        if self.steps.iter().any(|step| {
+            matches!(&step.step, Step::Manifest(ManifestOp::RemovePlugin(existing)) if existing == name)
+        }) {
+            return;
+        }
+        self.push(
+            format!("drop generated plugin {name} from the manifest"),
+            Step::Manifest(ManifestOp::RemovePlugin(name.to_string())),
+        );
+    }
+
+    /// Remove an agentsync-owned marketplace from the durable manifest once.
+    pub fn remove_marketplace_from_manifest(&mut self, name: &str) {
+        if self.steps.iter().any(|step| {
+            matches!(&step.step, Step::Manifest(ManifestOp::RemoveMarketplace(existing)) if existing == name)
+        }) {
+            return;
+        }
+        self.push(
+            format!("drop generated marketplace {name} from the manifest"),
+            Step::Manifest(ManifestOp::RemoveMarketplace(name.to_string())),
+        );
+    }
+
     pub fn is_empty(&self) -> bool {
         self.steps.is_empty()
     }

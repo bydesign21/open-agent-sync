@@ -51,6 +51,7 @@ fn marketplace_rows(world: &World) -> Vec<Row> {
 
     names
         .into_iter()
+        .filter(|name| !crate::shim::generate::is_internal_marketplace(name))
         .filter_map(|name| marketplace_row(world, &name))
         .collect()
 }
@@ -242,6 +243,7 @@ fn resolve(world: &World, host_name: &str, name: &str, pin: Option<&str>) -> Res
 }
 
 fn plugin_rows(world: &World) -> Vec<Row> {
+    let substitutions = super::hooks::shim_substitutions(world);
     let mut names: BTreeSet<String> = world.manifest.plugins.keys().cloned().collect();
     for (host, snap) in world.detected() {
         if host.descriptor.plugins.is_some() {
@@ -250,11 +252,16 @@ fn plugin_rows(world: &World) -> Vec<Row> {
     }
     names
         .into_iter()
-        .filter_map(|name| plugin_row(world, &name))
+        .filter(|name| !name.starts_with("agentsync-shim-"))
+        .filter_map(|name| plugin_row(world, &name, &substitutions))
         .collect()
 }
 
-fn plugin_row(world: &World, name: &str) -> Option<Row> {
+fn plugin_row(
+    world: &World,
+    name: &str,
+    substitutions: &[super::hooks::ShimSubstitution],
+) -> Option<Row> {
     let mut installed: BTreeMap<String, String> = BTreeMap::new();
     for (host, snap) in world.detected() {
         if host.descriptor.plugins.is_none() {
@@ -263,6 +270,14 @@ fn plugin_row(world: &World, name: &str) -> Option<Row> {
         if let Some(p) = snap.plugins.get(name) {
             installed.insert(host.name().to_string(), p.marketplace.clone());
         }
+    }
+    for substitution in substitutions
+        .iter()
+        .filter(|substitution| substitution.plugin == name)
+    {
+        installed
+            .entry(substitution.target_host.clone())
+            .or_insert_with(|| substitution.marketplace.clone());
     }
 
     let plugin_hosts: Vec<String> = world
