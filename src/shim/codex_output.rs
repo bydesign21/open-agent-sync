@@ -39,7 +39,7 @@ fn select_response(stdout: &str) -> Result<Option<Map<String, Value>>> {
     for line in &lines {
         match serde_json::from_str::<Value>(line) {
             Ok(value) => records.push(as_object(value)?),
-            Err(error) if line.trim_start().starts_with('{') => {
+            Err(error) if starts_like_json_object(line) => {
                 bail!("malformed JSON hook output: {error}")
             }
             Err(_) => plain += 1,
@@ -56,6 +56,13 @@ fn select_response(stdout: &str) -> Result<Option<Map<String, Value>>> {
     }
 
     select_records(records)
+}
+
+fn starts_like_json_object(line: &str) -> bool {
+    line.trim_start()
+        .strip_prefix('{')
+        .and_then(|after_brace| after_brace.trim_start().chars().next())
+        .is_some_and(|first| matches!(first, '}' | '"'))
 }
 
 fn select_records(records: Vec<Map<String, Value>>) -> Result<Option<Map<String, Value>>> {
@@ -268,6 +275,13 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("JSON"), "got {error}");
+    }
+
+    #[test]
+    fn brace_prefixed_plain_text_becomes_a_system_message() {
+        // A human note may begin with a brace without being a JSON object.
+        let output = super::translate("{draft reminder", "SessionStart", &spec()).unwrap();
+        assert_eq!(output, r#"{"systemMessage":"{draft reminder"}"#);
     }
 
     #[test]
