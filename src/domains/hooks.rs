@@ -353,7 +353,8 @@ pub(super) fn plan_substitution_cleanup(world: &World, plan: &mut Plan) {
     for substitution in shim_substitutions(world) {
         if world
             .snapshot(&substitution.target_host)
-            .is_some_and(|snapshot| snapshot.plugins.contains_key(&substitution.plugin))
+            .and_then(|snapshot| snapshot.plugins.get(&substitution.plugin))
+            .is_some_and(|installed| installed.marketplace == substitution.marketplace)
             && let Some(target) = world.host(&substitution.target_host)
         {
             match target.plugin_remove_argv(&substitution.plugin, Some(&substitution.marketplace)) {
@@ -374,12 +375,17 @@ pub(super) fn plan_substitution_cleanup(world: &World, plan: &mut Plan) {
                 )),
             }
         }
-        plan_internal_manifest_cleanup(world, &substitution.shim_plugin, plan);
     }
+    plan_internal_manifest_cleanup(world, plan);
 }
 
-fn plan_internal_manifest_cleanup(world: &World, shim_plugin: &str, plan: &mut Plan) {
-    if world.manifest.plugins.contains_key(shim_plugin) {
+fn plan_internal_manifest_cleanup(world: &World, plan: &mut Plan) {
+    for shim_plugin in world
+        .manifest
+        .plugins
+        .keys()
+        .filter(|name| name.starts_with("agentsync-shim-"))
+    {
         plan.remove_plugin_from_manifest(shim_plugin);
     }
     if world
@@ -580,7 +586,7 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
         |s| !matches!(&s.step, Step::Fs(FsOp::WriteFile { path, .. }) if path == &manifest_path),
     );
     plan.steps.extend(staged);
-    plan_internal_manifest_cleanup(world, &generated.shim_plugin, plan);
+    plan_internal_manifest_cleanup(world, plan);
     // `current_exe()` resolves symlinks, so a package manager that swaps the
     // binary on upgrade (for example Homebrew's Cellar path) leaves every
     // generated shim invoking a binary that no longer exists. Silently

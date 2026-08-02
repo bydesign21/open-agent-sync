@@ -1250,6 +1250,32 @@ fn shim_substitution_removes_an_original_that_is_still_installed() {
 }
 
 #[test]
+fn shim_substitution_keeps_a_same_named_plugin_from_another_marketplace() {
+    let mut world = shim_substitution_world(true, false);
+    world.snapshots[1]
+        .plugins
+        .get_mut("security-guidance")
+        .expect("the same-named plugin is installed")
+        .marketplace = "market-b".into();
+
+    let plan = world.plan(&[]);
+
+    assert!(
+        !plan.steps.iter().any(|step| matches!(&step.step,
+            Step::Host { host, argv, .. }
+                if host == "codex"
+                    && argv.iter().any(|arg| arg == "remove" || arg == "uninstall")
+                    && argv.iter().any(|arg| arg.contains("security-guidance"))
+        )),
+        "the shim for market-a must not remove the same name from market-b: {:?}",
+        plan.steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn shim_substitution_cleans_internal_entries_out_of_the_manifest() {
     let world = shim_substitution_world(false, true);
     let shim =
@@ -1273,6 +1299,58 @@ fn shim_substitution_cleans_internal_entries_out_of_the_manifest() {
                 if name == "agentsync-shims"
         )),
         "the generated marketplace is runtime state, not manifest state: {:?}",
+        plan.steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn shim_substitution_sweeps_stale_internal_manifest_entries_without_runtime_state() {
+    let shim = agentsync::shim::generate::shim_plugin_name("market-a", "plugin-with-hyphens");
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(shim.clone(), Default::default());
+    manifest.marketplaces.insert(
+        "agentsync-shims".into(),
+        agentsync::manifest::MarketplaceEntry {
+            directory: Some("/tmp/agentsync-test/shims/codex".into()),
+            github: None,
+            url: None,
+            hosts: None,
+        },
+    );
+    let world = world(manifest, snapshot("claude", &[]), snapshot("codex", &[]));
+
+    let plan = world.plan(&[]);
+
+    assert!(
+        plan.steps.iter().any(|step| matches!(&step.step,
+            Step::Manifest(agentsync::core::plan::ManifestOp::RemovePlugin(name))
+                if name == &shim
+        )),
+        "a stale generated plugin must be swept without a detected shim: {:?}",
+        plan.steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        plan.steps.iter().any(|step| matches!(&step.step,
+            Step::Manifest(agentsync::core::plan::ManifestOp::RemoveMarketplace(name))
+                if name == "agentsync-shims"
+        )),
+        "the stale internal marketplace must be swept without a detected shim: {:?}",
+        plan.steps
+            .iter()
+            .map(|step| &step.label)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .all(|step| matches!(&step.step, Step::Manifest(_))),
+        "manifest cleanup must not remove installed or on-disk shim state: {:?}",
         plan.steps
             .iter()
             .map(|step| &step.label)
