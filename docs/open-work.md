@@ -972,46 +972,56 @@ Commit intent: `Generate Kilo hook bridges`.
 
 ---
 
-## Bridge execution proof — what is and is not proven
+## Bridge execution proof — CLOSED, reproduced by the lead
 
-The `bridge-shim` contract defect is FIXED. Both bridges now invoke the existing
-`agentsync hook-shim --spec <sidecar>` command. A regression test asserts the
-string `bridge-shim` appears nowhere in generated output.
+Both bridges invoke the existing `agentsync hook-shim --spec <sidecar>` command.
+The invented `bridge-shim` contract is gone, with a regression test asserting
+that string appears nowhere in generated output.
 
-**Genuine execution proof exists** for the Kilo bridge mechanism. A sentinel
-round-tripped through: bundled JS → `spawnSync` → the real release binary's
-`hook-shim` → the shell command → `bridge_output::translate` → JSON returned to
-a `bun` driver. Reintroducing the old defect bundled cleanly but failed at
-execution with `unrecognized subcommand 'bridge-shim'` — confirming that
-**`bun build` is not evidence of runtime behaviour**, only of syntax.
+**Kilo is now wired into production** (`c91ce2b`): `[hooks]`/`[hooks.shim]` in
+`kilo.toml`, and `domains/hooks.rs` calls `kilo::spec_for` from the planning
+path, with `active_profile_dir` resolved through the `KILO_CONFIG_DIR`-aware
+layer engine rather than a hardcoded path.
 
-### But the two hosts are NOT at the same maturity
+### Lead-reproduced end-to-end proof (not accepted on report)
 
-| | OpenCode | Kilo |
-|---|---|---|
-| `spec_for` called from production | **yes** — `domains/hooks.rs:631` | **no** — test module only |
-| `[hooks]` in descriptor | yes | no |
-| portable-event → callback mapping | `PreToolUse`/`PostToolUse` wired | none |
+Run in full isolation — own `HOME`, `XDG_*`, `AGENTSYNC_HOME`,
+`AGENTSYNC_STATE_HOME`; the real `~/.config`, `~/.agents` and `~/.agentsync`
+were never read or written:
 
-Lead-verified consequence: a sidecar produced by the **generator-driven** Kilo
-fixture carries `"event": "PostToolUse"`, and executing it against the real
-binary fails with:
+1. Seeded a real Claude plugin hook fixture whose command prints a sentinel.
+2. `agentsync plan --only hooks` → bridge rows for **both** OpenCode and Kilo.
+3. `agentsync apply --yes --only hooks` → 2 steps, 9 guarded file operations.
+4. The **production-generated** sidecar reads `"event": "tool.execute.before"`
+   — not `"PreToolUse"`. This is precisely the defect found in the previous
+   round, now fixed.
+5. `agentsync hook-shim --spec <that production sidecar>` with matcher-satisfying
+   input returned:
 
-    PostToolUse has no measured output channel a bridge action could travel
-    through, so ... must stay blocked rather than claim delivery
+       {"callback":"tool.execute.before","fidelity":"exact",
+        "message":"LEAD_PROD_SIDECAR_ff00aa","block":false}
 
-The successful Kilo execution proof used a spec built by `spec_for()`, whose
-`event` is the callback name. `spec_for` is called only from tests. So the
-proof demonstrates the **mechanism** works; it does not demonstrate that the
-**product** yet produces working Kilo specs.
+6. A second `plan --only hooks` → `0 to review, 2 in sync`, **0 steps**.
 
-That is not a contradiction of the proof — it is the already-known "Kilo is not
-wired into `domains/hooks.rs`" gap showing up at runtime. Fixing the wiring must
-make production emit callback-named events, and the fix is only proven when a
-sidecar produced by the *production* path executes end to end.
+Also observed and worth keeping: with non-matching input (`{}`) the handler
+correctly did **not** fire and produced no output. The matcher gates execution
+rather than firing on everything.
 
-Refusing to fabricate a mapping was correct: the portable-event to Kilo-callback
-mapping is genuinely unmeasured. Measure it before wiring it.
+### Mapping is deliberately narrow, and that is correct
+
+Only `PreToolUse → tool.execute.before` and `PostToolUse → tool.execute.after`
+are wired, for both hosts. Every other Claude event is BLOCKED by name. No
+source-side handler exists that could populate the other seven callbacks, so a
+mapping would be invented data.
+
+### Honest limit on the callback measurement
+
+`tool.execute.before/after`, `chat.message/params`, `session.idle/error` could
+not be live-triggered: no model-provider credentials exist in this environment
+for a real session or tool call. Evidence for those six is the exact string
+literals in the installed `kilo 7.4.17` binary. `config` and `event` WERE fired
+live against an isolated profile, with ctx keys matching the recorded contract.
+Record this as **partially could-not-check**, not as a full live measurement.
 
 ## OW-009 — bridge generated, not wired
 
