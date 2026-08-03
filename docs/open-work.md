@@ -969,6 +969,53 @@ Commit intent: `Generate Kilo hook bridges`.
 
 ---
 
+## RELEASE BLOCKER — the bridge runtime dispatcher does not exist
+
+Both generated bridges shell out to:
+
+    agentsync bridge-shim --index <index.json> --callback <name>
+
+**That subcommand does not exist in the CLI.** Verified by grepping `src/main.rs`
+and `src/tui/`: no `bridge-shim` handler is registered.
+
+Consequence, stated precisely: `bun build` compiles the generated TypeScript and
+passes, because bundling never executes it. So the OW-008/OW-009 Bun gates are
+green over a bridge that would fail at runtime with an unknown subcommand the
+moment a real host invoked it.
+
+This is shared infrastructure for both hosts. It **blocks OW-011 and OW-013**:
+no live sentinel can ever fire until it exists. It does not block the unit or
+diff gates, which is exactly why it could pass unnoticed — a green gate over a
+path nothing executes.
+
+Required before any live proof:
+
+1. Implement the `bridge-shim` subcommand: read the index, resolve the callback
+   to its sidecar spec, validate the artifact contract, run the handler, and
+   emit the typed bridge action through the host's output strategy.
+2. Prove it by EXECUTING the generated bridge under `bun`, not merely bundling
+   it. A build-only gate is not evidence of runtime behaviour.
+
+## OW-009 — bridge generated, not wired
+
+`src/shim/bridges/kilo.rs` is a complete, tested generator and validator, but it
+is invoked only by its own tests. Still open, and needed before the live gate:
+
+- no `[hooks]` section in `kilo.toml`;
+- no portable-event to Kilo-callback mapping (which Claude `PreToolUse` handler
+  becomes `tool.execute.before`), and that mapping is **unmeasured**;
+- no `domains/hooks.rs` wiring, so nothing reaches it through
+  `World`/`Host::read`/`plan`;
+- `health` and `check_version` exist as library functions but are not surfaced
+  in `report.rs` or the CLI, so `KILO_PURE` and version blocking are not yet
+  visible to a user.
+
+Lead-added fix during verification: `config_auth_and_event_are_refused_never_silently_wired`
+iterated `NO_OUTPUT_CALLBACKS`, the constant under test. Emptying that constant
+made the loop body never run and the test pass vacuously. It now asserts the
+three measured names literally and pins the constant against them
+(`35d7eaa`). Mutation-confirmed: emptying the list now fails the test.
+
 ## OW-010 — Doctor, documentation, and four-host convergence
 
 **State: designed, not implemented. Release blocker. Depends on OW-004 through OW-009.**
