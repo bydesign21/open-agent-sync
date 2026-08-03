@@ -334,6 +334,53 @@ real config was never read or written.
 | 4 | `<PREFIX>_CONFIG` explicit file | yes |
 | 5 | default XDG global config | yes |
 
+### Measured MCP schema
+
+`mcp.<name>` accepts, verified by round-tripping through `debug config`:
+
+| Field | Values |
+|---|---|
+| `type` | `"local"` (stdio) or `"remote"` (http) |
+| `command` | **array**, no shell splitting |
+| `environment` | object of literal values (note: `environment`, not `env`) |
+| `url` | remote endpoint |
+| `headers` | object |
+| `enabled` | bool |
+| `timeout` | number — **unit unverified**, see below |
+| `cwd` | string |
+
+There is **no `opencode mcp remove` command**. `opencode mcp` offers only
+`add`, `list`, `auth`, `logout`, `debug`. Removal must therefore be an exact
+JSONC origin removal, never an invented CLI call. This confirms the plan.
+
+`timeout`'s unit could not be established from the runtime. It is carried
+through as an exact opaque number and no seconds/milliseconds conversion is
+applied to it. Record **could not check**; do not invent a unit.
+
+### Release-blocking finding: never reconcile against resolved config
+
+`{env:NAME}` placeholders are substituted when config is **resolved**, and the
+raw file on disk keeps the placeholder. Measured:
+
+| Input in file | `TOK` unset | `TOK=s3cret` |
+|---|---|---|
+| `"Bearer {env:TOK}"` | `"Bearer "` | `"Bearer s3cret"` |
+
+Two consequences, both release-blocking:
+
+1. **An unset variable silently becomes an empty string.** `"Bearer "` is a
+   credential-shaped value that authenticates nothing and renders as healthy.
+   This is the "plausible value manufactured in place of missing data" failure
+   mode. Doctor must report an env reference that resolves to empty as
+   *unresolved*, never as configured.
+2. **Reconciliation must read the raw config file bytes, never
+   `<host> debug config` output.** The resolved projection destroys the
+   distinction between a literal value and an `{env:NAME}` reference. Comparing
+   desired `{env:TOK}` against resolved `Bearer ` would report drift on every
+   pass and rewrite the file forever, so **two-pass convergence would fail**.
+   `debug config` is safe only for observing effective state, never as the
+   source of truth for a diff.
+
 ### Corrections this forced on the approved plan
 
 1. **`OPENCODE_CONFIG_DIR` exists.** The plan modeled only `KILO_CONFIG_DIR`.
