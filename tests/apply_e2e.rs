@@ -116,6 +116,64 @@ elif argv[:1] == ["touch"]:
 sys.exit(0)
 "#;
 
+/// A stand-in `claude` CLI. Claude's `mcp` write path is `add-json`/`remove`
+/// against a single JSON document (`~/.claude.json`), a different shape from
+/// [`FAKE_HOST`]'s TOML flags style, so it gets its own fake. Like
+/// `FAKE_HOST`, it both logs its argv and maintains the real config file, so a
+/// second read genuinely sees what the first write produced.
+const FAKE_CLAUDE: &str = r#"#!/usr/bin/env python3
+import json, os, sys
+
+LOG = "__LOG__"
+CFG = "__CFG__"
+
+argv = sys.argv[1:]
+with open(LOG, "a") as fh:
+    fh.write(" ".join(argv) + "\n")
+
+
+def load():
+    try:
+        with open(CFG) as fh:
+            return json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save(data):
+    with open(CFG, "w") as fh:
+        json.dump(data, fh)
+
+
+def scope_of(rest):
+    return rest[rest.index("--scope") + 1] if "--scope" in rest else "local"
+
+
+if argv[:2] == ["mcp", "add-json"]:
+    name = argv[2]
+    blob = json.loads(argv[3])
+    scope = scope_of(argv[4:])
+    data = load()
+    if scope == "user":
+        data.setdefault("mcpServers", {})[name] = blob
+    else:
+        cwd = os.getcwd()
+        data.setdefault("projects", {}).setdefault(cwd, {}).setdefault("mcpServers", {})[name] = blob
+    save(data)
+elif argv[:2] == ["mcp", "remove"]:
+    name = argv[2]
+    scope = scope_of(argv[3:])
+    data = load()
+    if scope == "user":
+        data.get("mcpServers", {}).pop(name, None)
+    else:
+        cwd = os.getcwd()
+        data.get("projects", {}).get(cwd, {}).get("mcpServers", {}).pop(name, None)
+    save(data)
+
+sys.exit(0)
+"#;
+
 fn write_exec(path: &Path, body: &str) {
     use std::os::unix::fs::PermissionsExt;
     std::fs::write(path, body).unwrap();
@@ -2303,5 +2361,385 @@ fn opencode_hooks_converge_after_two_passes() {
             .any(|s| matches!(&s.step, Step::FileTransaction(_))),
         "the second plan must contain no hooks mutation: {:?}",
         plan2.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+/// The exact bytes of a regular file, or the exact link target of a symlink,
+/// alongside `(dev, ino)`. Used to prove a second, fully-converged pass
+/// leaves every artifact byte-for-byte and inode-for-inode untouched — not
+/// merely "still present with the same content", which a delete-and-recreate
+/// would also satisfy.
+#[derive(Debug, PartialEq)]
+enum Fingerprint {
+    File { dev: u64, ino: u64, bytes: Vec<u8> },
+    Symlink { dev: u64, ino: u64, target: PathBuf },
+}
+
+fn fingerprint(path: &Path) -> Fingerprint {
+    let meta =
+        std::fs::symlink_metadata(path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display()));
+    if meta.file_type().is_symlink() {
+        Fingerprint::Symlink {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            target: std::fs::read_link(path).unwrap(),
+        }
+    } else {
+        Fingerprint::File {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            bytes: std::fs::read(path).unwrap(),
+        }
+    }
+}
+
+/// A complete fake world with all four hosts agentsync supports — Claude,
+/// Codex, OpenCode, and Kilo — proving they converge together, not merely
+/// each in isolation (every other two-pass test in this file exercises one
+/// host, or one OpenCode-family host, at a time).
+///
+/// Covers three domains that are meaningful across all four host shapes at
+/// once: MCP (a CLI `add-json`/`add`/`remove` write for Claude/Codex, a
+/// guarded JSONC edit for OpenCode/Kilo — measured: neither has an `mcp
+/// remove` command), skills (a shared canonical file, symlinked from each
+/// host's own directory), and project instructions (the same canonical file,
+/// symlinked as `AGENTS.md` for Codex/OpenCode/Kilo and `CLAUDE.md` for
+/// Claude). Plugins and hooks already have dedicated per-host two-pass gates
+/// elsewhere in this file; this test's job is the four-host combination, not
+/// re-covering every domain again.
+///
+/// Pass 2 asserts on the plan's concrete step count and on file
+/// bytes/inodes captured after pass 1 — never on a precondition the test
+/// itself supplied — because two earlier attempts at a convergence gate in
+/// this codebase were rejected for exactly that (see `docs/open-work.md`,
+/// OW-004: one asserted an empty manifest had zero servers, the other
+/// compared three identical strings the test had built itself).
+#[test]
+fn four_host_world_converges_after_two_passes() {
+    let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_restore = EnvRestore::capture(&[
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "AGENTSYNC_HOME",
+        "AGENTSYNC_STATE_HOME",
+        "PATH",
+    ]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    // Everything `~`, `{xdg_config}`, and `{agentsync-state}` can expand to
+    // lives under `root`, so a bug here (or in the code under test) cannot
+    // reach the real machine's `~/.claude.json`, `~/.config`, or
+    // `~/.agents/skills`.
+    let fake_home = root.join("home");
+    let fake_xdg = root.join("xdg-config");
+    let agentsync_home = root.join("agentsync-home");
+    let state_home = root.join("agentsync-state");
+    let bindir = root.join("bin");
+    let repo = root.join("repo");
+    for dir in [
+        &fake_home,
+        &fake_xdg,
+        &agentsync_home,
+        &state_home,
+        &bindir,
+        &repo,
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    let python = which::which("python3").expect("python3 is needed to run this test");
+    let claude_cfg = fake_home.join(".claude.json");
+    let claude_log = root.join("claude-calls.log");
+    write_exec(
+        &bindir.join("claude"),
+        &FAKE_CLAUDE
+            .replace("#!/usr/bin/env python3", &format!("#!{}", python.display()))
+            .replace("__LOG__", &claude_log.display().to_string())
+            .replace("__CFG__", &claude_cfg.display().to_string()),
+    );
+
+    let codex_cfg = fake_home.join(".codex/config.toml");
+    std::fs::create_dir_all(codex_cfg.parent().unwrap()).unwrap();
+    let codex_log = root.join("codex-calls.log");
+    write_exec(
+        &bindir.join("codex"),
+        &FAKE_HOST
+            .replace("#!/usr/bin/env python3", &format!("#!{}", python.display()))
+            .replace("__LOG__", &codex_log.display().to_string())
+            .replace("__CFG__", &codex_cfg.display().to_string()),
+    );
+
+    // OpenCode and Kilo write mcp through guarded JSONC edits, never a CLI
+    // call (measured: neither has an `mcp remove` command), so their fake
+    // binaries only need to exist for host detection.
+    write_exec(&bindir.join("opencode"), "#!/bin/sh\nexit 0\n");
+    write_exec(&bindir.join("kilo"), "#!/bin/sh\nexit 0\n");
+
+    // Redirect every path root this test touches BEFORE calling any `paths::`
+    // helper (directly or through `World::load` below) — those helpers read
+    // these variables live.
+    unsafe {
+        std::env::set_var("HOME", &fake_home);
+        std::env::set_var("XDG_CONFIG_HOME", &fake_xdg);
+        std::env::set_var("AGENTSYNC_HOME", &agentsync_home);
+        std::env::set_var("AGENTSYNC_STATE_HOME", &state_home);
+        std::env::set_var("PATH", &bindir);
+    }
+
+    // Canonical skill content shared by Codex, OpenCode, and Kilo
+    // (`~/.agents/skills`); Claude links it from its own `~/.claude/skills`.
+    let canonical_skill = agentsync_home.join("skills/demo-skill");
+    std::fs::create_dir_all(&canonical_skill).unwrap();
+    std::fs::write(
+        canonical_skill.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: test\n---\nversion one\n",
+    )
+    .unwrap();
+
+    // Canonical project instructions: one file, symlinked as `AGENTS.md` for
+    // Codex/OpenCode/Kilo and `CLAUDE.md` for Claude.
+    let scope = Scope::Project(repo.display().to_string());
+    let instructions_name = agentsync::domains::instructions::default_name(&scope);
+    let canonical_instructions = agentsync::domains::instructions::canonical_for(&scope);
+    std::fs::create_dir_all(canonical_instructions.parent().unwrap()).unwrap();
+    std::fs::write(&canonical_instructions, "shared project instructions\n").unwrap();
+
+    let manifest_path = agentsync_home.join("manifest.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[mcp.demo]
+transport = "stdio"
+command = "node"
+args = ["/x/index.js"]
+
+[skills.demo-skill]
+source = "skills/demo-skill"
+
+[instructions."{instructions_name}"]
+source = "{source}"
+scope = "project"
+repos = ["{repo}"]
+"#,
+            source = canonical_instructions.display(),
+            repo = repo.display(),
+        ),
+    )
+    .unwrap();
+
+    // ---- pass 1: nothing exists on any host yet ----
+    let world1 = World::load(&manifest_path, &[repo.display().to_string()]).expect("world loads");
+    let detected: Vec<String> = world1
+        .detected()
+        .map(|(h, _)| h.name().to_string())
+        .collect();
+    for name in ["claude", "codex", "opencode", "kilo"] {
+        assert!(
+            detected.contains(&name.to_string()),
+            "{name} must be a detected host in this fake world: {detected:?}"
+        );
+    }
+
+    let mut rows1 = world1.rows();
+    assert!(
+        rows1
+            .iter()
+            .any(|r| r.domain == Domain::Mcp && r.actionable()),
+        "pass 1 must have mcp work to do"
+    );
+    assert!(
+        rows1
+            .iter()
+            .any(|r| r.domain == Domain::Skills && r.actionable()),
+        "pass 1 must have a skills row to do"
+    );
+    assert!(
+        rows1
+            .iter()
+            .any(|r| r.domain == Domain::Instructions && r.actionable()),
+        "pass 1 must have an instructions row to do"
+    );
+    for row in rows1.iter_mut() {
+        row.accepted = row.actionable();
+    }
+
+    let plan1 = world1.plan(&rows1);
+    let host_steps = plan1
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::Host { .. }))
+        .count();
+    let config_tx_steps = plan1
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::ConfigTransaction(_)))
+        .count();
+    let link_steps = plan1
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::Fs(FsOp::Link { .. })))
+        .count();
+    assert_eq!(
+        host_steps,
+        2,
+        "exactly one `claude mcp add-json` and one `codex mcp add`, no more: {:?}",
+        plan1.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        config_tx_steps,
+        2,
+        "exactly one guarded JSONC edit for OpenCode and one for Kilo: {:?}",
+        plan1.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        link_steps,
+        4,
+        "one skill symlink shared by codex/opencode/kilo, one skill symlink \
+         for claude's own directory, one AGENTS.md symlink shared by \
+         codex/opencode/kilo, and one CLAUDE.md symlink for claude: {:?}",
+        plan1.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+
+    let mut manifest_after_1 = world1.manifest.clone();
+    let report1 = apply::run(
+        &plan1,
+        &mut manifest_after_1,
+        &manifest_path,
+        &world1.hosts,
+        |_| {},
+    );
+    assert!(
+        !report1.any_failed(),
+        "pass 1 must apply cleanly across all four hosts: {:?}",
+        report1.results
+    );
+
+    let opencode_jsonc = fake_xdg.join("opencode/opencode.jsonc");
+    let kilo_jsonc = fake_xdg.join("kilo/kilo.jsonc");
+    let shared_skill_link = fake_home.join(".agents/skills/demo-skill");
+    let claude_skill_link = fake_home.join(".claude/skills/demo-skill");
+    let shared_agents_md = repo.join("AGENTS.md");
+    let claude_md = repo.join("CLAUDE.md");
+
+    let watched: Vec<PathBuf> = vec![
+        claude_cfg.clone(),
+        codex_cfg.clone(),
+        opencode_jsonc.clone(),
+        kilo_jsonc.clone(),
+        canonical_instructions.clone(),
+        canonical_skill.join("SKILL.md"),
+        shared_skill_link.clone(),
+        claude_skill_link.clone(),
+        shared_agents_md.clone(),
+        claude_md.clone(),
+    ];
+    for path in &watched {
+        assert!(
+            path.exists() || path.symlink_metadata().is_ok(),
+            "pass 1 must have produced {}",
+            path.display()
+        );
+    }
+    let fingerprints_after_pass_1: Vec<Fingerprint> =
+        watched.iter().map(|p| fingerprint(p)).collect();
+
+    assert!(
+        std::fs::read_to_string(&claude_cfg)
+            .unwrap()
+            .contains("\"demo\""),
+        "claude's config must actually contain the added server"
+    );
+    assert!(
+        std::fs::read_to_string(&codex_cfg)
+            .unwrap()
+            .contains("mcp_servers.demo"),
+        "codex's config must actually contain the added server"
+    );
+    assert!(
+        std::fs::read_to_string(&opencode_jsonc)
+            .unwrap()
+            .contains("\"demo\""),
+        "opencode's config must actually contain the added server"
+    );
+    assert!(
+        std::fs::read_to_string(&kilo_jsonc)
+            .unwrap()
+            .contains("\"demo\""),
+        "kilo's config must actually contain the added server"
+    );
+
+    // ---- pass 2: read the real state pass 1 produced. Nothing may be left
+    // to do, and applying "every accepted action" a second time must mutate
+    // nothing at all. ----
+    let world2 = World::load(&manifest_path, &[repo.display().to_string()]).expect("world loads");
+    let rows2 = world2.rows();
+    let expected_row_name = |domain: Domain| match domain {
+        Domain::Mcp => "demo".to_string(),
+        Domain::Skills => "demo-skill".to_string(),
+        Domain::Instructions => instructions_name.clone(),
+        Domain::Plugins | Domain::Hooks => unreachable!("not exercised by this test"),
+    };
+    for domain in [Domain::Mcp, Domain::Skills, Domain::Instructions] {
+        let name = expected_row_name(domain);
+        let touched: Vec<&agentsync::core::diff::Row> = rows2
+            .iter()
+            .filter(|r| r.domain == domain && r.name == name)
+            .collect();
+        assert!(
+            !touched.is_empty(),
+            "domain {domain:?} must still carry the row named {name:?} that pass 1 touched: {:?}",
+            rows2
+                .iter()
+                .filter(|r| r.domain == domain)
+                .map(|r| &r.name)
+                .collect::<Vec<_>>()
+        );
+        for row in &touched {
+            assert!(
+                !row.actionable(),
+                "a converged {domain:?} row must have nothing left to do: {} ({})",
+                row.name,
+                row.headline
+            );
+        }
+    }
+
+    let mut rows2_accept_everything = rows2;
+    for row in rows2_accept_everything.iter_mut() {
+        row.accepted = row.actionable();
+    }
+    let plan2 = world2.plan(&rows2_accept_everything);
+    assert_eq!(
+        plan2.steps.len(),
+        0,
+        "the second plan, built from a world that just re-read what pass 1 \
+         wrote, must contain no config, plugin, hook, skill, instruction, or \
+         manifest mutation at all: {:?}",
+        plan2.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+
+    let mut manifest_after_2 = world2.manifest.clone();
+    let report2 = apply::run(
+        &plan2,
+        &mut manifest_after_2,
+        &manifest_path,
+        &world2.hosts,
+        |_| {},
+    );
+    assert!(
+        !report2.any_failed(),
+        "applying the empty converged plan must still succeed: {:?}",
+        report2.results
+    );
+
+    let fingerprints_after_pass_2: Vec<Fingerprint> =
+        watched.iter().map(|p| fingerprint(p)).collect();
+    assert_eq!(
+        fingerprints_after_pass_1, fingerprints_after_pass_2,
+        "every watched artifact must be byte-for-byte and inode-for-inode \
+         identical after the converged second pass — not merely present with \
+         the same content, which a delete-and-recreate would also satisfy"
     );
 }
