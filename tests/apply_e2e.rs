@@ -355,6 +355,59 @@ fn config_patch_allows_a_writable_higher_origin_over_a_shadowed_read_only_origin
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn config_patch_rollback_never_rewrites_a_shadowed_read_only_projection_source() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let lower = tmp.path().join("managed.jsonc");
+    let higher = tmp.path().join("project.jsonc");
+    let lower_bytes = b"{\"value\":\"managed\"}\n";
+    let higher_bytes = b"{\"value\":\"project\",\"enabled\":true}\n";
+    std::fs::write(&lower, lower_bytes).unwrap();
+    std::fs::write(&higher, higher_bytes).unwrap();
+    std::fs::set_permissions(&lower, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let lower_before = std::fs::metadata(&lower).unwrap();
+    let lower_hash = compute_sha256(lower_bytes);
+    let higher_hash = compute_sha256(higher_bytes);
+    let transaction = ConfigTransaction::new(serde_json::json!({
+        "value": "deliberately wrong projection",
+        "enabled": false
+    }))
+    .with_source(GuardedSource::with_hash(&lower, &lower_hash))
+    .with_source(GuardedSource::with_hash(&higher, &higher_hash))
+    .with_origin(
+        ConfigOrigin::new(&lower, ConfigScope::Global, 20, &lower_hash)
+            .externally_controlled("managed policy"),
+    )
+    .with_edit(SourceEdit {
+        origin: ConfigOrigin::new(&higher, ConfigScope::Project, 10, &higher_hash),
+        config_path: vec!["enabled".into()],
+        operation: ConfigEditOperation::Set {
+            value: serde_json::json!(false),
+            raw_json: None,
+        },
+    });
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Failed);
+    assert_eq!(std::fs::read(&higher).unwrap(), higher_bytes);
+    let lower_after = std::fs::metadata(&lower).unwrap();
+    assert_eq!(std::fs::read(&lower).unwrap(), lower_bytes);
+    assert_eq!(
+        lower_after.ino(),
+        lower_before.ino(),
+        "projection-only sources must not be replaced during apply or rollback"
+    );
+    assert_eq!(
+        lower_after.permissions().mode() & 0o777,
+        lower_before.permissions().mode() & 0o777,
+        "projection-only source permissions must remain unchanged"
+    );
+}
+
 #[test]
 fn config_patch_composes_mcp_and_plugin_edits_across_origin_precedence() {
     let tmp = tempfile::tempdir().unwrap();
