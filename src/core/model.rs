@@ -683,6 +683,53 @@ impl fmt::Display for MarketplaceSource {
 }
 
 // ---------------------------------------------------------------------------
+// OpenCode-family npm/local plugin targets
+// ---------------------------------------------------------------------------
+
+/// Where one occurrence of an OpenCode-family plugin was found. Every
+/// occurrence is kept in full: a name defined at two scopes is a reportable
+/// duplicate, never collapsed into a single winning value.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PluginOccurrence {
+    /// An entry in a host's JSONC `plugin` array.
+    Config(crate::transaction::ConfigOrigin),
+    /// A local plugin module file, either user-authored or a copy agentsync
+    /// placed at a host-owned name.
+    File {
+        path: PathBuf,
+        sha256: String,
+        scope: ScopeKind,
+    },
+}
+
+/// One writable `plugin`-array-bearing config file for one scope.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginConfigSource {
+    pub origin: crate::transaction::ConfigOrigin,
+    /// Every entry currently in the array: `(identity, raw JSON value)`. A
+    /// plain string entry's identity is itself; a `[spec, options]` tuple's
+    /// identity is the spec.
+    pub entries: Vec<(String, serde_json::Value)>,
+}
+
+/// Everything read about one OpenCode-family host's npm/local plugin state.
+/// Empty for every host outside the OpenCode family.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PluginTargetState {
+    /// Writable `plugin`-array config sources, by scope.
+    pub config: BTreeMap<ScopeKind, PluginConfigSource>,
+    /// The profile directory root for each scope, for computing host-owned
+    /// local destinations (`<profile>/plugins/agentsync-<name>.<ext>` for
+    /// OpenCode, `<profile>/plugin/agentsync-<name>.<ext>` for Kilo).
+    pub profile_dir: BTreeMap<ScopeKind, PathBuf>,
+    /// Every occurrence found, keyed by identity: an npm spec exactly as it
+    /// appears in the array, or a host-owned local file stem
+    /// (`agentsync-<name>`). More than one entry for a key is a duplicate,
+    /// reported rather than collapsed.
+    pub occurrences: BTreeMap<String, Vec<PluginOccurrence>>,
+}
+
+// ---------------------------------------------------------------------------
 // Snapshot
 // ---------------------------------------------------------------------------
 
@@ -713,6 +760,9 @@ pub struct HostSnapshot {
     /// install` fails outright when no configured marketplace carries the name.
     pub catalog: BTreeMap<String, BTreeSet<String>>,
     pub hooks: BTreeMap<HookId, HookHandler>,
+    /// OpenCode-family npm/local plugin target state. Empty for every host
+    /// outside the OpenCode family.
+    pub plugin_targets: PluginTargetState,
     /// Non-fatal problems hit while reading, surfaced by `doctor`.
     pub warnings: Vec<String>,
 }

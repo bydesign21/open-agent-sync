@@ -142,6 +142,9 @@ pub struct RowKey {
     pub marketplace: Option<String>,
     /// True when this row is a marketplace rather than a plugin.
     pub is_marketplace: bool,
+    /// True when this row is an explicit npm/local OpenCode-family plugin
+    /// target rather than a marketplace-resolved install.
+    pub is_target: bool,
 }
 
 #[derive(Clone, Debug)]

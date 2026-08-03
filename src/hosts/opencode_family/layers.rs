@@ -51,6 +51,16 @@ impl Family {
         }
     }
 
+    /// Map a descriptor/host name back to its family. `None` for every host
+    /// outside the OpenCode family.
+    pub fn from_host_name(name: &str) -> Option<Self> {
+        match name {
+            "opencode" => Some(Family::OpenCode),
+            "kilo" => Some(Family::Kilo),
+            _ => None,
+        }
+    }
+
     /// Environment variable prefix. Verified present in both binaries.
     pub fn env_prefix(self) -> &'static str {
         match self {

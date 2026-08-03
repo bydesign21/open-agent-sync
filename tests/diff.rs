@@ -1103,6 +1103,257 @@ fn an_uninstalled_host_produces_no_rows_and_no_steps() {
 }
 
 // ---------------------------------------------------------------------------
+// OpenCode-family npm/local plugin targets
+// ---------------------------------------------------------------------------
+
+use agentsync::core::model::PluginOccurrence;
+use agentsync::manifest::{PluginEntry, PluginTarget};
+use agentsync::transaction::{ConfigOrigin, ConfigScope};
+
+fn oc_world(manifest: Manifest, opencode: HostSnapshot, kilo: HostSnapshot) -> World {
+    World {
+        manifest,
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![host("opencode"), host("kilo")],
+        snapshots: vec![opencode, kilo],
+        repos: vec![],
+        warnings: Vec::new(),
+    }
+}
+
+fn npm_target(spec: &str, scope: ScopeKind) -> PluginTarget {
+    PluginTarget {
+        npm: Some(spec.to_string()),
+        local: None,
+        scope,
+    }
+}
+
+fn local_target(source: &str, scope: ScopeKind) -> PluginTarget {
+    PluginTarget {
+        npm: None,
+        local: Some(source.to_string()),
+        scope,
+    }
+}
+
+fn plugin_entry_with_target(host: &str, target: PluginTarget) -> PluginEntry {
+    PluginEntry {
+        marketplace: None,
+        hosts: None,
+        targets: BTreeMap::from([(host.to_string(), target)]),
+    }
+}
+
+#[test]
+fn opencode_plugins_a_declared_npm_target_missing_from_the_host_is_reported_and_plans_an_edit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_dir = tmp.path().join("cfg/opencode");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let cfg_path = cfg_dir.join("opencode.jsonc");
+    std::fs::write(&cfg_path, "{}\n").unwrap();
+
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "security-guidance".into(),
+        plugin_entry_with_target(
+            "opencode",
+            npm_target("@company/opencode-security@1.4.2", ScopeKind::User),
+        ),
+    );
+
+    let mut opencode = snapshot("opencode", &[]);
+    let hash = agentsync::transaction::compute_sha256(b"{}\n");
+    opencode.plugin_targets.config.insert(
+        ScopeKind::User,
+        agentsync::core::model::PluginConfigSource {
+            origin: ConfigOrigin::new(&cfg_path, ConfigScope::Global, 70, hash),
+            entries: Vec::new(),
+        },
+    );
+    let kilo = snapshot("kilo", &[]);
+    let w = oc_world(manifest, opencode, kilo);
+    // Nothing in the opencode config yet, so the target is missing.
+
+    let mut rows = w.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.name == "security-guidance" && r.domain == Domain::Plugins)
+        .expect("target row present");
+    assert_eq!(row.severity, Severity::Normal);
+    assert!(row.headline.contains("missing"), "{}", row.headline);
+
+    for r in rows.iter_mut() {
+        r.accepted = r.name == "security-guidance" && r.actionable();
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::ConfigTransaction(_))),
+        "a missing npm target must plan a config transaction: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn opencode_plugins_a_present_npm_target_is_in_sync() {
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "security-guidance".into(),
+        plugin_entry_with_target(
+            "opencode",
+            npm_target("@company/opencode-security@1.4.2", ScopeKind::User),
+        ),
+    );
+
+    let mut opencode = snapshot("opencode", &[]);
+    opencode.plugin_targets.occurrences.insert(
+        "@company/opencode-security@1.4.2".to_string(),
+        vec![PluginOccurrence::Config(ConfigOrigin::new(
+            "/cfg/opencode/opencode.jsonc",
+            ConfigScope::Global,
+            70,
+            "deadbeef",
+        ))],
+    );
+    let kilo = snapshot("kilo", &[]);
+    let w = oc_world(manifest, opencode, kilo);
+
+    let rows = w.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.name == "security-guidance" && r.domain == Domain::Plugins)
+        .expect("target row present");
+    assert_eq!(row.severity, Severity::Synced, "{}", row.headline);
+}
+
+#[test]
+fn opencode_plugins_duplicate_occurrences_are_reported_not_collapsed() {
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "security-guidance".into(),
+        plugin_entry_with_target(
+            "opencode",
+            npm_target("@company/opencode-security@1.4.2", ScopeKind::User),
+        ),
+    );
+
+    let mut opencode = snapshot("opencode", &[]);
+    opencode.plugin_targets.occurrences.insert(
+        "@company/opencode-security@1.4.2".to_string(),
+        vec![
+            PluginOccurrence::Config(ConfigOrigin::new(
+                "/cfg/opencode/opencode.jsonc",
+                ConfigScope::Global,
+                70,
+                "global-hash",
+            )),
+            PluginOccurrence::Config(ConfigOrigin::new(
+                "/repo/.opencode/opencode.jsonc",
+                ConfigScope::Project,
+                20,
+                "project-hash",
+            )),
+        ],
+    );
+    let kilo = snapshot("kilo", &[]);
+    let w = oc_world(manifest, opencode, kilo);
+
+    let rows = w.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.name == "security-guidance" && r.domain == Domain::Plugins)
+        .expect("target row present");
+    assert_eq!(row.severity, Severity::Warn);
+    assert!(row.headline.contains("duplicate"), "{}", row.headline);
+}
+
+#[test]
+fn kilo_plugins_a_declared_local_target_missing_from_the_host_is_reported_and_plans_a_copy() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("plugins")).unwrap();
+    std::fs::write(
+        tmp.path().join("plugins/local-policy.ts"),
+        "export async function AgentsyncHooks() {}\n",
+    )
+    .unwrap();
+
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "local-policy".into(),
+        plugin_entry_with_target(
+            "kilo",
+            local_target("plugins/local-policy.ts", ScopeKind::Project),
+        ),
+    );
+
+    let mut kilo = snapshot("kilo", &[]);
+    kilo.plugin_targets
+        .profile_dir
+        .insert(ScopeKind::Project, tmp.path().join("repo/.kilo"));
+    let opencode = snapshot("opencode", &[]);
+    let mut w = oc_world(manifest, opencode, kilo);
+    w.manifest_path = tmp.path().join(".agentsync.toml");
+
+    let mut rows = w.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.name == "local-policy" && r.domain == Domain::Plugins)
+        .expect("target row present");
+    assert!(row.headline.contains("missing"), "{}", row.headline);
+
+    for r in rows.iter_mut() {
+        r.accepted = r.name == "local-policy" && r.actionable();
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::FileTransaction(_))),
+        "a missing local target must plan a file copy: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn kilo_plugins_npm_and_local_identities_never_collide() {
+    // An npm spec and a local host-owned destination live in different
+    // identity namespaces, even when their text happens to coincide.
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "same-name".into(),
+        plugin_entry_with_target("kilo", npm_target("same-name", ScopeKind::User)),
+    );
+
+    let mut kilo = snapshot("kilo", &[]);
+    // A *local* occurrence recorded under the destination file-stem identity
+    // must not satisfy the npm target above, which is looked up by its own
+    // spec text.
+    kilo.plugin_targets.occurrences.insert(
+        "agentsync-same-name".to_string(),
+        vec![PluginOccurrence::File {
+            path: PathBuf::from("/profile/plugin/agentsync-same-name.ts"),
+            sha256: "abc".into(),
+            scope: ScopeKind::User,
+        }],
+    );
+    let opencode = snapshot("opencode", &[]);
+    let w = oc_world(manifest, opencode, kilo);
+
+    let rows = w.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.name == "same-name" && r.domain == Domain::Plugins)
+        .expect("target row present");
+    assert!(
+        row.headline.contains("missing"),
+        "the local occurrence must not satisfy the distinct npm identity: {}",
+        row.headline
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Hooks domain
 // ---------------------------------------------------------------------------
 

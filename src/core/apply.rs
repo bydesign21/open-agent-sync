@@ -361,11 +361,19 @@ fn apply_manifest_op(manifest: &mut Manifest, op: &ManifestOp) -> Result<()> {
                 .hosts = hosts.clone();
         }
         ManifestOp::UpsertPlugin { name, marketplace } => {
+            // Preserve any existing explicit host targets: this op only ever
+            // changes the marketplace pin, never the OpenCode/Kilo mapping.
+            let targets = manifest
+                .plugins
+                .get(name)
+                .map(|e| e.targets.clone())
+                .unwrap_or_default();
             manifest.plugins.insert(
                 name.clone(),
                 crate::manifest::PluginEntry {
                     marketplace: marketplace.clone(),
                     hosts: None,
+                    targets,
                 },
             );
         }

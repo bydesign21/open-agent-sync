@@ -1018,3 +1018,241 @@ hosts = ["fakehost"]
         "the guarded removal must never have been spawned, but its marker file exists"
     );
 }
+
+// ---------------------------------------------------------------------------
+// OpenCode-family npm/local plugin targets: two-pass convergence
+// ---------------------------------------------------------------------------
+//
+// These read real files through `opencode_family::plugins::read_full_state`,
+// on both passes, rather than hand-building `HostSnapshot`. That is the real
+// proof: the second pass sees exactly what the first pass's apply actually
+// wrote to disk, not what the test author assumed it wrote.
+
+use agentsync::core::model::{HostSnapshot, ScopeKind};
+use agentsync::hosts::opencode_family::layers::{Env, Family};
+use agentsync::hosts::opencode_family::plugins as ocp;
+use agentsync::hosts::{Host, descriptor};
+use agentsync::manifest::{PluginEntry, PluginTarget};
+use std::collections::BTreeMap;
+
+fn family_host(name: &str) -> Host {
+    let text = descriptor::BUILTIN
+        .iter()
+        .find(|(n, _)| *n == name)
+        .expect("builtin descriptor")
+        .1;
+    Host {
+        descriptor: descriptor::parse(text, name).unwrap(),
+        bin: Some(std::path::PathBuf::from(format!("/usr/bin/{name}"))),
+    }
+}
+
+fn family_snapshot(name: &str, family: Family, env: &Env, repo: Option<&Path>) -> HostSnapshot {
+    HostSnapshot {
+        host: name.to_string(),
+        display: name.to_string(),
+        detected: true,
+        plugin_targets: ocp::read_full_state(family, env, repo),
+        ..Default::default()
+    }
+}
+
+fn family_world(
+    manifest: Manifest,
+    manifest_path: std::path::PathBuf,
+    env: &Env,
+    repo: Option<&Path>,
+) -> World {
+    World {
+        manifest,
+        manifest_path,
+        hosts: vec![family_host("opencode"), family_host("kilo")],
+        snapshots: vec![
+            family_snapshot("opencode", Family::OpenCode, env, repo),
+            family_snapshot("kilo", Family::Kilo, env, repo),
+        ],
+        repos: repo
+            .map(|r| vec![r.display().to_string()])
+            .unwrap_or_default(),
+        warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn opencode_plugins_converge_after_two_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_home = tmp.path().join("cfg");
+    let env =
+        Env::new(tmp.path().join("home")).set("XDG_CONFIG_HOME", cfg_home.display().to_string());
+
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "security-guidance".into(),
+        PluginEntry {
+            marketplace: None,
+            hosts: None,
+            targets: BTreeMap::from([(
+                "opencode".to_string(),
+                PluginTarget {
+                    npm: Some("@company/opencode-security@1.4.2".into()),
+                    local: None,
+                    scope: ScopeKind::User,
+                },
+            )]),
+        },
+    );
+    let manifest_path = tmp.path().join("manifest.toml");
+
+    // Pass 1: nothing on disk yet, so the target is missing and a real
+    // config transaction must be planned and applied.
+    let world = family_world(manifest.clone(), manifest_path.clone(), &env, None);
+    let mut rows = world.rows();
+    for row in rows.iter_mut() {
+        row.accepted = row.name == "security-guidance" && row.actionable();
+    }
+    let plan = world.plan(&rows);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::ConfigTransaction(_))),
+        "pass 1 must plan a config transaction: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    let mut manifest_for_apply = Manifest::default();
+    let report = apply::run(&plan, &mut manifest_for_apply, &manifest_path, &[], |_| {});
+    assert!(
+        report
+            .results
+            .iter()
+            .all(|r| r.outcome == Outcome::Done || r.outcome == Outcome::Skipped),
+        "pass 1 must apply cleanly: {:?}",
+        report.results
+    );
+
+    let config_path = cfg_home.join("opencode/opencode.jsonc");
+    let written = std::fs::read_to_string(&config_path).expect("opencode config was written");
+    assert!(
+        written.contains("@company/opencode-security@1.4.2"),
+        "the npm spec must actually land in the plugin array: {written}"
+    );
+
+    // Pass 2: read the real file the first pass just wrote. The plan must
+    // contain no plugin mutation at all — that is the actual proof of
+    // convergence, not a second assertion about the file's contents.
+    let world2 = family_world(manifest, manifest_path.clone(), &env, None);
+    let rows2 = world2.rows();
+    let row2 = rows2
+        .iter()
+        .find(|r| r.name == "security-guidance" && r.domain == Domain::Plugins)
+        .expect("target row still present");
+    assert!(
+        !row2.actionable(),
+        "a converged target must have nothing left to do: {}",
+        row2.headline
+    );
+    let mut rows2_accept_everything = rows2;
+    for row in rows2_accept_everything.iter_mut() {
+        row.accepted = row.actionable();
+    }
+    let plan2 = world2.plan(&rows2_accept_everything);
+    assert!(
+        !plan2.steps.iter().any(|s| matches!(
+            &s.step,
+            Step::ConfigTransaction(_) | Step::FileTransaction(_)
+        )),
+        "the second plan must contain no plugin mutation: {:?}",
+        plan2.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn kilo_plugins_converge_after_two_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_home = tmp.path().join("cfg");
+    let repo = tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::create_dir_all(tmp.path().join("manifest-dir/plugins")).unwrap();
+    std::fs::write(
+        tmp.path().join("manifest-dir/plugins/local-policy.ts"),
+        "export async function AgentsyncHooks(ctx) { return {}; }\n",
+    )
+    .unwrap();
+    let env =
+        Env::new(tmp.path().join("home")).set("XDG_CONFIG_HOME", cfg_home.display().to_string());
+
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "local-policy".into(),
+        PluginEntry {
+            marketplace: None,
+            hosts: None,
+            targets: BTreeMap::from([(
+                "kilo".to_string(),
+                PluginTarget {
+                    npm: None,
+                    local: Some("plugins/local-policy.ts".into()),
+                    scope: ScopeKind::Project,
+                },
+            )]),
+        },
+    );
+    let manifest_path = tmp.path().join("manifest-dir/manifest.toml");
+
+    // Pass 1: the local plugin file exists at its source path, but has not
+    // been copied to Kilo's host-owned location yet.
+    let world = family_world(manifest.clone(), manifest_path.clone(), &env, Some(&repo));
+    let mut rows = world.rows();
+    for row in rows.iter_mut() {
+        row.accepted = row.name == "local-policy" && row.actionable();
+    }
+    let plan = world.plan(&rows);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::FileTransaction(_))),
+        "pass 1 must plan a file copy: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    let mut manifest_for_apply = Manifest::default();
+    let report = apply::run(&plan, &mut manifest_for_apply, &manifest_path, &[], |_| {});
+    assert!(
+        report
+            .results
+            .iter()
+            .all(|r| r.outcome == Outcome::Done || r.outcome == Outcome::Skipped),
+        "pass 1 must apply cleanly: {:?}",
+        report.results
+    );
+
+    let destination = repo.join(".kilo/plugin/agentsync-local-policy.ts");
+    assert!(
+        destination.is_file(),
+        "the local plugin must be copied to Kilo's host-owned location"
+    );
+
+    // Pass 2: read the real destination the first pass just wrote.
+    let world2 = family_world(manifest, manifest_path.clone(), &env, Some(&repo));
+    let rows2 = world2.rows();
+    let row2 = rows2
+        .iter()
+        .find(|r| r.name == "local-policy" && r.domain == Domain::Plugins)
+        .expect("target row still present");
+    assert!(
+        !row2.actionable(),
+        "a converged local target must have nothing left to do: {}",
+        row2.headline
+    );
+    let mut rows2_accept_everything = rows2;
+    for row in rows2_accept_everything.iter_mut() {
+        row.accepted = row.actionable();
+    }
+    let plan2 = world2.plan(&rows2_accept_everything);
+    assert!(
+        !plan2.steps.iter().any(|s| matches!(
+            &s.step,
+            Step::ConfigTransaction(_) | Step::FileTransaction(_)
+        )),
+        "the second plan must contain no plugin mutation: {:?}",
+        plan2.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}

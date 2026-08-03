@@ -11,3 +11,4 @@
 
 pub mod layers;
 pub mod mcp;
+pub mod plugins;
