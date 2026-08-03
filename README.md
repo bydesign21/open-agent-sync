@@ -614,10 +614,12 @@ Known gaps:
   `PostToolUse`, for both OpenCode and Kilo. The other seven measured callbacks
   have no source-side handler that could populate them, so every other event is
   reported blocked by name rather than given an invented mapping.
-- Six of the nine measured callbacks (`tool.execute.before`/`after`,
-  `chat.message`/`params`, `session.idle`/`error`) have not been triggered live:
-  doing so needs model-provider credentials that were unavailable. Their names
-  are confirmed from the installed binaries; `config` and `event` were fired
+- Four of the nine measured callbacks (`chat.message`/`params`,
+  `session.idle`/`error`) have never been triggered live: doing so needs
+  model-provider credentials that were unavailable. Their names are confirmed
+  from the installed binaries. `tool.execute.before`/`after` ARE proven live —
+  a real host-driven tool call fires them on both hosts in
+  `scripts/verify-opencode-family-e2e.sh` — and `config`/`event` were fired
   live against isolated profiles.
 - `timeout`'s unit for OpenCode/Kilo MCP servers could not be established
   against the pinned runtimes. It round-trips as an exact, opaque number; no

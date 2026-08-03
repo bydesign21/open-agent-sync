@@ -2012,9 +2012,18 @@ detect = { bin = \"opencode\" }
 
     // `Host::read` calls `Env::from_process()` internally for the OpenCode
     // family, so proving the real wiring requires a real (but fully
-    // isolated, tempdir-backed) `XDG_CONFIG_HOME`. No other test in this
-    // suite reads or sets this variable, and this test does not touch `HOME`
-    // or `PATH`, so it does not race with anything else here.
+    // isolated, tempdir-backed) `XDG_CONFIG_HOME`.
+    //
+    // This MUST hold `ENV_MUTEX`. An earlier version of this comment claimed
+    // no other test in this suite touched `XDG_CONFIG_HOME`. That was true
+    // when it was written and false by the time it shipped: three other tests
+    // now set it (`shared_agent_paths_converge`,
+    // `opencode_hooks_converge_after_two_passes`,
+    // `four_host_world_converges_after_two_passes`), and all three take the
+    // mutex. Skipping it here let this test stomp their `XDG_CONFIG_HOME`
+    // mid-run, failing them roughly one run in six with a missing-file error
+    // that looks like a product bug rather than a test race.
+    let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     let previous = std::env::var_os("XDG_CONFIG_HOME");
     unsafe { std::env::set_var("XDG_CONFIG_HOME", &cfg_home) };
     let result = host.read(&[]);

@@ -1014,14 +1014,23 @@ are wired, for both hosts. Every other Claude event is BLOCKED by name. No
 source-side handler exists that could populate the other seven callbacks, so a
 mapping would be invented data.
 
-### Honest limit on the callback measurement
+### Callback measurement — SUPERSEDED by OW-011, corrected here
 
-`tool.execute.before/after`, `chat.message/params`, `session.idle/error` could
-not be live-triggered: no model-provider credentials exist in this environment
-for a real session or tool call. Evidence for those six is the exact string
-literals in the installed `kilo 7.4.17` binary. `config` and `event` WERE fired
-live against an isolated profile, with ctx keys matching the recorded contract.
-Record this as **partially could-not-check**, not as a full live measurement.
+This section previously said `tool.execute.before/after` had not been triggered
+live. **That is no longer true** and the stale claim was caught by the OW-012
+reviewer: `scripts/verify-opencode-family-e2e.sh` fires both callbacks through a
+real host-driven tool call on both hosts.
+
+Current, accurate position:
+
+| Callbacks | Status |
+|---|---|
+| `tool.execute.before`, `tool.execute.after` | **proven live**, both hosts, real session |
+| `config`, `event` | fired live against an isolated profile |
+| `chat.message`, `chat.params`, `session.idle`, `session.error` | **never triggered live** — needs model-provider credentials that were unavailable. Names confirmed from binary string literals only |
+
+So four of nine remain unproven live, not six. They are also unmapped in
+production, so nothing claims they work.
 
 ## OW-009 — bridge generated, not wired
 
