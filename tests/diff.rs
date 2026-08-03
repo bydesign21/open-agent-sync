@@ -2809,3 +2809,203 @@ fn kilo_mcp_removal_is_an_exact_jsonc_origin_removal_not_a_host_command() {
     let plan = world.plan(&rows);
     assert_mcp_write_is_config_transaction_never_host(&plan);
 }
+
+// ---------------------------------------------------------------------------
+// OpenCode hook bridge (OW-008)
+// ---------------------------------------------------------------------------
+//
+// OpenCode has no marketplace and no native hook config format at all
+// (measured; see `docs/open-work.md`), so a bridged handler never goes
+// through the Claude-plugin shim path (`src/shim/generate.rs`) the Codex
+// tests above exercise. `crate::paths::xdg_config_home()`/`state_dir()` read
+// process-global env vars, so this section guards them with its own lock —
+// no other test in this file reads either variable.
+static OPENCODE_HOOKS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct OpenCodeHooksEnvGuard {
+    _guard: std::sync::MutexGuard<'static, ()>,
+    previous_xdg: Option<String>,
+    previous_state: Option<String>,
+}
+
+impl OpenCodeHooksEnvGuard {
+    fn set(xdg_config_home: &Path, state_home: &Path) -> Self {
+        let guard = OPENCODE_HOOKS_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let previous_state = std::env::var("AGENTSYNC_STATE_HOME").ok();
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", xdg_config_home);
+            std::env::set_var("AGENTSYNC_STATE_HOME", state_home);
+        }
+        OpenCodeHooksEnvGuard {
+            _guard: guard,
+            previous_xdg,
+            previous_state,
+        }
+    }
+}
+
+impl Drop for OpenCodeHooksEnvGuard {
+    fn drop(&mut self) {
+        match &self.previous_xdg {
+            Some(v) => unsafe { std::env::set_var("XDG_CONFIG_HOME", v) },
+            None => unsafe { std::env::remove_var("XDG_CONFIG_HOME") },
+        }
+        match &self.previous_state {
+            Some(v) => unsafe { std::env::set_var("AGENTSYNC_STATE_HOME", v) },
+            None => unsafe { std::env::remove_var("AGENTSYNC_STATE_HOME") },
+        }
+    }
+}
+
+fn claude_source_host() -> Host {
+    host("claude")
+}
+
+fn opencode_hooks_world(handler: HookHandler, manifest: Manifest) -> World {
+    let mut claude_snap = HostSnapshot {
+        host: "claude".to_string(),
+        display: "claude".to_string(),
+        detected: true,
+        ..Default::default()
+    };
+    claude_snap.hooks.insert(handler.id.clone(), handler);
+
+    let opencode_snap = HostSnapshot {
+        host: "opencode".to_string(),
+        display: "opencode".to_string(),
+        detected: true,
+        ..Default::default()
+    };
+
+    World {
+        manifest,
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![claude_source_host(), host("opencode")],
+        snapshots: vec![claude_snap, opencode_snap],
+        repos: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
+fn pre_tool_use_handler() -> HookHandler {
+    let id = HookId {
+        source: "demo-plugin@demo-marketplace:hooks/hooks.json".to_string(),
+        event: "PreToolUse".to_string(),
+        group: 0,
+        index: 0,
+    };
+    let mut h = HookHandler::new(id, "PreToolUse", "true");
+    h.matcher = Some("Bash".to_string());
+    h
+}
+
+#[test]
+fn opencode_hooks_maps_pre_and_post_tool_use_to_the_measured_callbacks_and_blocks_everything_else()
+{
+    // PreToolUse/PostToolUse have an honest structural mapping onto OpenCode's
+    // measured tool.execute.before/after. Every other Claude event is left
+    // unmapped, so it must be blocked rather than silently ignored.
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = OpenCodeHooksEnvGuard::set(&tmp.path().join("cfg"), &tmp.path().join("state"));
+
+    let world = opencode_hooks_world(pre_tool_use_handler(), Manifest::default());
+    let rows = world.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.domain == Domain::Hooks && r.name.starts_with("demo-plugin"))
+        .expect("a hooks row for the PreToolUse handler");
+    assert_eq!(row.severity, Severity::Normal, "{row:?}");
+    assert!(
+        row.actions
+            .iter()
+            .any(|a| matches!(&a.kind, ActionKind::Push { hosts } if hosts == &vec!["opencode".to_string()])),
+        "must offer to generate the bridge on opencode: {row:?}"
+    );
+
+    // An event with no honest mapping (Stop has no OpenCode analog) must be
+    // blocked, never silently dropped or guessed at.
+    let mut stop_id = HookId {
+        source: "demo-plugin@demo-marketplace:hooks/hooks.json".to_string(),
+        event: "Stop".to_string(),
+        group: 0,
+        index: 0,
+    };
+    stop_id.index = 1;
+    let stop_handler = HookHandler::new(stop_id, "Stop", "true");
+    let world2 = opencode_hooks_world(stop_handler, Manifest::default());
+    let rows2 = world2.rows();
+    let row2 = rows2
+        .iter()
+        .find(|r| r.domain == Domain::Hooks)
+        .expect("a row for the unmapped Stop handler");
+    assert_eq!(row2.severity, Severity::Blocked, "{row2:?}");
+    assert!(
+        !row2.actionable(),
+        "an unmapped event must not be actionable"
+    );
+}
+
+#[test]
+fn opencode_hooks_plans_a_guarded_file_transaction_never_a_host_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = OpenCodeHooksEnvGuard::set(&tmp.path().join("cfg"), &tmp.path().join("state"));
+
+    let world = opencode_hooks_world(pre_tool_use_handler(), Manifest::default());
+    let mut rows = world.rows();
+    for row in rows.iter_mut() {
+        if row.domain == Domain::Hooks {
+            row.accepted = row.actionable();
+        }
+    }
+    let plan = world.plan(&rows);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::FileTransaction(_))),
+        "the OpenCode bridge must be a guarded FileTransaction: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .all(|s| !matches!(&s.step, Step::Host { .. })),
+        "OpenCode has no marketplace/plugin install command to invoke: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn opencode_hooks_a_rewake_configured_handler_is_reported_not_silently_bridged() {
+    // The bridge has no channel to deliver rewakeMessage/rewakeSummary
+    // through (see src/shim/bridge_output.rs); generating it anyway would
+    // silently promise an emulation that never happens.
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = OpenCodeHooksEnvGuard::set(&tmp.path().join("cfg"), &tmp.path().join("state"));
+
+    let mut handler = pre_tool_use_handler();
+    handler.rewake_message = Some("would rewake here".to_string());
+    let world = opencode_hooks_world(handler, Manifest::default());
+    let mut rows = world.rows();
+    for row in rows.iter_mut() {
+        if row.domain == Domain::Hooks {
+            row.accepted = row.actionable();
+        }
+    }
+    let plan = world.plan(&rows);
+    assert!(
+        !plan
+            .steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::FileTransaction(_))),
+        "a handler the bridge cannot faithfully deliver must not produce a write: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert!(
+        plan.notes.iter().any(|n| n.contains("rewakeMessage")),
+        "the refusal must be said out loud, not silently skipped: {:?}",
+        plan.notes
+    );
+}
