@@ -8,6 +8,7 @@
 //! requiring every generated shim to be rewritten.
 
 pub mod bridge_output;
+pub mod bridges;
 pub mod codex_output;
 pub mod generate;
 pub mod matcher;
