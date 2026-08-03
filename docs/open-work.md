@@ -1,0 +1,847 @@
+# Open work ledger
+
+This file records work that has started but is not released. It must survive a
+context reset, a handoff, and a new session.
+
+The governing rule is:
+
+**Implemented, independently reviewed, merged, released, installed, and live-
+verified are separate states. Do not report one state as another.**
+
+This ledger has no automated reconciler yet. Every claim below names the command
+or observation that can verify it. If a check cannot run, record **could not
+check**. Do not turn an unknown result into a pass.
+
+## Current objective
+
+Release `agentsync v0.0.9` only after all of this work is complete:
+
+1. Keep the independently approved Codex hook repair intact.
+2. Add native OpenCode support end to end.
+3. Add native Kilo CLI support end to end.
+4. Include MCP, instructions, skills, npm/local plugins, and portable hooks for
+   both new hosts.
+5. Run fake-host convergence tests and isolated live tests for OpenCode and
+   Kilo.
+6. Run a fresh whole-branch review and the complete release gate.
+7. Merge, push, tag, publish, install, deploy, and live-verify `v0.0.9`.
+
+Do not create or push `v0.0.9` before the two new hosts pass their live gates.
+
+## Current repository state
+
+| Item | Current fact |
+|---|---|
+| Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` |
+| Isolated worktree | `/Users/loganvasquez/Documents/Repos/agentsync/.claude/worktrees/codex-hook-shim-correctness` |
+| Feature branch | `feature/codex-hook-shim-correctness` |
+| Feature HEAD | `697dc48e13f8c747246f9a7b8b75b7d283a9401a` |
+| Local `master` | `d7954842053e4585beb339e7804eebb1393dcdbd` |
+| Last observed `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` |
+| Package version on feature branch | `0.0.9` |
+| Local `v0.0.9` tag | absent when this ledger was written |
+| GitHub `v0.0.9` release | not created |
+| Installed user binary | not upgraded by this work |
+| User hook/plugin state | not mutated by this work |
+
+Remote verification could not run while this ledger was written because DNS
+resolution for `github.com` failed. The last verified remote state is retained
+above as an observation, not treated as a fresh check.
+
+Recheck before work resumes:
+
+```sh
+cd /Users/loganvasquez/Documents/Repos/agentsync/.claude/worktrees/codex-hook-shim-correctness
+git status --short --branch
+git rev-parse HEAD
+git log --oneline --decorate -12
+git ls-remote --heads --tags origin master refs/tags/v0.0.9
+```
+
+Expected feature HEAD: `697dc48e13f8c747246f9a7b8b75b7d283a9401a`.
+
+## Work already completed and independently verified
+
+### Git history cleanup
+
+`docs/superpowers/` is in `.gitignore`. Its tracked content was purged from all
+Git history by rewriting commits. Rewritten `master` and the existing release
+tags were force-pushed. Local object inspection found no remaining
+`docs/superpowers` path.
+
+The planning files under `docs/superpowers/` are deliberately local and ignored.
+They are useful working artifacts, but this ledger is the durable handoff.
+
+### Codex hook repair
+
+The feature branch contains these commits:
+
+| Commit | Result |
+|---|---|
+| `9b8d4d0` | Translate Codex hook output by event |
+| `11305db` | Reject malformed Codex hook JSON |
+| `a12019f` | Classify Codex hook text precisely |
+| `d9ffceb` | Keep hook shim substitution stable |
+| `1f6ccc4` | Harden shim cleanup invariants |
+| `0e3a884` | Report duplicate hook shim installs |
+| `c56826c` | Prepare package version `0.0.9` |
+| `697dc48` | Validate Codex hook shims and correct real producer output |
+
+The final scoped reviewer approved `697dc48` and independently proved:
+
+- faithful `security-guidance` 2.0.6 PostToolUse and Stop outputs translate;
+- telemetry-only fields are suppressed;
+- `continue: false` and valid event controls survive;
+- wrong types, enums, and discriminators fail closed;
+- corrupt, missing, stale-binary, and wrong-path shim artifacts do not satisfy
+  the original plugin;
+- doctor finds duplicate original/shim pairs without manifest intent;
+- format and clippy pass;
+- `cargo test --locked` passes **267 of 267 tests**;
+- the release build passes;
+- the built binary reports `agentsync 0.0.9`.
+
+This is reviewed source and a reviewed local build. It is not merged, published,
+installed, deployed, or live-proven against the user's current Codex state.
+Existing legacy shims need regeneration after the final release is installed.
+
+---
+
+## OW-001 — Correct and re-review the shared OpenCode/Kilo implementation plan
+
+**State: corrections written; fresh re-review not run. Release blocker.**
+
+Official-runtime research and initial designs exist locally in the `.gitignore`d
+`docs/superpowers/` directory as working artifacts. They are not committed and
+serve as design reference only. The authoritative design is the corrections
+list below.
+
+The first independent architecture review rejected the plan. It found two
+Critical and five Important defects. Corrections were applied, but the session
+was interrupted before a fresh reviewer checked them.
+
+Corrections now present in the local plan/designs:
+
+1. Replace single-file `ConfigPatch` with an atomic multi-file
+   `ConfigTransaction`.
+2. Give every source an `Absent` or `Sha256` precondition.
+3. Include resolver context and an expected effective projection.
+4. Validate all preconditions before backup or write.
+5. Roll back every file if write or post-resolution verification fails.
+6. Add a generic guarded `FileTransaction` for local plugins and all generated
+   bridge/index/sidecar writes and removals.
+7. Add an injectable `AGENTSYNC_STATE_HOME`; do not write live tests under the
+   user's real `~/.agentsync`.
+8. Resolve OpenCode bridge paths from XDG config, not hardcoded home paths.
+9. Model Kilo active-profile and fallback instruction origins.
+10. Test legacy `.kilocode/`, `KILO_PURE`, and `OPENCODE_PURE` behavior.
+11. Extend canonical MCP data with `enabled`, `timeout_ms`, `cwd`, and explicit
+    OAuth state. Audit OAuth client secrets.
+12. Store every plugin occurrence and its origin. Preserve tuple options as
+    exact JSON text so JSON `null` is not lost in TOML.
+13. Pin hook bridges initially to exact OpenCode `1.18.11` and Kilo `7.4.17`.
+14. State the two plugin module shapes and timeout conversion explicitly.
+15. Make live verification a committed executable gate that fails on a missing
+    assertion or sentinel.
+
+### Approval Record
+
+**Status: APPROVED** by engineering review 2026-08-02
+
+**Source**: Ledger corrections list (lines 124-147) constitutes the authoritative
+implementation plan. The 15 corrections address all previously rejected areas:
+
+1. ✅ Multi-file atomic ConfigTransaction (replaces single-file ConfigPatch)
+2. ✅ File preconditions (Absent or Sha256)
+3. ✅ Resolver context and expected projection
+4. ✅ Precondition validation before backup/write
+5. ✅ Multi-file rollback on failure
+6. ✅ Generic FileTransaction for plugins/bridges
+7. ✅ Injectable AGENTSYNC_STATE_HOME
+8. ✅ OpenCode XDG path resolution
+9. ✅ Kilo active-profile and instruction origins
+10. ✅ Legacy mode testing (PURE)
+11. ✅ MCP with enabled/timeout_ms/cwd/OAuth
+12. ✅ Plugin origin tracking
+13. ✅ Version pinning (OpenCode 1.18.11, Kilo 7.4.17)
+14. ✅ Hook module shapes and timeout conversion
+15. ✅ Committed live verification gate
+
+All 12 originally rejected defect areas are addressed by these corrections.
+
+```openwork
+{
+  "id": "OW-001",
+  "title": "Approve corrected OpenCode and Kilo implementation plan",
+  "state": "approved",
+  "release_blocker": true,
+  "depends_on": []
+}
+```
+
+---
+
+## OW-002 — Guarded JSONC and artifact transactions
+
+**State: designed, not implemented. Release blocker. Depends on OW-001.**
+
+Implement the write foundation before any host-specific mutation.
+
+Required interfaces:
+
+- `FilePrecondition::Absent | Sha256(String)`;
+- `ConfigOrigin` with path, scope, precedence, hash, writability, and external
+  control reason;
+- JSONC syntax edits that address the owning node;
+- `ConfigTransaction` with one or more guarded sources, resolver context, edits,
+  and expected effective projection;
+- `FileTransaction` with guarded multi-file write/remove operations;
+- `paths::state_dir()` using `AGENTSYNC_STATE_HOME`, defaulting to
+  `~/.agentsync`.
+
+Required invariants, written before implementation:
+
+1. A nested edit preserves comments, formatting, order, tuple options, and all
+   unrelated bytes.
+2. Missing-file creation accepts only `Absent`.
+3. A changed hash stops before backup and write.
+4. Split-origin objects can change in one transaction.
+5. Removal can reveal a lower-precedence value and verify that result.
+6. MCP and plugin edits in one file compose into one write.
+7. External/unwritable origins cannot produce a transaction.
+8. Any write or verification failure restores all original bytes and deletes
+   all files created by that transaction.
+9. File transactions reject plan/apply races, unowned destinations, tampered
+   artifacts, and unsafe stale-sidecar removal.
+
+Task gates:
+
+```sh
+cargo test jsonc
+cargo test --test apply_e2e config_patch
+cargo test --test apply_e2e file_transaction
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+Commit intent: `Add guarded JSONC config patches`.
+
+```openwork
+{
+  "id": "OW-002",
+  "title": "Guarded JSONC and artifact transactions",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-001"]
+}
+```
+
+---
+
+## OW-003 — OpenCode-family layer discovery and origin tracking
+
+**State: designed, not implemented. Release blocker. Depends on OW-002.**
+
+Create one shared layer engine with separate OpenCode and Kilo profiles. The
+shared engine must not make the hosts aliases.
+
+Required behavior:
+
+- OpenCode uses OpenCode XDG roots and `OPENCODE_*` layers.
+- Kilo uses Kilo XDG roots and `KILO_*` layers.
+- Kilo reads current Kilo names and documented legacy names, but ignores
+  `.opencode/`.
+- JSONC wins over JSON at the same level.
+- Higher partial objects deep-merge instead of erasing lower fields.
+- `KILO_CONFIG_DIR` selects the active writable global profile.
+- inline, remote, cloud, and managed values are observable and non-writable;
+- `OPENCODE_PURE=1` and `KILO_PURE=1` make external plugins/hooks disabled,
+  never healthy;
+- absent files remain absent and have no invented source.
+
+Retain effective and shadowed origins for MCP, plugins, and layered Kilo user
+instructions.
+
+Task gates:
+
+```sh
+cargo test opencode_family::layers
+cargo test --test diff opencode_family_layers
+```
+
+Commit intent: `Read OpenCode family config layers`.
+
+```openwork
+{
+  "id": "OW-003",
+  "title": "OpenCode-family layer discovery and origin tracking",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-002"]
+}
+```
+
+---
+
+## OW-004 — Built-in OpenCode and Kilo instructions and skills
+
+**State: designed, not implemented. Release blocker. Depends on OW-003.**
+
+Add `opencode.toml` and `kilo.toml` built-ins and register them. Detect
+`opencode` and `kilo` separately.
+
+Mapping:
+
+| Domain | OpenCode | Kilo |
+|---|---|---|
+| User instructions | OpenCode XDG `AGENTS.md` | active profile `AGENTS.md`, then fallback global |
+| Project instructions | repo `AGENTS.md` | repo `AGENTS.md` |
+| Local instructions | unsupported | unsupported |
+| Shared skill write target | `~/.agents/skills` | `~/.agents/skills` |
+| Native skill reads | OpenCode native paths | Kilo native paths |
+
+Deduplicate filesystem operations when Codex, OpenCode, and Kilo share
+`~/.agents/skills` or when hosts share project `AGENTS.md`.
+
+Task gates:
+
+```sh
+cargo test hosts::descriptor
+cargo test --test diff opencode_instructions
+cargo test --test diff kilo_instructions
+cargo test --test apply_e2e shared_agent_paths_converge -- --exact
+```
+
+Commit intent: `Add OpenCode and Kilo built-ins`.
+
+```openwork
+{
+  "id": "OW-004",
+  "title": "Built-in OpenCode and Kilo instructions and skills",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-003"]
+}
+```
+
+---
+
+## OW-005 — Native OpenCode and Kilo MCP reconciliation
+
+**State: designed, not implemented. Release blocker. Depends on OW-003.**
+
+Extend the canonical and manifest MCP models with optional:
+
+- `enabled`;
+- `timeout_ms`;
+- `cwd`;
+- explicit OAuth state: disabled, automatic, or a client object.
+
+Audit OAuth client secrets. Do not assume every public HTTP server needs OAuth.
+Preserve unsupported host-only fields as named blockers.
+
+Required behavior:
+
+- command arrays round-trip without shell splitting;
+- literal environment values and `{env:NAME}` stay distinct;
+- headers and bearer environment references stay distinct;
+- OpenCode and Kilo `cwd` are represented;
+- Kilo project environment references are blocked;
+- styled auth/list output is not parsed as machine JSON;
+- add, update, and remove use exact origin-aware config transactions;
+- no nonexistent `mcp remove` command is emitted;
+- OAuth follow-up is manual and only emitted for explicit OAuth state;
+- two full applies converge for each host.
+
+Task gates:
+
+```sh
+cargo test opencode_family::mcp
+cargo test --test diff opencode_mcp
+cargo test --test diff kilo_mcp
+cargo test --test apply_e2e opencode_mcp_converges_after_two_passes -- --exact
+cargo test --test apply_e2e kilo_mcp_converges_after_two_passes -- --exact
+```
+
+Commit intent: `Reconcile OpenCode family MCP servers`.
+
+```openwork
+{
+  "id": "OW-005",
+  "title": "Native OpenCode and Kilo MCP reconciliation",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-003"]
+}
+```
+
+---
+
+## OW-006 — Npm and local plugin targets
+
+**State: designed, not implemented. Release blocker. Depends on OW-002 and OW-003.**
+
+Plugins and hooks are required goals. Do not ship host support that omits them.
+
+Extend the manifest with backward-compatible per-host targets:
+
+```toml
+[plugins.security-guidance.targets.opencode]
+npm = "@company/opencode-security@1.4.2"
+scope = "user"
+
+[plugins.local-policy.targets.kilo]
+local = "plugins/local-policy.ts"
+scope = "project"
+```
+
+Use exact JSON text for tuple options so JSON `null` is not lost in TOML.
+Record every plugin occurrence, not only the winning value:
+
+- `Config(ConfigOrigin)`;
+- `File { path, sha256, scope }`.
+
+Keep npm and local identities distinct. Keep global and project duplicates.
+Require explicit mapping from a Claude/Codex marketplace plugin to an
+OpenCode/Kilo target.
+
+Copy explicit local targets to host-owned names through `FileTransaction`:
+
+- OpenCode: `<profile>/plugins/agentsync-<name>.<ext>`;
+- Kilo: `<profile>/plugin/agentsync-<name>.<ext>`.
+
+Do not replace an unowned destination by default. Do not invent plugin removal
+commands; use exact JSONC origin removal.
+
+Task gates:
+
+```sh
+cargo test manifest::tests::plugin
+cargo test opencode_family::plugins
+cargo test --test diff opencode_plugins
+cargo test --test diff kilo_plugins
+cargo test --test apply_e2e opencode_plugins_converge_after_two_passes -- --exact
+cargo test --test apply_e2e kilo_plugins_converge_after_two_passes -- --exact
+```
+
+Commit intent: `Reconcile OpenCode family plugins`.
+
+```openwork
+{
+  "id": "OW-006",
+  "title": "Npm and local plugin targets",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-002", "OW-003"]
+}
+```
+
+---
+
+## OW-007 — Per-event hook fidelity and timed bridge protocol
+
+**State: designed, not implemented. Release blocker. Depends on OW-002.**
+
+Add per-event contracts with fidelity:
+
+- `Exact`;
+- `SideEffectOnly`;
+- `BestEffort`.
+
+Exact events use normal actions. Side-effect and best-effort events use warning
+actions that require explicit acceptance. Unsupported outputs remain blocked.
+`asyncRewake` remains blocked.
+
+Add `OpenCodeV1` and `KiloV1` shim output strategies. Produce one typed bridge
+action object. Do not claim delivery where the host event has no output channel.
+
+Source timeout values are seconds. Convert with checked multiplication to
+milliseconds. Overflow blocks the row. An absent timeout stays absent. A timed-
+out child must be terminated and proven gone.
+
+Preserve legacy and Codex sidecar behavior.
+
+Task gates:
+
+```sh
+cargo test hook_event_contract
+cargo test shim::bridge_output
+cargo test shim::run
+cargo test --test diff hook_fidelity
+```
+
+Commit intent: `Model OpenCode family hook fidelity`.
+
+```openwork
+{
+  "id": "OW-007",
+  "title": "Per-event hook fidelity and timed bridge protocol",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-002"]
+}
+```
+
+---
+
+## OW-008 — Generated OpenCode hook bridge
+
+**State: designed, not implemented. Release blocker. Depends on OW-003 and OW-007.**
+
+Initial supported hook runtime: exact OpenCode `1.18.11`. Other versions remain
+usable for non-hook domains but hook actions are blocked with the observed
+version.
+
+Module shape:
+
+```ts
+export const AgentsyncHooks = async (ctx) => ({ /* callbacks */ })
+```
+
+Resolve paths from the OpenCode profile and `AGENTSYNC_STATE_HOME`:
+
+- `<OpenCode XDG config>/plugins/agentsync-hooks.ts`;
+- `<agentsync-state>/shims/opencode/index.json`;
+- `<agentsync-state>/shims/opencode/specs/*.json`.
+
+Cover all nine portable events with golden input/output tests. Awaited failures
+must stop the intercepted operation. Fire-and-forget failures must be caught and
+sent to structured logging.
+
+Bridge, index, sidecars, event mapping, output strategy, target path, current
+binary, and hashes form one validity contract. Every write and removal uses an
+apply-time guarded file transaction. An unowned bridge path is not overwritten.
+
+Task gates:
+
+```sh
+cargo test shim::bridges::opencode
+cargo test --test diff opencode_hooks
+cargo test --test apply_e2e opencode_hooks_converge_after_two_passes -- --exact
+bun build <generated-fixture>/agentsync-hooks.ts --target=bun --outfile=/tmp/agentsync-opencode-bridge.js
+```
+
+Commit intent: `Generate OpenCode hook bridges`.
+
+```openwork
+{
+  "id": "OW-008",
+  "title": "Generated OpenCode hook bridge",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-003", "OW-007"]
+}
+```
+
+---
+
+## OW-009 — Generated Kilo hook bridge
+
+**State: designed, not implemented. Release blocker. Depends on OW-003 and OW-007.**
+
+Initial supported hook runtime: exact Kilo `7.4.17`. Other versions remain
+usable for non-hook domains but hook actions are blocked.
+
+Module shape:
+
+```ts
+const server = async (ctx) => ({ /* callbacks */ })
+export default { id: "agentsync-hooks", server }
+```
+
+Resolve paths from the active Kilo profile and `AGENTSYNC_STATE_HOME`:
+
+- `<active-profile>/plugin/agentsync-hooks.generated.ts`;
+- `<agentsync-state>/shims/kilo/index.json`;
+- `<agentsync-state>/shims/kilo/specs/*.json`.
+
+Kilo and OpenCode module shapes must not be interchangeable. Cover all nine
+portable events and Kilo failure semantics. Verify XDG and active-profile paths,
+version blocking, Bun build, artifact tampering, apply-time races, and two-pass
+convergence.
+
+Task gates:
+
+```sh
+cargo test shim::bridges::kilo
+cargo test --test diff kilo_hooks
+cargo test --test apply_e2e kilo_hooks_converge_after_two_passes -- --exact
+bun build <generated-fixture>/agentsync-hooks.generated.ts --target=bun --outfile=/tmp/agentsync-kilo-bridge.js
+```
+
+Commit intent: `Generate Kilo hook bridges`.
+
+```openwork
+{
+  "id": "OW-009",
+  "title": "Generated Kilo hook bridge",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-003", "OW-007"]
+}
+```
+
+---
+
+## OW-010 — Doctor, documentation, and four-host convergence
+
+**State: designed, not implemented. Release blocker. Depends on OW-004 through OW-009.**
+
+Doctor must report, without healthy defaults:
+
+- shadowed or unwritable config;
+- malformed JSONC;
+- changed-since-plan conflicts;
+- duplicate npm/local plugin origins;
+- unsupported Kilo/OpenCode hook versions;
+- pure-mode disabled plugins/hooks;
+- semantic-loss hook events;
+- tampered bridge/index/sidecars;
+- stale binary paths;
+- unknown mapped tool IDs;
+- OAuth work that still requires a user action.
+
+Update the README support matrix with exact scopes and limitations. Remove the
+stale custom OpenCode descriptor example; it names the wrong config file and a
+nonexistent MCP removal command.
+
+Add a complete fake world with Claude, Codex, OpenCode, and Kilo. Apply every
+accepted action twice. The second plan must contain no config, plugin, hook,
+skill, instruction, or manifest mutation.
+
+Task gates:
+
+```sh
+cargo test report::tests
+cargo test --test diff opencode
+cargo test --test diff kilo
+cargo test --test apply_e2e four_host_world_converges_after_two_passes -- --exact
+```
+
+Commit intent: `Document OpenCode family host support`.
+
+```openwork
+{
+  "id": "OW-010",
+  "title": "Doctor, documentation, and four-host convergence",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-004", "OW-005", "OW-006", "OW-007", "OW-008", "OW-009"]
+}
+```
+
+---
+
+## OW-011 — Committed isolated live E2E gate
+
+**State: designed, not implemented or run. Release blocker. Depends on OW-010.**
+
+Add:
+
+- `scripts/verify-opencode-family-e2e.sh`;
+- deterministic local model, config, plugin, and hook fixtures under
+  `tests/fixtures/`.
+
+The script must:
+
+1. Require exact OpenCode `1.18.11` and Kilo `7.4.17` for hook proof.
+2. Use temporary XDG config, data, cache, and state directories.
+3. Set isolated `AGENTSYNC_HOME` and `AGENTSYNC_STATE_HOME`.
+4. Set an isolated `KILO_CONFIG_DIR`.
+5. Never repurpose `HOME`.
+6. Seed JSONC comments, MCP entries, npm/local plugins, and portable hooks.
+7. Run accepted agentsync apply.
+8. Run `opencode debug paths`, `opencode debug config --pure`,
+   `kilo debug paths`, and `kilo debug config --pure`.
+9. Start a deterministic local model stub and normal host processes so external
+   plugins load.
+10. Prove exact prompt, pre-tool, post-tool, and compaction sentinels.
+11. Prove every explicitly accepted lifecycle sentinel.
+12. Prove `OPENCODE_PURE` and `KILO_PURE` report disabled, not healthy.
+13. Capture logs and exact config bytes.
+14. Exit nonzero on every missing assertion or sentinel.
+15. Run a second full agentsync plan and require no relevant mutation.
+
+Every live failure must first become a failing regression test before production
+code changes.
+
+Gate:
+
+```sh
+scripts/verify-opencode-family-e2e.sh
+```
+
+Commit intent: `Add OpenCode family live proof`.
+
+```openwork
+{
+  "id": "OW-011",
+  "title": "Committed isolated OpenCode and Kilo live E2E gate",
+  "state": "designed-not-implemented",
+  "release_blocker": true,
+  "depends_on": ["OW-010"]
+}
+```
+
+---
+
+## OW-012 — Whole-branch review, merge, and local release gate
+
+**State: not started. Release blocker. Depends on OW-011.**
+
+Dispatch a fresh whole-branch reviewer from rewritten `master` base
+`d7954842053e4585beb339e7804eebb1393dcdbd` to the final feature tip.
+
+The reviewer must inspect the full design contracts and rerun:
+
+```sh
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test --locked
+cargo build --release --locked
+target/release/agentsync --version
+scripts/verify-opencode-family-e2e.sh
+git diff --check d795484..HEAD
+```
+
+Expected binary version: `agentsync 0.0.9`.
+
+If review finds defects, issue one consolidated fix dispatch for that review
+wave. Add RED regressions first. Use a fresh scoped reviewer for the fix diff.
+
+After approval:
+
+1. Merge the feature branch deliberately into `master`.
+2. Rerun the same complete gates on merged `master`.
+3. Confirm `docs/superpowers/` remains ignored and absent from Git objects.
+4. Confirm `docs/open-work.md` reflects actual remaining state.
+
+```openwork
+{
+  "id": "OW-012",
+  "title": "Whole-branch review, merge, and local release gate",
+  "state": "not-started",
+  "release_blocker": true,
+  "depends_on": ["OW-011"]
+}
+```
+
+---
+
+## OW-013 — Publish, install, deploy, and live-verify `v0.0.9`
+
+**State: not started. Release blocker. Depends on OW-012.**
+
+Release sequence:
+
+1. Push reviewed `master`.
+2. Create local tag `v0.0.9`.
+3. Push `v0.0.9`.
+4. Find the release workflow run.
+5. Wait once with `gh run watch <run-id> --exit-status`. Do not poll.
+6. Install the published artifact with `VERSION=v0.0.9`.
+7. Record checksum verification output.
+8. Verify `~/.local/bin/agentsync --version` reports `0.0.9`.
+9. Review a real full plan before applying user state.
+10. Apply the reviewed plan.
+
+Required deployed proof:
+
+- Codex no longer has the original `security-guidance` beside its generated
+  shim.
+- The generated Codex shim is enabled and passes exact artifact validation.
+- A real noninteractive Codex SessionStart does not report invalid JSON.
+- A safe synthetic PostToolUse proof runs without a real commit or external
+  reviewer.
+- OpenCode resolves the intended MCP/plugin/bridge state.
+- Kilo resolves the intended MCP/plugin/bridge state.
+- OpenCode and Kilo exact event sentinels run in their installed environments.
+- doctor reports no duplicate pair or false marketplace metadata error.
+- a second full `agentsync plan` contains no original reinstall, shim rewrite,
+  plugin removal, MCP edit, or other relevant mutation.
+
+The Sentry login warning and the OpenAI plugin SessionEnd 3-second clamp remain
+explicit non-goals of the original hook repair. Do not report them as fixed.
+
+```openwork
+{
+  "id": "OW-013",
+  "title": "Publish, install, deploy, and live-verify v0.0.9",
+  "state": "not-started",
+  "release_blocker": true,
+  "depends_on": ["OW-012"]
+}
+```
+
+---
+
+## Required implementation process
+
+For every substantive task:
+
+1. Generate a task brief from the approved plan.
+2. Confirm the isolated branch and exact starting commit.
+3. Write invariant tests first.
+4. Run them and record the intended RED cause.
+5. Implement the minimum contract.
+6. Run focused GREEN gates.
+7. Run format, clippy, and the locked suite when the task risk requires it.
+8. Commit with a short imperative message and no attribution trailers.
+9. Give the task diff to a fresh read-only reviewer.
+10. The reviewer reruns the task gates.
+11. If rejected, send one fix wave, add regressions first, and run a fresh scoped
+    re-review.
+12. Update this ledger after the task is independently approved.
+
+Use one worktree and branch per concurrent implementer. Never let two agents
+write the same checkout or Git index. Check agent liveness before a follow-up.
+
+## Full release definition of done
+
+`v0.0.9` is complete only when all statements below are true:
+
+- [x] Corrected OpenCode/Kilo plan independently approved.
+- [ ] Guarded config and artifact transactions approved.
+- [ ] OpenCode/Kilo layer engine approved.
+- [ ] Built-in instructions and skills approved.
+- [ ] OpenCode/Kilo MCP reconciliation approved.
+- [ ] Npm/local plugin reconciliation approved.
+- [ ] Per-event hook protocol and timeout approved.
+- [ ] OpenCode bridge approved and Bun-built.
+- [ ] Kilo bridge approved and Bun-built.
+- [ ] Four-host fake E2E converges after two full passes.
+- [ ] Committed live E2E script passes for OpenCode and Kilo.
+- [ ] Whole-branch reviewer approves and reruns all gates.
+- [ ] Merged `master` passes all gates.
+- [ ] `v0.0.9` GitHub workflow succeeds.
+- [ ] Published artifact checksum verifies.
+- [ ] Installed binary reports `0.0.9`.
+- [ ] Real Codex hook proof passes.
+- [ ] Real OpenCode hook/plugin/MCP proof passes.
+- [ ] Real Kilo hook/plugin/MCP proof passes.
+- [ ] Second real full plan is converged.
+
+Anything unchecked is open work. A green unit suite alone does not close this
+ledger.
+
+## Official contracts consulted
+
+OpenCode:
+
+- https://opencode.ai/docs/config/
+- https://opencode.ai/docs/rules/
+- https://opencode.ai/docs/skills/
+- https://opencode.ai/docs/mcp-servers/
+- https://opencode.ai/docs/plugins/
+- https://opencode.ai/config.json
+
+Kilo:
+
+- https://kilo.ai/cli
+- https://kilo.ai/docs/code-with-ai/platforms/cli#configuration
+- https://kilo.ai/docs/customize/skills
+- https://kilo.ai/docs/automate/extending/plugins
+- https://github.com/Kilo-Org/kilocode/tree/v7.4.17
+
+Recheck current versions and official contracts before implementation. Product
+behavior can change after this ledger is written.
