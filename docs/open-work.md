@@ -417,7 +417,45 @@ Commit intent: `Read OpenCode family config layers`.
 
 ## OW-004 — Built-in OpenCode and Kilo instructions and skills
 
-**State: designed, not implemented. Release blocker. Depends on OW-003.**
+**State: partially implemented. Descriptors, instructions, skills, and the XDG
+placeholder are done and self-verified. The three diff/apply integration gates
+are NOT yet written. Release blocker. Depends on OW-003.**
+
+Delivered on `master` as `eb726c3` "Add OpenCode and Kilo built-ins":
+
+- `src/hosts/builtin/opencode.toml` and `src/hosts/builtin/kilo.toml`,
+  registered in `BUILTIN`, both detected as separate hosts;
+- `paths::xdg_config_home()` and a `{xdg_config}` placeholder in
+  `paths::expand()`. This was **not in the approved plan** and is required:
+  every existing descriptor path expands only `~` and `{repo}`, so an
+  XDG-rooted host would read the caller's real config the moment
+  `XDG_CONFIG_HOME` is set — which the OW-011 live gate always does;
+- 5 new descriptor tests: separate detection, no cross-host path reads, one
+  shared `~/.agents/skills` write target with Codex, XDG-rooted native paths,
+  and the local instruction scope blocked rather than invented.
+
+Measured skill directories (all four confirmed read by `opencode debug skill`,
+which emits JSON with a `location` field): `~/.agents/skills`,
+`<xdg config>/<id>/skill` (**singular**), `<xdg config>/<id>/skills`, and the
+project `.<id>/skill` directory.
+
+**Still open for this task**, all release-blocking:
+
+1. `cargo test --test diff opencode_instructions`
+2. `cargo test --test diff kilo_instructions`
+3. `cargo test --test apply_e2e shared_agent_paths_converge -- --exact`
+4. Kilo's active-profile `AGENTS.md` fallback. A flat descriptor cannot express
+   "active `KILO_CONFIG_DIR` profile, then fallback global", so the descriptor
+   currently names only the default global location and the profile-aware
+   resolution still has to be applied by the layer engine.
+
+**Unresolved tension for OW-011.** The shared skill write target
+`~/.agents/skills` is HOME-rooted, but the live gate rule forbids repurposing
+`HOME`. A probe confirmed the host resolves that directory through `HOME`. So
+the live gate cannot isolate shared skills without breaking its own rule. Decide
+one of: accept the real `~/.agents/skills` in the live gate and assert only
+non-destructively, or add an agentsync-level override for the shared skill root.
+Do not silently repurpose `HOME`.
 
 Add `opencode.toml` and `kilo.toml` built-ins and register them. Detect
 `opencode` and `kilo` separately.
@@ -450,7 +488,7 @@ Commit intent: `Add OpenCode and Kilo built-ins`.
 {
   "id": "OW-004",
   "title": "Built-in OpenCode and Kilo instructions and skills",
-  "state": "designed-not-implemented",
+  "state": "partially-implemented",
   "release_blocker": true,
   "depends_on": ["OW-003"]
 }
