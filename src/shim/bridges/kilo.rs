@@ -20,12 +20,20 @@
 //! `crate::shim::generate::Generated::verify_on_disk`, reused rather than
 //! reinvented: [`GeneratedBridge::verify_on_disk`] re-derives every byte the
 //! generator would produce and refuses to trust anything that has drifted.
+//!
+//! Dispatch reuses the SAME `agentsync hook-shim --spec <sidecar>` contract
+//! the Codex shim and the OpenCode bridge (`src/shim/bridges/opencode.rs`)
+//! both invoke. There is no separate `bridge-shim` subcommand — the generated
+//! JS resolves which sidecar(s) answer a callback from the index at call
+//! time, then hands each sidecar's path straight to `hook-shim --spec`,
+//! exactly like `src/shim/run.rs` already does for Codex.
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::core::model::HookOutputStrategy;
 use crate::hosts::opencode_family::layers::FamilyLayers;
 use crate::shim::ShimSpec;
 use crate::transaction::{FilePrecondition, FileTransaction, compute_sha256};
@@ -139,6 +147,31 @@ pub fn check_version(observed: Option<&str>) -> Result<()> {
     }
 }
 
+/// Build a bare-bones [`ShimSpec`] for `callback`, pinned to the Kilo
+/// bridge's output strategy.
+///
+/// `event` is set to `callback`, not a source-host portable event name
+/// (`PreToolUse` etc.) — `src/shim/output.rs` reads `spec.event` as the
+/// callback name for `KiloV1`/`OpenCodeV1` strategies and hands it straight
+/// to `bridge_output::translate`. A caller that put a portable event name
+/// there instead would build a sidecar whose real dispatch silently
+/// mistranslates. Mirrors `crate::shim::bridges::opencode::spec_for`.
+pub fn spec_for(callback: &str, source_id: &str, command: &str) -> ShimSpec {
+    ShimSpec {
+        source_id: source_id.to_string(),
+        command: command.to_string(),
+        plugin_root: None,
+        if_pattern: None,
+        event: Some(callback.to_string()),
+        output_strategy: HookOutputStrategy::KiloV1,
+        allowed_output: vec![],
+        fold_into_system_message: vec![],
+        rewake_message: None,
+        rewake_summary: None,
+        timeout_seconds: None,
+    }
+}
+
 fn sidecar_name(callback: &str, index: usize) -> String {
     format!("{}-{index}.json", callback.replace('.', "-"))
 }
@@ -194,7 +227,12 @@ pub fn generate(input: &KiloBridgeInput) -> Result<GeneratedBridge> {
             let path = specs_dir.join(&name);
             let contents = format!("{}\n", handler.spec.to_json()?);
             entries.push(json!({
-                "sidecar": name,
+                // The full path, not just the file name: the bridge resolves
+                // which sidecar(s) answer a callback entirely from this index
+                // at call time (see `render_bridge`), so it needs the whole
+                // path to hand to `hook-shim --spec`, not a bare name it would
+                // have to re-root itself.
+                "path": path,
                 "sha256": compute_sha256(contents.as_bytes()),
                 "source_id": handler.spec.source_id,
             }));
@@ -203,7 +241,7 @@ pub fn generate(input: &KiloBridgeInput) -> Result<GeneratedBridge> {
         events_json.insert(callback.to_string(), Value::Array(entries));
     }
 
-    let bridge_contents = render_bridge(&input.agentsync_bin, &index_path, &by_callback);
+    let bridge_contents = render_bridge(&input.agentsync_bin, &index_path);
     let bin_hash = compute_sha256(
         std::fs::read(&input.agentsync_bin)
             .unwrap_or_default()
@@ -237,48 +275,152 @@ pub fn generate(input: &KiloBridgeInput) -> Result<GeneratedBridge> {
     })
 }
 
-/// Render the bridge module. Callbacks with no handlers are omitted entirely
-/// — Kilo simply never calls a key that is not there.
-fn render_bridge(
-    agentsync_bin: &Path,
-    index_path: &Path,
-    by_callback: &std::collections::BTreeMap<&str, Vec<&BridgedHandler>>,
-) -> String {
-    let mut callbacks = String::new();
-    for callback in by_callback.keys() {
-        callbacks.push_str(&format!(
-            "  {:?}: async (input) => invoke({:?}, input),\n",
-            callback, callback
-        ));
-    }
+/// Render the bridge module.
+///
+/// Every one of the nine measured callbacks is always registered — which
+/// ones actually have sidecars to run is entirely the index's business, read
+/// at call time (`loadIndex()`), so regenerating the index alone (no handler
+/// shape change) never requires rewriting this file, and a callback with no
+/// configured handler simply dispatches nothing (`index.events[callback] ??
+/// []` is empty) rather than being absent from the module.
+///
+/// Dispatch reuses the EXISTING `agentsync hook-shim --spec <sidecar>`
+/// contract — the same one the Codex shim and the OpenCode bridge invoke —
+/// rather than a second, Kilo-only mechanism. There is no `bridge-shim`
+/// subcommand; inventing one here would be exactly the second scheme this
+/// project's shim work has repeatedly rejected.
+fn render_bridge(agentsync_bin: &Path, index_path: &Path) -> String {
+    let bin = ts_string(&agentsync_bin.to_string_lossy());
+    let index = ts_string(&index_path.to_string_lossy());
     format!(
-        "// Generated by agentsync. Do not edit by hand.\n\
-         // Kilo hook bridge. Pinned to Kilo {PINNED_VERSION}.\n\
-         //\n\
-         // This module shape is deliberately not interchangeable with OpenCode's\n\
-         // named async-function export shape: Kilo loads a default export\n\
-         // carrying an `id` and a `server` factory, and must never be\n\
-         // mistaken for the other host's plugin.\n\
-         const AGENTSYNC_BIN = {agentsync_bin:?};\n\
-         const AGENTSYNC_INDEX = {index_path:?};\n\
-         \n\
-         async function invoke(callback, input) {{\n\
-         \x20\x20const {{ execFileSync }} = await import(\"node:child_process\");\n\
-         \x20\x20const out = execFileSync(\n\
-         \x20\x20\x20\x20AGENTSYNC_BIN,\n\
-         \x20\x20\x20\x20[\"bridge-shim\", \"--index\", AGENTSYNC_INDEX, \"--callback\", callback],\n\
-         \x20\x20\x20\x20{{ input: JSON.stringify(input ?? {{}}), encoding: \"utf8\" }},\n\
-         \x20\x20);\n\
-         \x20\x20return JSON.parse(out);\n\
-         }}\n\
-         \n\
-         const server = async (ctx) => ({{\n\
-         {callbacks}}});\n\
-         \n\
-         export default {{ id: \"agentsync-hooks\", server }};\n",
-        agentsync_bin = agentsync_bin.display(),
-        index_path = index_path.display(),
+        r#"// Generated by agentsync. Do not edit by hand — regenerate with `agentsync apply`.
+//
+// Bridges the Kilo plugin hook surface (measured: config, auth, event,
+// chat.message, chat.params, tool.execute.before, tool.execute.after,
+// session.idle, session.error) to handlers agentsync tracks, by invoking
+// `agentsync hook-shim --spec <sidecar>` and interpreting its one typed
+// bridge action object (see src/shim/bridge_output.rs). This is the SAME
+// dispatcher the Codex shim and the OpenCode bridge use.
+//
+// This module shape is deliberately not interchangeable with OpenCode's
+// named async-function export shape: Kilo loads a default export carrying
+// an `id` and a `server` factory, and must never be mistaken for the other
+// host's plugin.
+//
+// tool.execute.before/after are AWAITED: a failed sidecar run throws, which
+// stops the intercepted tool call rather than letting it proceed as if
+// nothing had gone wrong. Every other callback is fire-and-forget: a failure
+// is caught and logged, never left to crash the host or vanish silently.
+
+import {{ spawnSync }} from "node:child_process";
+import {{ readFileSync }} from "node:fs";
+
+const AGENTSYNC_BIN = {bin};
+const INDEX_PATH = {index};
+
+function loadIndex() {{
+  return JSON.parse(readFileSync(INDEX_PATH, "utf8"));
+}}
+
+function runSidecar(specPath, stdin) {{
+  const result = spawnSync(AGENTSYNC_BIN, ["hook-shim", "--spec", specPath], {{
+    input: stdin,
+    encoding: "utf8",
+  }});
+  if (result.error) {{
+    console.error(`agentsync: could not run the hook shim for ${{specPath}}: ${{result.error}}`);
+    return null;
+  }}
+  if (result.status !== 0) {{
+    if (result.stderr) {{
+      console.error(`agentsync: ${{result.stderr}}`);
+    }}
+    return null;
+  }}
+  if (!result.stdout) {{
+    return null;
+  }}
+  try {{
+    return JSON.parse(result.stdout);
+  }} catch (e) {{
+    console.error(`agentsync: malformed bridge output from ${{specPath}}: ${{e}}`);
+    return null;
+  }}
+}}
+
+async function dispatch(callback, ctx, awaited) {{
+  const index = loadIndex();
+  const specs = (index.events?.[callback] ?? []).map((s) => s.path);
+  const stdin = JSON.stringify(ctx ?? {{}});
+  let last = null;
+  for (const spec of specs) {{
+    const action = runSidecar(spec, stdin);
+    if (action) {{
+      last = action;
+      if (action.block) return action;
+    }} else if (awaited) {{
+      throw new Error(`agentsync: the hook shim for ${{callback}} (${{spec}}) failed`);
+    }} else {{
+      console.error(`agentsync: the hook shim for ${{callback}} (${{spec}}) failed; continuing`);
+    }}
+  }}
+  return last;
+}}
+
+async function fireAndForget(callback, ctx) {{
+  try {{
+    return await dispatch(callback, ctx, false);
+  }} catch (e) {{
+    console.error(`agentsync: ${{callback}} failed: ${{e}}`);
+    return null;
+  }}
+}}
+
+const server = async (ctx) => ({{
+  config: async (input) => {{
+    await fireAndForget("config", input);
+  }},
+  auth: async (input) => {{
+    await fireAndForget("auth", input);
+  }},
+  event: async (input) => {{
+    await fireAndForget("event", input);
+  }},
+  "chat.message": async (input) => {{
+    return await fireAndForget("chat.message", input);
+  }},
+  "chat.params": async (input) => {{
+    return await fireAndForget("chat.params", input);
+  }},
+  "tool.execute.before": async (input) => {{
+    const action = await dispatch("tool.execute.before", input, true);
+    if (action?.block) {{
+      throw new Error(action.message ?? "blocked by agentsync");
+    }}
+    return action;
+  }},
+  "tool.execute.after": async (input) => {{
+    return await dispatch("tool.execute.after", input, true);
+  }},
+  "session.idle": async (input) => {{
+    await fireAndForget("session.idle", input);
+  }},
+  "session.error": async (input) => {{
+    await fireAndForget("session.error", input);
+  }},
+}});
+
+export default {{ id: "agentsync-hooks", server }};
+"#,
     )
+}
+
+/// A double-quoted, single-line JS string literal. Every path this renders is
+/// a filesystem path this process resolved itself (never user text), but a
+/// quote or backslash in it must still not break out of the string literal.
+fn ts_string(raw: &str) -> String {
+    let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 impl GeneratedBridge {
@@ -613,16 +755,60 @@ mod tests {
     }
 
     #[test]
-    fn a_callback_with_no_handlers_is_omitted_entirely() {
+    fn every_measured_callback_is_always_registered_even_with_no_handlers() {
+        // The bridge always registers all nine measured callbacks: which ones
+        // have anything to run is entirely the index's business, resolved at
+        // call time, so regenerating the index alone (no handler shape
+        // change) never requires rewriting this file. A callback nothing
+        // targets simply dispatches an empty sidecar list at runtime rather
+        // than being absent from the module.
         let tmp = tempfile::tempdir().unwrap();
         let g = generate(&input(tmp.path(), vec![])).unwrap();
         for callback in CALLBACKS {
             assert!(
-                !g.bridge_contents.contains(&format!("{callback:?}:")),
-                "an unused callback must not appear at all: {}",
+                g.bridge_contents.contains(callback),
+                "every measured callback must always be registered: missing {callback:?} in {}",
                 g.bridge_contents
             );
         }
+        let index: serde_json::Value = serde_json::from_str(&g.index_contents).unwrap();
+        assert_eq!(
+            index["events"],
+            serde_json::json!({}),
+            "with no handlers the index must record no sidecars for any callback"
+        );
+    }
+
+    // ---- dispatcher contract: `hook-shim`, never a second scheme ----
+
+    #[test]
+    fn the_bridge_invokes_the_existing_hook_shim_contract_never_a_second_scheme() {
+        // This is the regression test for the defect a lead review found:
+        // the bridge once invoked a nonexistent `bridge-shim` subcommand.
+        // `hook-shim --spec <sidecar>` is the ONE dispatcher every generated
+        // shim (Codex, OpenCode, Kilo) must invoke.
+        let tmp = tempfile::tempdir().unwrap();
+        let g = generate(&input(
+            tmp.path(),
+            vec![handler(
+                "tool.execute.before",
+                "demo@mkt:hooks/hooks.json:pre_tool_use:0:0",
+                "PreToolUse",
+            )],
+        ))
+        .unwrap();
+        assert!(
+            g.bridge_contents
+                .contains(r#"["hook-shim", "--spec", specPath]"#),
+            "the bridge must invoke `hook-shim --spec <sidecar>`: {}",
+            g.bridge_contents
+        );
+        assert!(
+            !g.bridge_contents.contains("bridge-shim"),
+            "`bridge-shim` is not a real subcommand and must never appear anywhere in the \
+             generated bridge: {}",
+            g.bridge_contents
+        );
     }
 
     // ---- path resolution ----
@@ -889,6 +1075,41 @@ mod tests {
                     "Stop",
                 ),
             ],
+        })
+        .unwrap();
+        write_generated_fixture(&g);
+        println!("{}", g.bridge_path.display());
+    }
+
+    #[test]
+    #[ignore]
+    fn write_execution_proof_fixture() {
+        // Not part of the gate suite. Materializes a bridge pointed at the
+        // REAL release binary (env `AGENTSYNC_EXEC_PROOF_BIN`), with a
+        // handler whose command echoes a sentinel, so a driver script can
+        // bundle it with `bun build`, actually run the bundled bridge under
+        // `bun`, invoke `tool.execute.before`, and prove the sentinel comes
+        // back through the real `hook-shim` dispatch end to end — not just
+        // that the file bundles.
+        //   AGENTSYNC_EXEC_PROOF_BIN=/path/to/release/agentsync \
+        //     cargo test shim::bridges::kilo::tests::write_execution_proof_fixture \
+        //     -- --ignored --nocapture
+        let bin = std::env::var("AGENTSYNC_EXEC_PROOF_BIN")
+            .expect("set AGENTSYNC_EXEC_PROOF_BIN to the real release binary path");
+        let dir = std::path::PathBuf::from("/tmp/agentsync-kilo-exec-proof");
+        let _ = std::fs::remove_dir_all(&dir);
+        let g = generate(&KiloBridgeInput {
+            active_profile_dir: dir.join("profile"),
+            state_home: dir.join("state"),
+            agentsync_bin: PathBuf::from(bin),
+            handlers: vec![BridgedHandler {
+                callback: "tool.execute.before".into(),
+                spec: spec_for(
+                    "tool.execute.before",
+                    "demo@mkt:hooks/hooks.json:pre_tool_use:0:0",
+                    r#"echo '{"systemMessage":"KILO_EXEC_PROOF_SENTINEL_9f3a7c"}'"#,
+                ),
+            }],
         })
         .unwrap();
         write_generated_fixture(&g);
