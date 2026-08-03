@@ -42,3 +42,18 @@ scope = "user"
 [plugins.agentsync-e2e-demo-plugin.targets.kilo]
 local = "@@LOCAL_PLUGIN_PATH@@"
 scope = "user"
+
+# An env-referencing server. This exists because a real user run failed on
+# exactly this shape: every MCP server holding an `{env:NAME}` reference was
+# rejected during post-write verification, even when the variable WAS set,
+# because the resolver context was never populated. Every fixture before this
+# one used plain servers, so the whole class was invisible to the gate.
+#
+# The placeholder must survive VERBATIM in the written config — the host
+# resolves it at runtime. agentsync must never expand a secret into the file,
+# and must never turn an unset variable into an empty string.
+[mcp.agentsync-e2e-env-ref]
+transport = "http"
+url = "https://example.invalid/mcp"
+bearer_token_env = "AGENTSYNC_E2E_FAKE_TOKEN"
+scope = "user"

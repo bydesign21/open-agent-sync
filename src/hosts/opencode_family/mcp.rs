@@ -178,6 +178,19 @@ pub fn set_transaction_batch(
 
     let mut tx = ConfigTransaction::new(Value::Null)
         .with_source(GuardedSource::new(target.to_path_buf(), precondition));
+    // The resolver context is deliberately left EMPTY here. `{env:NAME}` must
+    // stay literal on BOTH sides of the projection comparison: the desired
+    // value we build carries the placeholder, so the observed value must too.
+    //
+    // Populating this from the real process environment was tried and is
+    // wrong: it resolves the observed side only, so the comparison becomes
+    // `Bearer {env:TOK}` vs `Bearer <secret>`, verification fails, the write
+    // rolls back, and no env-referencing server can ever sync. The live gate
+    // catches exactly that regression.
+    //
+    // The placeholder belongs in the file — the host resolves it at runtime.
+    // Whether the variable will actually resolve is a doctor concern, handled
+    // by `report.rs::unresolved_env_refs`.
 
     // `set_exact_json` refuses to insert a value whose parent does not exist,
     // so a file with no top-level `mcp` object yet needs that object created

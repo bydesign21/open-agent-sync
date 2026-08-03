@@ -226,6 +226,10 @@ ok "release binary built and runnable"
 section "Seeding isolated fixtures"
 
 export PATH="$ISOLATED_PATH"
+# A deliberately fake, non-secret value. The gate proves the PLACEHOLDER
+# survives verbatim in the written config and that this value never appears in
+# it — agentsync must never expand a secret into a config file.
+export AGENTSYNC_E2E_FAKE_TOKEN="not-a-real-token-placeholder-only"
 export AGENTSYNC_HOME="$RUN/agentsync-home"
 export AGENTSYNC_STATE_HOME="$RUN/agentsync-state"
 export XDG_CONFIG_HOME="$RUN/xdg/config"
@@ -392,6 +396,25 @@ if grep -qF "agentsync OW-011 gate: this comment and the \"provider\" block" "$K
 else
   fail "kilo.jsonc: the seeded comment or provider block did not survive the guarded edit"
 fi
+
+# An env reference must reach the file as a literal placeholder, never expanded.
+# A real user run failed because the resolver context was empty, so every server
+# holding an {env:NAME} reference was rejected. Every fixture before this used
+# plain servers, hiding the whole class.
+for _host in opencode kilo; do
+  _cfg="$XDG_CONFIG_HOME/$_host/$_host.jsonc"
+  if grep -q '{env:AGENTSYNC_E2E_FAKE_TOKEN}' "$_cfg" 2>/dev/null; then
+    proved_live "$_host: an {env:NAME} reference is written as a literal placeholder, not expanded"
+  else
+    fail "$_host: the {env:NAME} placeholder did not survive into $_cfg"
+  fi
+  if grep -q 'not-a-real-token-placeholder-only' "$_cfg" 2>/dev/null; then
+    fail "$_host: the variable's VALUE was written into $_cfg; a secret must never be expanded into config"
+  else
+    proved_live "$_host: the environment variable's value never reaches the config file"
+  fi
+done
+
 
 # ---------------------------------------------------------------------------
 # `debug paths` / `debug config --pure` for both hosts.

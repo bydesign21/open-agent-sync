@@ -130,6 +130,21 @@ pub struct ResolverContext {
     pub env_vars: HashMap<String, String>,
 }
 
+impl ResolverContext {
+    /// A context populated from the real process environment.
+    ///
+    /// Without this every `{env:NAME}` lookup fails regardless of whether the
+    /// variable is set, because the default context carries no variables at
+    /// all. That made it impossible to sync any MCP server holding an env
+    /// reference — the common case for anything needing a token.
+    pub fn from_process() -> Self {
+        Self {
+            search_paths: Vec::new(),
+            env_vars: std::env::vars().collect(),
+        }
+    }
+}
+
 /// A transaction for editing configuration files.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConfigTransaction {
@@ -965,15 +980,26 @@ fn resolve_string(text: &str, context: &ResolverContext) -> Result<String, Trans
         };
         let token = &candidate[1..close];
         if let Some(name) = token.strip_prefix("env:") {
-            let value =
-                context
-                    .env_vars
-                    .get(name)
-                    .ok_or_else(|| TransactionError::VerificationFailed {
-                        expected: format!("resolver context variable {name}"),
-                        actual: "missing".into(),
-                    })?;
-            output.push_str(value);
+            // An unresolvable reference leaves the placeholder LITERAL rather
+            // than aborting. The placeholder legitimately lives in the config
+            // file and is resolved by the host at runtime, so agentsync must
+            // not require the variable to exist at write time, and must never
+            // expand a secret into the file. Expanding a *missing* variable
+            // would be worse still: the host resolves an unset variable to an
+            // empty string, so `Bearer {env:TOK}` would become `Bearer ` — a
+            // credential-shaped value that renders as healthy.
+            //
+            // `report.rs::unresolved_env_refs` is what tells the user a
+            // reference will not resolve. That is a doctor concern, not a
+            // reason to fail the write.
+            match context.env_vars.get(name) {
+                Some(value) => output.push_str(value),
+                None => {
+                    output.push('{');
+                    output.push_str(token);
+                    output.push('}');
+                }
+            }
         } else if let Some(file) = token.strip_prefix("file:") {
             let path = resolve_file_path(file, context).ok_or_else(|| {
                 TransactionError::VerificationFailed {
@@ -1746,6 +1772,62 @@ mod tests {
         assert!(
             !fresh.join(".agentsync-owned").exists(),
             "a transaction that fails after claiming a directory must not leave the marker behind"
+        );
+    }
+}
+
+#[cfg(test)]
+mod resolver_tests {
+    use super::*;
+
+    /// The placeholder belongs in the config file: the HOST resolves it at
+    /// runtime. agentsync must never expand a secret into the file, and an
+    /// unset variable must never become an empty string — the host would then
+    /// send `Bearer `, a credential-shaped value that authenticates nothing
+    /// while rendering as healthy.
+    #[test]
+    fn an_unresolvable_env_reference_stays_literal_instead_of_aborting() {
+        let context = ResolverContext::default();
+        let resolved = resolve_string("Bearer {env:DEFINITELY_UNSET_XYZ}", &context)
+            .expect("an unresolvable reference must not abort the transaction");
+        assert_eq!(
+            resolved, "Bearer {env:DEFINITELY_UNSET_XYZ}",
+            "the placeholder must survive verbatim"
+        );
+        assert_ne!(
+            resolved, "Bearer ",
+            "an unset variable must never resolve to empty"
+        );
+    }
+
+    #[test]
+    fn a_set_variable_resolves_from_the_process_environment() {
+        let context = ResolverContext::from_process();
+        assert!(
+            !context.env_vars.is_empty(),
+            "from_process must actually carry the environment; an empty context \
+             makes every {{env:NAME}} lookup fail even when the variable is set"
+        );
+        // PATH is set in every environment this runs in.
+        let resolved = resolve_string("{env:PATH}", &context).unwrap();
+        assert_ne!(resolved, "{env:PATH}", "a set variable must resolve");
+        assert!(!resolved.is_empty());
+    }
+
+    #[test]
+    fn a_default_context_no_longer_fails_a_transaction_carrying_a_reference() {
+        // Regression for the real user report: every MCP server holding an env
+        // reference failed with "expected resolver context variable ..., actual
+        // missing", even though the variable was set, because the context was
+        // never populated.
+        let mut value = serde_json::json!({
+            "headers": { "Authorization": "Bearer {env:SOME_TOKEN_NAME}" }
+        });
+        resolve_value(&mut value, &ResolverContext::default())
+            .expect("resolution must not fail the whole transaction");
+        assert_eq!(
+            value["headers"]["Authorization"],
+            serde_json::json!("Bearer {env:SOME_TOKEN_NAME}")
         );
     }
 }
