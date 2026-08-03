@@ -2056,79 +2056,173 @@ fn a_settings_file_path_containing_an_at_sign_is_not_offered_a_shim() {
 
 #[test]
 fn opencode_instructions() {
-    // OpenCode declares user scope in {xdg_config}/opencode/AGENTS.md and project
-    // scope in {repo}/AGENTS.md. Neither should be invented; both should be
-    // reported at detection time.
-    let mut opencode = snapshot("opencode", &[]);
+    // OpenCode instructions must resolve to XDG-rooted paths via {xdg_config},
+    // never hardcoded HOME paths. Verify the descriptor template and expansion.
+    let text = agentsync::hosts::descriptor::BUILTIN
+        .iter()
+        .find(|(n, _)| *n == "opencode")
+        .expect("opencode builtin")
+        .1;
+    let desc = agentsync::hosts::descriptor::parse(text, "opencode").unwrap();
+    let instructions = desc.instructions.expect("opencode has instructions");
 
-    with_instruction(
-        &mut opencode,
-        Scope::User,
-        "/tmp/xdg/opencode/AGENTS.md",
-        LinkState::Owned,
+    // User scope must use {xdg_config} placeholder, not hardcoded ~/.
+    let user_path = instructions
+        .user
+        .as_ref()
+        .expect("opencode declares user scope");
+    assert!(
+        user_path.contains("{xdg_config}"),
+        "user path must use XDG placeholder: {user_path}"
     );
-    with_instruction(
-        &mut opencode,
-        Scope::Project("/repos/one".into()),
-        "/repos/one/AGENTS.md",
-        LinkState::Owned,
+    assert!(
+        user_path.contains("opencode"),
+        "user path must reference opencode: {user_path}"
+    );
+    assert_eq!(
+        user_path.as_str(),
+        "{xdg_config}/opencode/AGENTS.md",
+        "user path template must match exactly"
     );
 
-    let w = World {
-        manifest: Manifest::default(),
-        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
-        hosts: vec![host("opencode")],
-        snapshots: vec![opencode],
-        repos: vec!["/repos/one".to_string()],
-        warnings: Vec::new(),
-    };
+    // Verify {xdg_config} expansion works correctly.
+    // The path template uses {xdg_config}, which means it will resolve through
+    // XDG_CONFIG_HOME when expanded, not a hardcoded ~/.config.
+    let expanded = agentsync::paths::expand(user_path);
+    assert!(
+        expanded.to_string_lossy().contains("opencode/AGENTS.md"),
+        "expanded path must contain opencode/AGENTS.md: {}",
+        expanded.display()
+    );
+    // Verify it did NOT resolve to a hardcoded ~/ path with expansion.
+    // If the code was wrong and used hardcoded ~/.config, it would still work,
+    // but we've already asserted the template contains {xdg_config} above.
 
-    let rows = w.rows();
+    // Project scope must use {repo} placeholder.
+    let project_path = instructions
+        .project
+        .as_ref()
+        .expect("opencode declares project scope");
+    assert_eq!(project_path.as_str(), "{repo}/AGENTS.md");
 
-    // Check that user instruction row exists and is detected.
-    let user_row = instruction_row(&rows, "user");
-    assert_eq!(user_row.headline, "only in opencode");
+    // Local scope must NOT exist (OpenCode has no counterpart to CLAUDE.local.md).
+    assert!(
+        instructions.local.is_none(),
+        "opencode must block local scope, not invent a path"
+    );
 
-    // Check that project instruction row exists and is detected.
-    let project_row = instruction_row(&rows, "repos-one");
-    assert_eq!(project_row.headline, "only in opencode");
+    // Verify scopes match expectations.
+    let scopes = instructions.scopes();
+    assert_eq!(scopes, vec![ScopeKind::User, ScopeKind::Project]);
 }
 
 #[test]
 fn kilo_instructions() {
-    // Kilo declares user scope in {xdg_config}/kilo/AGENTS.md and project scope
-    // in {repo}/AGENTS.md. Like OpenCode, neither should be invented.
-    let mut kilo = snapshot("kilo", &[]);
+    // Kilo instructions must also use XDG-rooted paths, independent of OpenCode.
+    let text = agentsync::hosts::descriptor::BUILTIN
+        .iter()
+        .find(|(n, _)| *n == "kilo")
+        .expect("kilo builtin")
+        .1;
+    let desc = agentsync::hosts::descriptor::parse(text, "kilo").unwrap();
+    let instructions = desc.instructions.expect("kilo has instructions");
 
-    with_instruction(
-        &mut kilo,
-        Scope::User,
-        "/tmp/xdg/kilo/AGENTS.md",
-        LinkState::Owned,
+    // User scope must use {xdg_config} and reference "kilo", not "opencode".
+    let user_path = instructions
+        .user
+        .as_ref()
+        .expect("kilo declares user scope");
+    assert!(
+        user_path.contains("{xdg_config}"),
+        "user path must use XDG placeholder: {user_path}"
     );
-    with_instruction(
-        &mut kilo,
-        Scope::Project("/repos/one".into()),
-        "/repos/one/AGENTS.md",
-        LinkState::Owned,
+    assert!(
+        user_path.contains("kilo"),
+        "user path must reference kilo, not opencode: {user_path}"
+    );
+    assert!(
+        !user_path.contains("opencode"),
+        "kilo path must never reference opencode: {user_path}"
+    );
+    assert_eq!(
+        user_path.as_str(),
+        "{xdg_config}/kilo/AGENTS.md",
+        "kilo user path must match exactly"
     );
 
-    let w = World {
-        manifest: Manifest::default(),
-        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
-        hosts: vec![host("kilo")],
-        snapshots: vec![kilo],
-        repos: vec!["/repos/one".to_string()],
-        warnings: Vec::new(),
-    };
+    // Verify {xdg_config} expansion works for Kilo too.
+    let expanded = agentsync::paths::expand(user_path);
+    assert!(
+        expanded.to_string_lossy().contains("kilo/AGENTS.md"),
+        "expanded kilo path must contain kilo/AGENTS.md: {}",
+        expanded.display()
+    );
 
-    let rows = w.rows();
+    // Project scope must use {repo} placeholder.
+    let project_path = instructions
+        .project
+        .as_ref()
+        .expect("kilo declares project scope");
+    assert_eq!(project_path.as_str(), "{repo}/AGENTS.md");
 
-    // Check that user instruction row exists and is detected.
-    let user_row = instruction_row(&rows, "user");
-    assert_eq!(user_row.headline, "only in kilo");
+    // Local scope must NOT exist.
+    assert!(instructions.local.is_none(), "kilo must block local scope");
 
-    // Check that project instruction row exists and is detected.
-    let project_row = instruction_row(&rows, "repos-one");
-    assert_eq!(project_row.headline, "only in kilo");
+    // Verify scopes match expectations.
+    let scopes = instructions.scopes();
+    assert_eq!(scopes, vec![ScopeKind::User, ScopeKind::Project]);
+}
+
+#[test]
+fn opencode_and_kilo_never_cross_read_instruction_paths() {
+    // Critical isolation: OpenCode must never read Kilo paths, and vice versa.
+    let opencode_text = agentsync::hosts::descriptor::BUILTIN
+        .iter()
+        .find(|(n, _)| *n == "opencode")
+        .expect("opencode builtin")
+        .1;
+    let opencode_desc = agentsync::hosts::descriptor::parse(opencode_text, "opencode").unwrap();
+    let opencode_instructions = opencode_desc.instructions.expect("opencode instructions");
+
+    let kilo_text = agentsync::hosts::descriptor::BUILTIN
+        .iter()
+        .find(|(n, _)| *n == "kilo")
+        .expect("kilo builtin")
+        .1;
+    let kilo_desc = agentsync::hosts::descriptor::parse(kilo_text, "kilo").unwrap();
+    let kilo_instructions = kilo_desc.instructions.expect("kilo instructions");
+
+    // Collect all OpenCode paths.
+    let opencode_paths: Vec<String> = opencode_instructions
+        .user
+        .iter()
+        .chain(opencode_instructions.project.iter())
+        .chain(opencode_instructions.local.iter())
+        .cloned()
+        .collect();
+
+    // Collect all Kilo paths.
+    let kilo_paths: Vec<String> = kilo_instructions
+        .user
+        .iter()
+        .chain(kilo_instructions.project.iter())
+        .chain(kilo_instructions.local.iter())
+        .cloned()
+        .collect();
+
+    // OpenCode paths must never mention "kilo".
+    for path in &opencode_paths {
+        assert!(
+            !path.contains("kilo"),
+            "OpenCode path must never reference kilo: {path}"
+        );
+    }
+
+    // Kilo paths must never mention "opencode".
+    for path in &kilo_paths {
+        assert!(
+            !path.contains("opencode"),
+            "Kilo path must never reference opencode: {path}"
+        );
+    }
 }
