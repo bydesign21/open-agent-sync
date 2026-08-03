@@ -569,7 +569,18 @@ mod tests {
     #[test]
     fn config_auth_and_event_are_refused_never_silently_wired() {
         let tmp = tempfile::tempdir().unwrap();
-        for callback in NO_OUTPUT_CALLBACKS {
+        // Deliberately literal, not `for callback in NO_OUTPUT_CALLBACKS`.
+        // Iterating the constant under test makes the test vacuous the moment
+        // an entry is removed from it: the loop body simply stops running and
+        // the test still passes.
+        let measured_without_output_channel = ["config", "auth", "event"];
+        assert_eq!(
+            NO_OUTPUT_CALLBACKS.as_slice(),
+            measured_without_output_channel.as_slice(),
+            "the measured no-output callbacks changed; re-measure against the runtime \
+             before editing this list"
+        );
+        for callback in measured_without_output_channel {
             let err = generate(&input(
                 tmp.path(),
                 vec![handler(
