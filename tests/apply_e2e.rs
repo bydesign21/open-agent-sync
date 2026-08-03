@@ -1974,3 +1974,165 @@ detect = { bin = \"opencode\" }
          path for opencode, not just the helper called directly by other tests"
     );
 }
+
+// ---------------------------------------------------------------------------
+// OW-009: the generated Kilo hook bridge — two full applies must converge.
+//
+// Every write here goes through the real `transaction::FileTransaction` and
+// `apply::run`, exactly like the rest of the guarded-write suite above. The
+// generated bridge, its index, and its sidecar are the one validity contract
+// (`GeneratedBridge::verify_on_disk`), proven by actually reading back the
+// files pass 1 wrote and confirming pass 2 plans nothing further.
+// ---------------------------------------------------------------------------
+
+fn kilo_bridge_test_spec() -> agentsync::shim::ShimSpec {
+    agentsync::shim::ShimSpec {
+        source_id: "demo@mkt:hooks/hooks.json:pre_tool_use:0:0".into(),
+        command: "echo '{\"systemMessage\":\"ok\"}'".into(),
+        plugin_root: None,
+        if_pattern: None,
+        event: Some("PreToolUse".into()),
+        output_strategy: agentsync::core::model::HookOutputStrategy::KiloV1,
+        allowed_output: vec!["systemMessage".into()],
+        fold_into_system_message: vec![],
+        rewake_message: None,
+        rewake_summary: None,
+        timeout_seconds: None,
+    }
+}
+
+#[test]
+fn kilo_hooks_converge_after_two_passes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile = tmp.path().join("profile");
+    let state = tmp.path().join("state");
+    let bin = tmp.path().join("bin/agentsync");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, b"fake-agentsync-binary-bytes").unwrap();
+
+    let bridge_input = agentsync::shim::bridges::kilo::KiloBridgeInput {
+        active_profile_dir: profile.clone(),
+        state_home: state.clone(),
+        agentsync_bin: bin.clone(),
+        handlers: vec![agentsync::shim::bridges::kilo::BridgedHandler {
+            callback: "tool.execute.before".into(),
+            spec: kilo_bridge_test_spec(),
+        }],
+    };
+
+    // ---- pass 1: nothing on disk yet ----
+    let g1 = agentsync::shim::bridges::kilo::generate(&bridge_input).unwrap();
+    let tx1 = g1
+        .transaction(false, false, None, None, &[])
+        .unwrap()
+        .expect("a fresh bridge must be planned");
+
+    let mut plan1 = Plan::default();
+    plan1.push("generate the Kilo hook bridge", Step::FileTransaction(tx1));
+
+    let manifest_path = tmp.path().join("manifest.toml");
+    let mut manifest = agentsync::manifest::Manifest::default();
+    let report1 = apply::run(&plan1, &mut manifest, &manifest_path, &[], |_| {});
+    assert_eq!(
+        report1.count(Outcome::Failed),
+        0,
+        "pass 1 must apply cleanly: {:?}",
+        report1.results
+    );
+    assert!(g1.bridge_path.is_file(), "the bridge file must be written");
+    assert!(g1.index_path.is_file(), "the index must be written");
+    assert_eq!(g1.sidecars.len(), 1);
+    assert!(g1.sidecars[0].0.is_file(), "the sidecar must be written");
+    g1.verify_on_disk()
+        .expect("everything just written must satisfy the validity contract");
+
+    // ---- pass 2: read the real files pass 1 wrote and regenerate ----
+    let g2 = agentsync::shim::bridges::kilo::generate(&bridge_input).unwrap();
+    assert_eq!(
+        g2.bridge_contents, g1.bridge_contents,
+        "generation must be byte-stable across passes"
+    );
+    let existing_bridge = std::fs::read(&g2.bridge_path).unwrap();
+    let existing_index = std::fs::read(&g2.index_path).unwrap();
+    let existing_sidecars: Vec<Option<Vec<u8>>> = g2
+        .sidecars
+        .iter()
+        .map(|(path, _)| std::fs::read(path).ok())
+        .collect();
+
+    let tx2 = g2
+        .transaction(
+            true,
+            true,
+            Some(&existing_bridge),
+            Some(&existing_index),
+            &existing_sidecars,
+        )
+        .unwrap();
+    assert!(
+        tx2.is_none(),
+        "the second pass must plan no mutation at all, proving convergence"
+    );
+
+    // Applying an empty second plan must still succeed cleanly.
+    let plan2 = Plan::default();
+    let mut manifest2 = manifest.clone();
+    let report2 = apply::run(&plan2, &mut manifest2, &manifest_path, &[], |_| {});
+    assert_eq!(
+        report2.count(Outcome::Failed),
+        0,
+        "the converged second (empty) plan must apply cleanly: {:?}",
+        report2.results
+    );
+}
+
+#[test]
+fn kilo_hooks_apply_time_race_is_rejected_and_the_existing_bridge_is_untouched() {
+    let tmp = tempfile::tempdir().unwrap();
+    let profile = tmp.path().join("profile");
+    let state = tmp.path().join("state");
+    let bin = tmp.path().join("bin/agentsync");
+    std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    std::fs::write(&bin, b"fake-agentsync-binary-bytes").unwrap();
+
+    let bridge_input = agentsync::shim::bridges::kilo::KiloBridgeInput {
+        active_profile_dir: profile.clone(),
+        state_home: state.clone(),
+        agentsync_bin: bin.clone(),
+        handlers: vec![],
+    };
+    let g = agentsync::shim::bridges::kilo::generate(&bridge_input).unwrap();
+    std::fs::create_dir_all(&g.plugin_dir).unwrap();
+    std::fs::write(g.plugin_dir.join(".agentsync-owned"), b"").unwrap();
+    std::fs::create_dir_all(&g.state_dir).unwrap();
+    std::fs::write(g.state_dir.join(".agentsync-owned"), b"").unwrap();
+    // A previous generation is on disk, but the plan was built against a
+    // now-stale hash (someone else's apply already ran, or the file was
+    // hand-edited between plan and apply).
+    std::fs::write(&g.bridge_path, "// changed since the plan was built\n").unwrap();
+
+    let stale_precondition_hash =
+        agentsync::transaction::compute_sha256(b"the hash the plan was built against");
+    let tx = agentsync::transaction::FileTransaction::new().write_generated(
+        &g.bridge_path,
+        g.bridge_contents.clone(),
+        agentsync::transaction::FilePrecondition::Sha256(stale_precondition_hash),
+    );
+
+    let mut plan = Plan::default();
+    plan.push("regenerate the Kilo hook bridge", Step::FileTransaction(tx));
+    let manifest_path = tmp.path().join("manifest.toml");
+    let mut manifest = agentsync::manifest::Manifest::default();
+    let report = apply::run(&plan, &mut manifest, &manifest_path, &[], |_| {});
+    assert_eq!(
+        report.count(Outcome::Failed),
+        1,
+        "a plan/apply race must be reported as a failure: {:?}",
+        report.results
+    );
+    assert_eq!(
+        std::fs::read_to_string(&g.bridge_path).unwrap(),
+        "// changed since the plan was built\n",
+        "a rejected race must never overwrite what is actually on disk"
+    );
+}

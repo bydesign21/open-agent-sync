@@ -2809,3 +2809,119 @@ fn kilo_mcp_removal_is_an_exact_jsonc_origin_removal_not_a_host_command() {
     let plan = world.plan(&rows);
     assert_mcp_write_is_config_transaction_never_host(&plan);
 }
+
+// ---------------------------------------------------------------------------
+// OW-009: the generated Kilo hook bridge.
+//
+// These exercise `agentsync::shim::bridges::kilo` directly rather than through
+// a `World`/`Host` — the portable-event -> Kilo-callback mapping is not yet
+// wired into the hosts domain (see the module doc comment on `kilo.rs`), so
+// what belongs at this layer today is the cross-module contract: the
+// generator's own module-shape and path guarantees, and that the fidelity
+// model from `core::model` and the severity policy from `domains::hooks`
+// agree on every one of the nine measured callbacks.
+// ---------------------------------------------------------------------------
+
+fn kilo_spec(source_id: &str, event: &str) -> agentsync::shim::ShimSpec {
+    agentsync::shim::ShimSpec {
+        source_id: source_id.into(),
+        command: "echo '{\"systemMessage\":\"ok\"}'".into(),
+        plugin_root: None,
+        if_pattern: None,
+        event: Some(event.into()),
+        output_strategy: agentsync::core::model::HookOutputStrategy::KiloV1,
+        allowed_output: vec!["systemMessage".into()],
+        fold_into_system_message: vec![],
+        rewake_message: None,
+        rewake_summary: None,
+        timeout_seconds: None,
+    }
+}
+
+#[test]
+fn kilo_hooks_bridge_uses_the_kilo_shape_and_resolves_paths_from_the_active_profile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let input = agentsync::shim::bridges::kilo::KiloBridgeInput {
+        active_profile_dir: tmp.path().join("profile"),
+        state_home: tmp.path().join("state"),
+        agentsync_bin: tmp.path().join("bin/agentsync"),
+        handlers: vec![agentsync::shim::bridges::kilo::BridgedHandler {
+            callback: "tool.execute.before".into(),
+            spec: kilo_spec("demo@mkt:hooks/hooks.json:pre_tool_use:0:0", "PreToolUse"),
+        }],
+    };
+    let g = agentsync::shim::bridges::kilo::generate(&input).unwrap();
+    assert!(
+        g.bridge_path
+            .ends_with("profile/plugin/agentsync-hooks.generated.ts"),
+        "{}",
+        g.bridge_path.display()
+    );
+    assert!(g.index_path.ends_with("state/shims/kilo/index.json"));
+    assert!(
+        g.bridge_contents
+            .contains("export default { id: \"agentsync-hooks\", server };"),
+        "must use Kilo's own module shape: {}",
+        g.bridge_contents
+    );
+}
+
+#[test]
+fn kilo_hooks_fidelity_and_severity_agree_on_every_measured_callback() {
+    use agentsync::core::diff::Severity;
+    use agentsync::core::model::opencode_family_hook_fidelity;
+    use agentsync::domains::hooks::severity_for_fidelity;
+    use agentsync::shim::bridges::kilo::{CALLBACKS, NO_OUTPUT_CALLBACKS};
+
+    for callback in CALLBACKS {
+        let fidelity = opencode_family_hook_fidelity(callback);
+        if NO_OUTPUT_CALLBACKS.contains(&callback) {
+            assert!(
+                fidelity.is_none(),
+                "{callback} has no output channel and must never get a fidelity"
+            );
+            continue;
+        }
+        let fidelity =
+            fidelity.unwrap_or_else(|| panic!("{callback} must have a measured fidelity"));
+        let severity = severity_for_fidelity(fidelity);
+        match callback {
+            "tool.execute.before" | "tool.execute.after" => {
+                assert_eq!(
+                    severity,
+                    Severity::Normal,
+                    "{callback} must be Exact/Normal"
+                );
+            }
+            "session.idle" | "session.error" | "chat.message" | "chat.params" => {
+                assert_eq!(
+                    severity,
+                    Severity::Warn,
+                    "{callback} must require explicit acceptance"
+                );
+            }
+            other => panic!("unexpected measured callback in test fixture: {other}"),
+        }
+    }
+}
+
+#[test]
+fn kilo_hooks_version_gate_blocks_a_different_observed_version_by_name() {
+    use agentsync::shim::bridges::kilo::{PINNED_VERSION, check_version};
+    assert!(check_version(Some(PINNED_VERSION)).is_ok());
+    let err = check_version(Some("7.4.16")).unwrap_err().to_string();
+    assert!(
+        err.contains("7.4.16") && err.contains(PINNED_VERSION),
+        "got {err}"
+    );
+}
+
+#[test]
+fn kilo_hooks_pure_mode_is_reported_disabled_never_healthy() {
+    use agentsync::hosts::opencode_family::layers::{Env, Family, discover};
+    use agentsync::shim::bridges::kilo::{BridgeHealth, health};
+    let tmp = tempfile::tempdir().unwrap();
+    let env = Env::new(tmp.path().join("home")).set("KILO_PURE", "1");
+    let layers = discover(Family::Kilo, &env, None);
+    assert_eq!(health(&layers), BridgeHealth::DisabledByPureMode);
+}
