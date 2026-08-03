@@ -30,29 +30,32 @@ Do not create or push `v0.0.9` before the two new hosts pass their live gates.
 
 ## Current repository state
 
-**Active work location changed.** Work did not continue on the isolated
-worktree. Every commit after `697dc48` was made directly on local `master` in
-the main checkout. The worktree branch is now a stale dead end and must not be
-treated as the source of truth.
+**Active work location.** All work is on local `master` in the main checkout.
+The originally-planned isolated worktree was abandoned early; every commit after
+`697dc48` was made on `master` directly.
 
 | Item | Current fact | Verified |
 |---|---|---|
 | Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` | `git worktree list` |
 | Active branch | `master` in the main checkout | `git status --short --branch` |
-| Local `master` HEAD | `61bffc3` "Scaffold OpenCode family bridge modules" | `git rev-parse HEAD` |
-| `master` ahead of `origin/master` by | 35 commits, unpushed | `git status --short --branch` |
-| Stale worktree | `.claude/worktrees/codex-hook-shim-correctness` at `7559e08` | `git worktree list` |
-| Stale feature branch | `feature/codex-hook-shim-correctness`, superseded, do not build on | `git log` |
+| Local `master` HEAD | `77ee922` "Record bridge execution proof scope" | `git rev-parse HEAD` |
+| `master` ahead of `origin/master` by | 49 commits, unpushed | `git status --short --branch` |
 | `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` | `git ls-remote` |
+| Test suite on `master` | 481 pass, 0 fail, 2 ignored (fixture writers) | `cargo test --locked` |
 | Package version | `0.0.9` | `Cargo.toml` |
 | Local and remote `v0.0.9` tag | absent | `git ls-remote --tags` |
 | GitHub `v0.0.9` release | not created | not checked this session |
 | Installed user binary | not upgraded by this work | not checked this session |
-| User hook/plugin state | not mutated by this work | no apply run |
+| User hook/plugin/MCP state | not mutated by this work | no apply run |
+| User `~/.agents/skills` | unchanged; checksummed before and after every merge | `ls ~/.agents/skills \| md5` |
 
-The stale worktree still holds an older copy of this ledger. Reconcile or remove
-that worktree before the OW-012 whole-branch review, so the reviewer cannot
-diff the wrong tip.
+**Worktree cleanup done.** Every merged agent worktree and its branch were
+removed. The stale `codex-hook-shim-correctness` **worktree** was removed so the
+OW-012 reviewer cannot diff the wrong tip, but its **branch ref was kept
+deliberately** as a safety net — it holds one superseded commit (`7559e08`, an
+early parallel version of the guarded JSONC work that `master` replaced;
+`master` is ~12k lines ahead of it). Delete the branch only after OW-012
+approves, and only deliberately.
 
 Recheck before work resumes:
 
@@ -64,7 +67,7 @@ git log --oneline --decorate -16
 git ls-remote --heads --tags origin master refs/tags/v0.0.9
 ```
 
-Expected `master` HEAD: `61bffc3`.
+Expected `master` HEAD: `77ee922`.
 
 ## Work already completed and independently verified
 
