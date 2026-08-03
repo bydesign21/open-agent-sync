@@ -6,6 +6,7 @@
 //! a generator that owns the whole file destroys it.
 
 pub mod descriptor;
+pub mod opencode_family;
 pub mod parsers;
 pub mod runner;
 
