@@ -38,10 +38,10 @@ The originally-planned isolated worktree was abandoned early; every commit after
 |---|---|---|
 | Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` | `git worktree list` |
 | Active branch | `master` in the main checkout | `git status --short --branch` |
-| Local `master` HEAD | `77ee922` "Record bridge execution proof scope" | `git rev-parse HEAD` |
-| `master` ahead of `origin/master` by | 49 commits, unpushed | `git status --short --branch` |
+| Local `master` HEAD | see `git rev-parse HEAD`; OW-002..OW-010 all merged | `git rev-parse HEAD` |
+| `master` ahead of `origin/master` by | 55 commits, unpushed | `git status --short --branch` |
 | `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` | `git ls-remote` |
-| Test suite on `master` | 481 pass, 0 fail, 2 ignored (fixture writers) | `cargo test --locked` |
+| Test suite on `master` | 497 pass, 0 fail, 2 ignored (fixture writers); passes twice consecutively | `cargo test --locked` |
 | Package version | `0.0.9` | `Cargo.toml` |
 | Local and remote `v0.0.9` tag | absent | `git ls-remote --tags` |
 | GitHub `v0.0.9` release | not created | not checked this session |
@@ -916,7 +916,7 @@ Commit intent: `Generate OpenCode hook bridges`.
 {
   "id": "OW-008",
   "title": "Generated OpenCode hook bridge",
-  "state": "designed-not-implemented",
+  "state": "implemented-merged-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-003", "OW-007"]
 }
@@ -964,7 +964,7 @@ Commit intent: `Generate Kilo hook bridges`.
 {
   "id": "OW-009",
   "title": "Generated Kilo hook bridge",
-  "state": "designed-not-implemented",
+  "state": "implemented-merged-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-003", "OW-007"]
 }
@@ -1084,7 +1084,7 @@ Commit intent: `Document OpenCode family host support`.
 {
   "id": "OW-010",
   "title": "Doctor, documentation, and four-host convergence",
-  "state": "designed-not-implemented",
+  "state": "implemented-merged-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-004", "OW-005", "OW-006", "OW-007", "OW-008", "OW-009"]
 }
