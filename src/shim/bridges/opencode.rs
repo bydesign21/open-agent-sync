@@ -213,29 +213,43 @@ function loadIndex(): any {{
   return JSON.parse(readFileSync(INDEX_PATH, "utf8"));
 }}
 
-function runSidecar(specPath: string, stdin: string): BridgeAction | null {{
+// A sidecar run has three distinct outcomes, and they must never be
+// conflated: (1) it ran and produced an action; (2) it ran, exited zero, and
+// produced no output — the matcher/`if` filter legitimately did not match,
+// which `agentsync hook-shim` reports as quiet success (see
+// `src/shim/run.rs`); (3) it genuinely failed to run or produced output this
+// bridge cannot trust. Treating (2) as a failure — as an earlier version of
+// this bridge did — makes every filtered, non-matching tool call on a real
+// host throw and BLOCK THE TOOL CALL, discovered live: a handler with any
+// `matcher`/`if` silently broke every tool invocation it did not match,
+// exactly the opposite of "quiet no-op".
+type RunResult = {{ ok: boolean; action: BridgeAction | null }};
+
+function runSidecar(specPath: string, stdin: string): RunResult {{
   const result = spawnSync(AGENTSYNC_BIN, ["hook-shim", "--spec", specPath], {{
     input: stdin,
     encoding: "utf8",
   }});
   if (result.error) {{
     console.error(`agentsync: could not run the hook shim for ${{specPath}}: ${{result.error}}`);
-    return null;
+    return {{ ok: false, action: null }};
   }}
   if (result.status !== 0) {{
     if (result.stderr) {{
       console.error(`agentsync: ${{result.stderr}}`);
     }}
-    return null;
+    return {{ ok: false, action: null }};
   }}
   if (!result.stdout) {{
-    return null;
+    // Exit zero with no output is the filter's deliberate no-match path, not
+    // a failure — see the comment above `RunResult`.
+    return {{ ok: true, action: null }};
   }}
   try {{
-    return JSON.parse(result.stdout) as BridgeAction;
+    return {{ ok: true, action: JSON.parse(result.stdout) as BridgeAction }};
   }} catch (e) {{
     console.error(`agentsync: malformed bridge output from ${{specPath}}: ${{e}}`);
-    return null;
+    return {{ ok: false, action: null }};
   }}
 }}
 
@@ -249,13 +263,14 @@ async function dispatch(
   const stdin = JSON.stringify(ctx ?? {{}});
   let last: BridgeAction | null = null;
   for (const spec of specs) {{
-    const action = runSidecar(spec, stdin);
+    const {{ ok, action }} = runSidecar(spec, stdin);
     if (action) {{
       last = action;
       if (action.block) return action;
-    }} else if (awaited) {{
-      throw new Error(`agentsync: the hook shim for ${{callback}} (${{spec}}) failed`);
-    }} else {{
+    }} else if (!ok) {{
+      if (awaited) {{
+        throw new Error(`agentsync: the hook shim for ${{callback}} (${{spec}}) failed`);
+      }}
       console.error(`agentsync: the hook shim for ${{callback}} (${{spec}}) failed; continuing`);
     }}
   }}
@@ -271,12 +286,16 @@ async function fireAndForget(callback: string, ctx: unknown): Promise<BridgeActi
   }}
 }}
 
+// `auth` is deliberately NOT bridged, even as a no-op: measured live (the
+// OW-011 gate), merely defining an `auth` callback that returns `undefined`
+// makes OpenCode's own provider/model resolution fail for every provider —
+// including ones with no relationship to any bridged handler — with
+// "Expected string, got undefined" deep in its session start path. No
+// handler is ever mapped to `auth` (see `opencode_callback_for`), so this
+// costs nothing and removes a callback that is actively unsafe to define.
 export const AgentsyncHooks = async (_ctx: unknown) => ({{
   config: async (input: unknown) => {{
     await fireAndForget("config", input);
-  }},
-  auth: async (input: unknown) => {{
-    await fireAndForget("auth", input);
   }},
   event: async (input: unknown) => {{
     await fireAndForget("event", input);
@@ -677,14 +696,55 @@ mod tests {
     }
 
     #[test]
-    fn every_one_of_the_nine_measured_callbacks_is_present_in_the_rendered_bridge() {
+    fn every_measured_callback_except_auth_is_present_in_the_rendered_bridge() {
+        // `auth` is the one deliberate exception: see
+        // `auth_is_never_rendered_because_it_corrupts_model_resolution` below.
         let ts = render_bridge_ts(Path::new("/bin/agentsync"), Path::new("/state/index.json"));
         for callback in CALLBACKS {
+            if callback == "auth" {
+                continue;
+            }
             assert!(
                 ts.contains(callback),
                 "callback {callback:?} missing from generated bridge: {ts}"
             );
         }
+    }
+
+    #[test]
+    fn auth_is_never_rendered_because_it_corrupts_model_resolution() {
+        // Live-discovered by the OW-011 gate: an OpenCode session with a
+        // plugin that defines even a no-op `auth` callback fails every
+        // model resolution ("Expected string, got undefined"), for every
+        // provider — not only ones a bridged handler targets. No handler is
+        // ever mapped to `auth` (see `opencode_callback_for`), so omitting it
+        // is free. `CALLBACKS` still lists it (it stays a name this contract
+        // recognises), but the rendered object literal must never define it.
+        let ts = render_bridge_ts(Path::new("/bin/agentsync"), Path::new("/state/index.json"));
+        assert!(
+            !ts.contains("auth:") && !ts.contains("\"auth\""),
+            "auth must never be a key in the rendered bridge's callback object: {ts}"
+        );
+    }
+
+    #[test]
+    fn a_sidecar_that_ran_and_matched_nothing_is_not_treated_as_a_failure() {
+        // Live-discovered by the OW-011 gate: exit 0 with empty stdout is
+        // `agentsync hook-shim`'s quiet "the filter did not match" outcome
+        // (see `src/shim/run.rs`), never a failure. Conflating the two used
+        // to make every non-matching, awaited tool call throw and block the
+        // real tool invocation on a live host.
+        let ts = render_bridge_ts(Path::new("/bin/agentsync"), Path::new("/state/index.json"));
+        assert!(
+            ts.contains("ok: true, action: null") && ts.contains("ok: false, action: null"),
+            "runSidecar must distinguish a quiet no-match (ok: true) from a genuine \
+             failure (ok: false): {ts}"
+        );
+        assert!(
+            ts.contains("} else if (!ok) {"),
+            "dispatch must only throw/log on a genuine failure, never on a bare \
+             falsy action: {ts}"
+        );
     }
 
     #[test]
@@ -708,7 +768,7 @@ mod tests {
     fn fire_and_forget_callbacks_are_caught_and_logged_never_thrown() {
         let ts = render_bridge_ts(Path::new("/bin/agentsync"), Path::new("/state/index.json"));
         for callback in CALLBACKS {
-            if AWAITED_CALLBACKS.contains(&callback) {
+            if AWAITED_CALLBACKS.contains(&callback) || callback == "auth" {
                 continue;
             }
             let marker = format!("fireAndForget(\"{callback}\", input)");

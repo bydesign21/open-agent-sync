@@ -1,0 +1,23 @@
+# Deterministic OW-011 gate fixture manifest. @@LOCAL_PLUGIN_PATH@@ is
+# substituted by the gate script with the absolute path to
+# tests/fixtures/opencode-family-e2e/local-plugin/agentsync-e2e-demo-plugin.ts.
+
+# `hosts` is restricted to opencode/kilo: the synthetic hook-source host
+# declares no [mcp] section at all (see host-descriptor.toml.tmpl), so an
+# unrestricted entry would be reported as permanently, unfixably blocked
+# there — real divergence the tool must report forever, not a convergence
+# bug, but noise this gate does not need for its own purposes.
+[mcp.agentsync-e2e-demo]
+transport = "stdio"
+command = "true"
+args = ["--stdio"]
+scope = "user"
+hosts = ["opencode", "kilo"]
+
+[plugins.agentsync-e2e-demo-plugin.targets.opencode]
+local = "@@LOCAL_PLUGIN_PATH@@"
+scope = "user"
+
+[plugins.agentsync-e2e-demo-plugin.targets.kilo]
+local = "@@LOCAL_PLUGIN_PATH@@"
+scope = "user"

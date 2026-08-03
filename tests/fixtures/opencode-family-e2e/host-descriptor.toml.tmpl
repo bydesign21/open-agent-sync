@@ -1,0 +1,33 @@
+# Deterministic OW-011 gate fixture: a synthetic hook SOURCE host, loaded only
+# from the gate's isolated AGENTSYNC_HOME (never merged with or substituted
+# for the real "claude"/"codex" builtin descriptors). Its only job is to make
+# tests/fixtures/opencode-family-e2e/hooks/hooks.json observable as a hook
+# source, the same way a real Claude plugin cache entry would be, without
+# reading or writing anything under the real user's HOME.
+#
+# @@HOOKS_GLOB@@ is substituted by the gate script with the absolute path to
+# this fixture's own plugin-cache/ directory before the file is written into
+# AGENTSYNC_HOME/hosts/. Descriptor path expansion (`paths::expand`) only
+# understands `~`, `$HOME/`, and `{xdg_config}` — not arbitrary environment
+# variables — so the substitution has to happen before the file is written,
+# not at read time.
+#
+# The nested plugin-cache/<marketplace>/<plugin>/<version>/hooks/hooks.json
+# shape is required, not decorative: `claude_hooks_json_v1` derives the
+# `<plugin>@<marketplace>:<file>` handler source identity positionally from
+# exactly that layout (see `src/hosts/parsers/hooks.rs::plugin_identity`),
+# and only a handler with that identity shape is bridge-eligible at all
+# (`crate::domains::hooks::split_source`).
+
+name = "agentsync-e2e-source"
+display = "Agentsync E2E Source"
+detect = { bin = "agentsync-e2e-true" }
+
+[hooks]
+events = ["PreToolUse", "PostToolUse"]
+caps = []
+output = []
+
+[[hooks.read]]
+glob = "@@HOOKS_GLOB@@"
+parser = "claude_hooks_json_v1"

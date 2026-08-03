@@ -1,0 +1,14 @@
+# Deterministic OW-011 gate fixture: an npm plugin target, used ONLY for the
+# apply/write/two-pass-convergence proof (config bytes are inspected, never a
+# live host process is started against this manifest) — starting a real
+# OpenCode/Kilo session with this entry present would make the host try to
+# resolve "@agentsync/does-not-exist-e2e-fixture@0.0.0" over the network,
+# which this gate must never do.
+
+[plugins.agentsync-e2e-npm-demo.targets.opencode]
+npm = "@agentsync/does-not-exist-e2e-fixture@0.0.0"
+scope = "user"
+
+[plugins.agentsync-e2e-npm-demo.targets.kilo]
+npm = "@agentsync/does-not-exist-e2e-fixture@0.0.0"
+scope = "user"

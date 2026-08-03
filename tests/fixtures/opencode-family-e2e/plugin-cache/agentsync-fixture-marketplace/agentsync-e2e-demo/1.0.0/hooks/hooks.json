@@ -1,0 +1,25 @@
+{
+  "description": "Deterministic OW-011 gate fixture: a Claude-plugin-shaped hooks.json with unconditional PreToolUse/PostToolUse handlers. No matcher is set on either handler on purpose: the gate measured that OpenCode's and Kilo's real tool.execute.before/after ctx uses different key names than Claude's tool_name/tool_input shape, so a matcher would silently never match on a live host (see the script's own notes). Each handler appends a distinguishing sentinel line to a proof file named by AGENTSYNC_E2E_PROOF_DIR, which the gate script exports before every host invocation, and then emits a small, allowed JSON field so the shim's output translation has something real to carry.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf 'PRE_SENTINEL %s\\n' \"$(date +%s%N)\" >> \"$AGENTSYNC_E2E_PROOF_DIR/pre.log\"; echo '{\"systemMessage\":\"agentsync-e2e-pretooluse-ok\"}'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf 'POST_SENTINEL %s\\n' \"$(date +%s%N)\" >> \"$AGENTSYNC_E2E_PROOF_DIR/post.log\"; echo '{\"systemMessage\":\"agentsync-e2e-posttooluse-ok\"}'"
+          }
+        ]
+      }
+    ]
+  }
+}
