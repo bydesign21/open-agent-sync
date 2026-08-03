@@ -691,15 +691,18 @@ impl ConfigTransaction {
     /// Apply all source edits as one guarded transaction and verify the
     /// effective ordered-layer projection before accepting the writes.
     pub fn execute(&mut self) -> Result<ConfigTransactionResult, TransactionError> {
-        let origins: Vec<_> = self
+        let projection_origins: Vec<_> = self
             .origins
             .iter()
             .cloned()
             .chain(self.edits.iter().map(|edit| edit.origin.clone()))
             .collect();
-        Self::can_create(&origins).map_err(|message| TransactionError::VerificationFailed {
-            expected: "writable config origins".into(),
-            actual: message,
+        let edited_origins: Vec<_> = self.edits.iter().map(|edit| edit.origin.clone()).collect();
+        Self::can_create(&edited_origins).map_err(|message| {
+            TransactionError::VerificationFailed {
+                expected: "writable config origins".into(),
+                actual: message,
+            }
         })?;
         for source in &self.sources {
             verify_precondition(&source.path, &source.precondition)?;
@@ -789,12 +792,13 @@ impl ConfigTransaction {
             written.push(source.path.clone());
         }
 
-        let projection = match resolve_projection(&self.sources, &origins, &self.resolver_context) {
-            Ok(projection) => projection,
-            Err(error) => {
-                return Err(combine_rollback_error(error, rollback_config(&originals)));
-            }
-        };
+        let projection =
+            match resolve_projection(&self.sources, &projection_origins, &self.resolver_context) {
+                Ok(projection) => projection,
+                Err(error) => {
+                    return Err(combine_rollback_error(error, rollback_config(&originals)));
+                }
+            };
         if let Err(error) = self.verify_projection(&projection) {
             return Err(combine_rollback_error(error, rollback_config(&originals)));
         }
@@ -1018,18 +1022,51 @@ pub fn is_agentsync_owned(path: &Path) -> bool {
     {
         return false;
     }
+    let Some(resolved_path) = resolve_existing_prefix(path) else {
+        return false;
+    };
     if let Ok(state_dir) = crate::paths::state_dir()
-        && path.starts_with(&state_dir)
+        && let Some(resolved_state_dir) = resolve_existing_prefix(&state_dir)
+        && resolved_path.starts_with(resolved_state_dir)
     {
         return true;
     }
-    for parent in path.ancestors().skip(1) {
+    for parent in resolved_path.ancestors().skip(1) {
         let marker = parent.join(".agentsync-owned");
         if marker.exists() {
             return true;
         }
     }
     false
+}
+
+/// Resolve every symlink in the existing prefix while preserving a missing
+/// destination suffix. This makes ownership follow the real target directory
+/// without requiring the destination file to exist yet.
+fn resolve_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut existing = absolute.as_path();
+    let mut missing = Vec::new();
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => {
+                let mut resolved = std::fs::canonicalize(existing).ok()?;
+                for component in missing.iter().rev() {
+                    resolved.push(component);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(existing.file_name()?.to_os_string());
+                existing = existing.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1362,6 +1399,20 @@ mod tests {
         assert!(
             !is_agentsync_owned(&outside),
             "a path containing '..' must not inherit ownership from a lexical ancestor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ownership_rejects_a_symlink_escape_from_an_owned_tree() {
+        let owned = owned_tmp();
+        let outside = TempDir::new().unwrap();
+        let link = owned.path().join("link");
+        std::os::unix::fs::symlink(outside.path(), &link).unwrap();
+
+        assert!(
+            !is_agentsync_owned(&link.join("bridge.ts")),
+            "a destination reached through an owned symlink must use the target's ownership"
         );
     }
 

@@ -311,6 +311,51 @@ fn config_patch_blocks_an_externally_controlled_origin() {
 }
 
 #[test]
+fn config_patch_allows_a_writable_higher_origin_over_a_shadowed_read_only_origin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lower = tmp.path().join("managed.jsonc");
+    let higher = tmp.path().join("project.jsonc");
+    let lower_bytes = b"{\"value\":\"managed\"}\n";
+    let higher_bytes = b"{\"value\":\"project\",\"enabled\":true}\n";
+    std::fs::write(&lower, lower_bytes).unwrap();
+    std::fs::write(&higher, higher_bytes).unwrap();
+    let lower_hash = compute_sha256(lower_bytes);
+    let higher_hash = compute_sha256(higher_bytes);
+    let transaction = ConfigTransaction::new(serde_json::json!({
+        "value": "project",
+        "enabled": false
+    }))
+    .with_source(GuardedSource::with_hash(&lower, &lower_hash))
+    .with_source(GuardedSource::with_hash(&higher, &higher_hash))
+    .with_origin(
+        ConfigOrigin::new(&lower, ConfigScope::Global, 20, &lower_hash)
+            .externally_controlled("managed policy"),
+    )
+    .with_edit(SourceEdit {
+        origin: ConfigOrigin::new(&higher, ConfigScope::Project, 10, &higher_hash),
+        config_path: vec!["enabled".into()],
+        operation: ConfigEditOperation::Set {
+            value: serde_json::json!(false),
+            raw_json: None,
+        },
+    });
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(
+        report.results[0].outcome,
+        Outcome::Done,
+        "only the edited controlling origin must be writable: {}",
+        report.results[0].message
+    );
+    assert_eq!(std::fs::read(&lower).unwrap(), lower_bytes);
+    assert_eq!(
+        std::fs::read_to_string(&higher).unwrap(),
+        "{\"value\":\"project\",\"enabled\":false}\n"
+    );
+}
+
+#[test]
 fn config_patch_composes_mcp_and_plugin_edits_across_origin_precedence() {
     let tmp = tempfile::tempdir().unwrap();
     let global = tmp.path().join("global.jsonc");
