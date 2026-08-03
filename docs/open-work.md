@@ -1137,13 +1137,86 @@ Commit intent: `Add OpenCode family live proof`.
 {
   "id": "OW-011",
   "title": "Committed isolated OpenCode and Kilo live E2E gate",
-  "state": "designed-not-implemented",
+  "state": "implemented-passing-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-010"]
 }
 ```
 
 ---
+
+## OW-011 — live gate: PASSING, and lead-reproduced
+
+`scripts/verify-opencode-family-e2e.sh` is committed and executable (`0af92e4`).
+The lead ran it independently, not on report.
+
+| Lead observation | Result |
+|---|---|
+| Exit code | **0** |
+| proved live | **17** |
+| pass | 12 |
+| could not check | **0** |
+| not applicable | 8, each naming why |
+| failures | 0 |
+| `~/.agents/skills` before vs after | **byte-identical** |
+
+Proved live includes the things that had never been proven before: a **real**
+`opencode run` / `kilo run` session, driven by a network-free local model stub,
+making a real bash tool call that fired the generated
+`tool.execute.before`/`after` handlers in **both** hosts; `OPENCODE_PURE=1` /
+`KILO_PURE=1` genuinely disabling the bridge rather than reporting healthy;
+seeded JSONC comments surviving the guarded edit byte-for-byte; and a second
+real `plan` showing no remaining mutation.
+
+**The gate can fail.** Lead-verified: corrupting the asserted sentinel produced
+`EXIT=1` with 2 failures naming the exact wrong value. The cleanup trap held
+even on that failing run — the shared skills directory was still byte-identical
+afterwards.
+
+Note for future verifiers: an earlier lead attempt to corrupt the fixture was a
+**no-op** (it edited a log-line marker, not the asserted value) and the gate
+correctly still passed. A mutation that changes nothing proves nothing; confirm
+the mutation actually took effect before drawing a conclusion.
+
+### Two real production bugs the live gate found
+
+Neither was reachable by unit tests; both would have shipped.
+
+1. **A defined-but-unused `auth` callback broke provider resolution entirely.**
+   Merely *defining* `auth` in the generated bridge — never invoking it — made
+   the host throw `Expected string, got undefined` for **every** provider,
+   unrelated to any bridged handler. Fixed by never rendering `auth`.
+2. **A quiet no-match was treated as failure and blocked real tool calls.**
+   `dispatch()` treated "sidecar ran, exit 0, empty stdout" — the shim's
+   documented quiet no-match outcome — as a genuine failure, so any awaited
+   callback whose filter did not match **blocked the user's real tool call**.
+   Fixed so only a genuine failure throws.
+
+Both have regression tests.
+
+## KNOWN DEFECT — a hook matcher silently never matches on a live host
+
+Measured during the live gate and **not fixed**: the bridged `if_pattern` /
+matcher compares against Claude-shaped ctx keys (`tool_name`, `tool_input`),
+but the live OpenCode/Kilo ctx uses different keys (`tool`, `sessionID`,
+`callID`). A handler carrying a non-empty matcher therefore **never fires on a
+real host, silently**.
+
+This is the dangerous class: it renders as healthy. Nothing errors, the bridge
+installs, doctor is clean, and the hook simply never runs. The gate's own
+fixture omits `matcher` deliberately and documents why.
+
+Release decision required before `v0.0.9` ships: either translate the matcher to
+live ctx keys, or report any non-empty matcher on an OpenCode/Kilo bridge row as
+BLOCKED so no one believes it is working. Shipping it silent is not acceptable.
+
+## KNOWN DEFECT — cross-domain apply ordering
+
+When a plugin `local` target and a hook bridge target the same plugin-scan
+directory in one combined `apply`, the second transaction's
+`ClaimFreshDirectory` fails: both were planned against the same pre-apply disk
+snapshot. The gate works around it by splitting into two sequential `apply`
+invocations. Not fixed.
 
 ## OW-012 — Whole-branch review, merge, and local release gate
 
