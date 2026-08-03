@@ -9,7 +9,7 @@
 use anyhow::Context;
 
 use crate::core::diff::{Action, ActionKind, Domain, Row, Severity};
-use crate::core::model::{HookCap, HookFidelity};
+use crate::core::model::{HookCap, HookFidelity, HookOutputStrategy};
 use crate::core::plan::{FsOp, Plan, PlannedStep, Step};
 use crate::domains::World;
 
@@ -315,6 +315,19 @@ pub fn rows(world: &World) -> Vec<Row> {
 
                 let mut row = if !target.supports_event(&handler.event) {
                     Some(blocked_event_row(handler, target_host.name()))
+                } else if declared
+                    .shim
+                    .as_ref()
+                    .is_some_and(|shim| shim.output_strategy == HookOutputStrategy::OpenCodeV1)
+                {
+                    // OpenCode has no native manifest to write handler
+                    // capabilities into at all — every bridged handler always
+                    // needs the generated bridge, regardless of which caps a
+                    // descriptor happens to declare. So this never goes
+                    // through `classify`/`missing_caps` (which answer "is this
+                    // difference resolvable", not "is anything generated
+                    // yet"); see `src/shim/bridges/opencode.rs`.
+                    opencode_bridge_row(world, handler, source_host.name(), target_host.name())
                 } else {
                     let missing = target.missing_caps(&handler.required_caps());
                     match classify(&missing, target.can_shim()) {
@@ -565,6 +578,194 @@ fn plan_internal_manifest_cleanup(world: &World, plan: &mut Plan) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// OpenCode hook bridge (OW-008)
+// ---------------------------------------------------------------------------
+//
+// A separate mechanism from the Claude-plugin marketplace shim above:
+// OpenCode has no marketplace and no CLI plugin command at all (measured; see
+// `docs/open-work.md`), so a bridged handler is generated as one fixed TS
+// plugin plus an index and sidecars, all guarded by
+// `crate::transaction::FileTransaction` (`src/shim/bridges/opencode.rs`),
+// rather than the Claude-plugin `hooks.json`/`plugin.json` shape Codex uses.
+
+/// Claude-shaped event name -> the OpenCode callback structurally closest to
+/// it. Only the two hook events with an honest 1:1 mapping (both wrap a tool
+/// call and can act on it before/after it runs) are bridged today; every
+/// other Claude event is left unmapped rather than guessed at, and simply
+/// never satisfies `target.supports_event` for OpenCode's declared event
+/// list (see `src/hosts/builtin/opencode.toml`).
+fn opencode_callback_for(event: &str) -> Option<&'static str> {
+    match event {
+        "PreToolUse" => Some("tool.execute.before"),
+        "PostToolUse" => Some("tool.execute.after"),
+        _ => None,
+    }
+}
+
+/// Every handler from `plugin@marketplace` on `source_name` that maps to a
+/// bridgeable callback, built into the input `crate::shim::bridges::opencode`
+/// needs to (re)generate the whole bridge. The bridge is generated once per
+/// plugin from every one of its bridgeable handlers together — a partial
+/// regeneration from only one handler would silently drop the other's
+/// sidecar from the index.
+fn opencode_bridge_input(
+    world: &World,
+    source_name: &str,
+    plugin: &str,
+    marketplace: &str,
+) -> anyhow::Result<crate::shim::bridges::opencode::BridgeInput> {
+    let source = world
+        .snapshot(source_name)
+        .context("source host is not detected")?;
+    let mut handlers: Vec<crate::shim::bridges::opencode::BridgeHandler> = source
+        .hooks
+        .values()
+        .filter(|h| {
+            split_source(&h.id.source)
+                .is_some_and(|origin| origin == (plugin.to_string(), marketplace.to_string()))
+        })
+        .filter_map(|h| {
+            let callback = opencode_callback_for(&h.event)?;
+            let mut spec =
+                crate::shim::bridges::opencode::spec_for(callback, &h.id.to_string(), &h.command);
+            // Bare matcher and finer `if` both become the shim's own
+            // prefilter (`src/shim/matcher.rs` accepts a bare tool name),
+            // since OpenCode has no native per-tool routing of its own for
+            // the bridge to lean on — the shim always does the filtering.
+            spec.if_pattern = h.if_pattern.clone().or_else(|| h.matcher.clone());
+            spec.plugin_root = h.plugin_root.clone();
+            spec.rewake_message = h.rewake_message.clone();
+            spec.rewake_summary = h.rewake_summary.clone();
+            spec.timeout_seconds = h.timeout;
+            Some(crate::shim::bridges::opencode::BridgeHandler {
+                callback: callback.to_string(),
+                spec,
+            })
+        })
+        .collect();
+    handlers.sort_by(|a, b| a.spec.source_id.cmp(&b.spec.source_id));
+    Ok(crate::shim::bridges::opencode::BridgeInput {
+        xdg_config_home: crate::paths::xdg_config_home(),
+        state_home: crate::paths::state_dir()?,
+        agentsync_bin: std::env::current_exe()
+            .context("cannot find the agentsync binary to invoke from the bridge")?,
+        handlers,
+    })
+}
+
+/// Whether `target` is an OpenCode-family bridge target rather than a
+/// Claude-plugin marketplace shim target.
+fn is_opencode_bridge_target(target: &crate::hosts::Host) -> bool {
+    target
+        .descriptor
+        .hooks
+        .as_ref()
+        .and_then(|h| h.shim.as_ref())
+        .is_some_and(|shim| {
+            shim.output_strategy == crate::core::model::HookOutputStrategy::OpenCodeV1
+        })
+}
+
+fn opencode_bridge_row(
+    world: &World,
+    handler: &crate::core::model::HookHandler,
+    source_name: &str,
+    target_name: &str,
+) -> Option<Row> {
+    let (plugin, marketplace) = split_source(&handler.id.source)?;
+    let input = opencode_bridge_input(world, source_name, &plugin, &marketplace).ok()?;
+    if input.handlers.is_empty() {
+        return None;
+    }
+    let key = crate::core::diff::RowKey {
+        source_host: Some(source_name.to_string()),
+        marketplace: Some(handler.id.source.clone()),
+        ..Default::default()
+    };
+    if crate::shim::bridges::opencode::already_converged(
+        &input,
+        crate::shim::bridges::opencode::PINNED_VERSION,
+    ) {
+        let mut row = Row::synced(
+            Domain::Hooks,
+            handler.id.short(),
+            format!("bridged to {target_name} by the generated OpenCode hook plugin"),
+        );
+        row.key = key;
+        return Some(row);
+    }
+    Some(Row {
+        domain: Domain::Hooks,
+        name: handler.id.short(),
+        headline: format!("{target_name} has no native hook engine for this"),
+        detail: format!(
+            "a generated OpenCode plugin can bridge this handler to {target_name} \
+             (see src/shim/bridges/opencode.rs)"
+        ),
+        severity: Severity::Normal,
+        actions: vec![
+            Action::new(
+                format!("generate the OpenCode hook bridge on {target_name}"),
+                ActionKind::Push {
+                    hosts: vec![target_name.to_string()],
+                },
+            ),
+            Action::new("nothing to do", ActionKind::Nothing),
+        ],
+        chosen: 0,
+        accepted: false,
+        key,
+    })
+}
+
+fn plan_opencode_bridge_row(
+    world: &World,
+    row: &Row,
+    target_name: &str,
+    plan: &mut Plan,
+) -> anyhow::Result<()> {
+    let source_name = row
+        .key
+        .source_host
+        .as_deref()
+        .context("row does not record which host the hook came from")?;
+    let origin = row
+        .key
+        .marketplace
+        .clone()
+        .context("row does not record which plugin the hook came from")?;
+    let (plugin, marketplace) =
+        split_source(&origin).context("only plugin hooks can be bridged today")?;
+
+    // The bridge covers every bridgeable handler of this plugin at once, so
+    // if an earlier row (for example PreToolUse) already staged it in this
+    // same plan, a later row for the same plugin (PostToolUse) must not
+    // regenerate it a second time.
+    let guard = format!("opencode-bridge:{target_name}:{plugin}@{marketplace}");
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.guard.as_deref() == Some(guard.as_str()))
+    {
+        return Ok(());
+    }
+
+    let input = opencode_bridge_input(world, source_name, &plugin, &marketplace)?;
+    if input.handlers.is_empty() {
+        return Ok(());
+    }
+    let existing = crate::shim::bridges::opencode::read_existing_index(&input.state_home);
+    let generated = crate::shim::bridges::opencode::plan_bridge(&input, existing.as_ref())?;
+    plan.steps.push(PlannedStep {
+        label: format!("generate the OpenCode hook bridge for {plugin}"),
+        step: Step::FileTransaction(generated.transaction),
+        order_hint: None,
+        guard: Some(guard),
+    });
+    Ok(())
+}
+
 fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> anyhow::Result<()> {
     let source_name = row
         .key
@@ -575,6 +776,10 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
         .snapshot(source_name)
         .context("source host is not detected")?;
     let target = world.host(target_name).context("target host is unknown")?;
+
+    if is_opencode_bridge_target(target) {
+        return plan_opencode_bridge_row(world, row, target_name, plan);
+    }
 
     // The row records the handler's own full source (not its `short()` name),
     // because two same-named plugins from different marketplaces collapse to

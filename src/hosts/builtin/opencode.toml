@@ -68,3 +68,24 @@ dirs = [
   "{xdg_config}/opencode/skill",
   "{xdg_config}/opencode/skills",
 ]
+
+# OpenCode has no native hook config format at all — every bridged handler
+# always goes through the generated plugin in `src/shim/bridges/opencode.rs`,
+# never a native write. Only the two events with an honest structural mapping
+# onto a measured OpenCode callback are listed: PreToolUse -> tool.execute.
+# before, PostToolUse -> tool.execute.after (both wrap a tool call and can act
+# on it before/after it runs). `caps`/`output` are intentionally empty:
+# `crate::domains::hooks` never consults them for an OpenCode-family bridge
+# target (see `is_opencode_bridge_target`), because whether the bridge is
+# already generated is a filesystem question, not a capability-declaration
+# one. `[hooks.shim].marketplace` is unused by the bridge path (kept as
+# documentation of the state root); the real paths are resolved by
+# `crate::paths::xdg_config_home()` and `crate::paths::state_dir()`.
+[hooks]
+events = ["PreToolUse", "PostToolUse"]
+caps   = []
+output = []
+
+[hooks.shim]
+marketplace = "{agentsync-state}/shims/opencode"
+output_strategy = "open_code_v1"

@@ -2136,3 +2136,161 @@ fn kilo_hooks_apply_time_race_is_rejected_and_the_existing_bridge_is_untouched()
         "a rejected race must never overwrite what is actually on disk"
     );
 }
+
+fn opencode_hooks_pre_tool_use_handler() -> agentsync::core::model::HookHandler {
+    let id = agentsync::core::model::HookId {
+        source: "demo-plugin@demo-marketplace:hooks/hooks.json".to_string(),
+        event: "PreToolUse".to_string(),
+        group: 0,
+        index: 0,
+    };
+    let mut h = agentsync::core::model::HookHandler::new(id, "PreToolUse", "true");
+    h.matcher = Some("Bash".to_string());
+    h
+}
+
+fn opencode_hooks_world(cfg_home: &Path) -> World {
+    let mut claude_snap = HostSnapshot {
+        host: "claude".to_string(),
+        display: "claude".to_string(),
+        detected: true,
+        ..Default::default()
+    };
+    let handler = opencode_hooks_pre_tool_use_handler();
+    claude_snap.hooks.insert(handler.id.clone(), handler);
+
+    let opencode_snap = HostSnapshot {
+        host: "opencode".to_string(),
+        display: "opencode".to_string(),
+        detected: true,
+        ..Default::default()
+    };
+
+    let claude_text = descriptor::BUILTIN
+        .iter()
+        .find(|(n, _)| *n == "claude")
+        .expect("claude builtin")
+        .1;
+    let claude_host = Host {
+        descriptor: descriptor::parse(claude_text, "claude").unwrap(),
+        bin: Some(PathBuf::from("/usr/bin/claude")),
+    };
+    let opencode_text = descriptor::BUILTIN
+        .iter()
+        .find(|(n, _)| *n == "opencode")
+        .expect("opencode builtin")
+        .1;
+    let opencode_host = Host {
+        descriptor: descriptor::parse(opencode_text, "opencode").unwrap(),
+        bin: Some(PathBuf::from("/usr/bin/opencode")),
+    };
+    // `cfg_home` doubles as this test's manifest directory too — it never
+    // collides with the XDG config tree below, and keeping everything under
+    // one temp root makes the fixture easy to read.
+    let _ = cfg_home;
+
+    World {
+        manifest: Manifest::default(),
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![claude_host, opencode_host],
+        snapshots: vec![claude_snap, opencode_snap],
+        repos: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn opencode_hooks_converge_after_two_passes() {
+    let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_restore = EnvRestore::capture(&["XDG_CONFIG_HOME", "AGENTSYNC_STATE_HOME"]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg_home = tmp.path().join("cfg");
+    let state_home = tmp.path().join("state");
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", &cfg_home);
+        std::env::set_var("AGENTSYNC_STATE_HOME", &state_home);
+    }
+
+    // ---- pass 1: nothing generated yet, so the row is actionable and the
+    // plan carries exactly one guarded FileTransaction, never a host command
+    // (OpenCode has none to invoke) ----
+    let world = opencode_hooks_world(&cfg_home);
+    let mut rows = world.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.domain == Domain::Hooks && r.name.starts_with("demo-plugin"))
+        .expect("a hooks row for the bridged handler");
+    assert!(
+        row.actionable(),
+        "pass 1 must have something to do: {row:?}"
+    );
+    for row in rows.iter_mut() {
+        if row.domain == Domain::Hooks {
+            row.accepted = row.actionable();
+        }
+    }
+    let plan = world.plan(&rows);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::FileTransaction(_))),
+        "pass 1 must plan a guarded file transaction: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .all(|s| !matches!(&s.step, Step::Host { .. })),
+        "OpenCode has no install command to invoke: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+
+    let manifest_path = tmp.path().join("manifest.toml");
+    let mut manifest_for_apply = Manifest::default();
+    let report = apply::run(&plan, &mut manifest_for_apply, &manifest_path, &[], |_| {});
+    assert!(
+        !report.any_failed(),
+        "pass 1 must apply cleanly: {:?}",
+        report.results
+    );
+
+    let bridge_path = cfg_home.join("opencode/plugins/agentsync-hooks.ts");
+    let index_path = state_home.join("shims/opencode/index.json");
+    assert!(bridge_path.is_file(), "bridge script must be written");
+    assert!(index_path.is_file(), "bridge index must be written");
+    let index_text = std::fs::read_to_string(&index_path).unwrap();
+    assert!(
+        index_text.contains("tool.execute.before"),
+        "the index must map PreToolUse to the measured OpenCode callback: {index_text}"
+    );
+
+    // ---- pass 2: read the real files pass 1 just wrote. The row must have
+    // nothing left to do, and the plan must contain no hooks mutation at all
+    // — that is the actual proof of convergence, not a second assertion about
+    // file contents. ----
+    let world2 = opencode_hooks_world(&cfg_home);
+    let rows2 = world2.rows();
+    let row2 = rows2
+        .iter()
+        .find(|r| r.domain == Domain::Hooks && r.name.starts_with("demo-plugin"))
+        .expect("target row still present");
+    assert!(
+        !row2.actionable(),
+        "a converged bridge must have nothing left to do: {}",
+        row2.headline
+    );
+    let mut rows2_accept_everything = rows2;
+    for row in rows2_accept_everything.iter_mut() {
+        row.accepted = row.actionable();
+    }
+    let plan2 = world2.plan(&rows2_accept_everything);
+    assert!(
+        !plan2
+            .steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::FileTransaction(_))),
+        "the second plan must contain no hooks mutation: {:?}",
+        plan2.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
