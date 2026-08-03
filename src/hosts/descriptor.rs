@@ -309,6 +309,8 @@ impl HooksSection {
 pub const BUILTIN: &[(&str, &str)] = &[
     ("claude", include_str!("builtin/claude.toml")),
     ("codex", include_str!("builtin/codex.toml")),
+    ("opencode", include_str!("builtin/opencode.toml")),
+    ("kilo", include_str!("builtin/kilo.toml")),
 ];
 
 pub fn parse(text: &str, origin: &str) -> Result<HostDescriptor> {
@@ -411,6 +413,123 @@ mod tests {
     fn builtins_parse_and_validate() {
         for (name, text) in BUILTIN {
             parse(text, name).unwrap_or_else(|e| panic!("builtin {name} invalid: {e:#}"));
+        }
+    }
+
+    fn builtin(name: &str) -> HostDescriptor {
+        let (_, text) = BUILTIN
+            .iter()
+            .find(|(n, _)| *n == name)
+            .unwrap_or_else(|| panic!("no builtin named {name}"));
+        parse(text, name).unwrap()
+    }
+
+    #[test]
+    fn opencode_and_kilo_are_detected_as_separate_hosts() {
+        let opencode = builtin("opencode");
+        let kilo = builtin("kilo");
+
+        assert_eq!(opencode.detect.bin, "opencode");
+        assert_eq!(kilo.detect.bin, "kilo");
+        assert_ne!(opencode.name, kilo.name);
+        assert_ne!(opencode.display, kilo.display);
+    }
+
+    #[test]
+    fn opencode_and_kilo_never_read_each_others_paths() {
+        let opencode = builtin("opencode");
+        let kilo = builtin("kilo");
+
+        let opencode_paths: Vec<String> = opencode
+            .skills
+            .as_ref()
+            .unwrap()
+            .dirs
+            .iter()
+            .cloned()
+            .chain(opencode.instructions.as_ref().unwrap().user.clone())
+            .collect();
+        let kilo_paths: Vec<String> = kilo
+            .skills
+            .as_ref()
+            .unwrap()
+            .dirs
+            .iter()
+            .cloned()
+            .chain(kilo.instructions.as_ref().unwrap().user.clone())
+            .collect();
+
+        for path in &opencode_paths {
+            assert!(
+                !path.contains("kilo"),
+                "an OpenCode path must never reference Kilo: {path}"
+            );
+        }
+        for path in &kilo_paths {
+            assert!(
+                !path.contains("opencode"),
+                "a Kilo path must never reference OpenCode: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_opencode_family_shares_one_skill_write_target_with_codex() {
+        let shared = "~/.agents/skills";
+        for name in ["codex", "opencode", "kilo"] {
+            let host = builtin(name);
+            assert_eq!(
+                host.skills.as_ref().unwrap().link_dir().unwrap(),
+                shared,
+                "{name} must write skills to the shared directory so a synced \
+                 skill produces one filesystem operation, not three"
+            );
+        }
+    }
+
+    #[test]
+    fn the_opencode_family_is_xdg_rooted_not_home_rooted() {
+        for name in ["opencode", "kilo"] {
+            let host = builtin(name);
+            let native: Vec<&String> = host
+                .skills
+                .as_ref()
+                .unwrap()
+                .dirs
+                .iter()
+                .filter(|dir| dir.contains(name))
+                .collect();
+            assert!(
+                !native.is_empty(),
+                "{name} must read its own native skill directory"
+            );
+            for dir in native {
+                assert!(
+                    dir.starts_with("{xdg_config}/"),
+                    "{name} native path {dir} must resolve through XDG, or the \
+                     live gate silently reads the caller's real config"
+                );
+            }
+            let user = host.instructions.as_ref().unwrap().user.clone().unwrap();
+            assert!(user.starts_with("{xdg_config}/"), "{name}: {user}");
+        }
+    }
+
+    #[test]
+    fn the_opencode_family_blocks_the_local_instruction_scope() {
+        for name in ["opencode", "kilo"] {
+            let host = builtin(name);
+            let instructions = host.instructions.as_ref().unwrap();
+            assert!(
+                instructions.local.is_none(),
+                "{name} has no CLAUDE.local.md counterpart, so the local scope \
+                 must be blocked rather than given an invented location"
+            );
+            assert_eq!(
+                instructions.scopes(),
+                vec![ScopeKind::User, ScopeKind::Project]
+            );
+            assert_eq!(instructions.project.as_deref(), Some("{repo}/AGENTS.md"));
         }
     }
 

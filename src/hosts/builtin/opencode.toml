@@ -1,0 +1,39 @@
+# OpenCode — https://opencode.ai/docs/config/
+#
+# Every path and capability below was measured against opencode 1.18.11 under a
+# temporary XDG_CONFIG_HOME, not taken from documentation. See
+# `docs/open-work.md` ("Verified runtime contracts") for the probe results.
+#
+# Paths use `{xdg_config}` rather than `~/.config`. OpenCode is XDG-rooted, so a
+# hardcoded home path would read the caller's real configuration the moment
+# XDG_CONFIG_HOME is set — which the live gate always does.
+#
+# Config layering (measured, highest first): OPENCODE_CONFIG_CONTENT inline >
+# OPENCODE_CONFIG_DIR profile > project .opencode/ > OPENCODE_CONFIG file >
+# default XDG global. `.jsonc` outranks `.json` in the same directory and both
+# are deep-merged. Layer resolution lives in `hosts::opencode_family::layers`,
+# because a flat descriptor path cannot express it.
+
+name = "opencode"
+display = "OpenCode"
+detect = { bin = "opencode" }
+
+[instructions]
+user = "{xdg_config}/opencode/AGENTS.md"
+project = "{repo}/AGENTS.md"
+# no `local`: OpenCode has no counterpart to CLAUDE.local.md, so that scope is
+# reported as blocked rather than given an invented location.
+
+# dirs[0] is the write target. `~/.agents/skills` is the shared location Codex
+# and Kilo also read, so a skill synced to all three produces one filesystem
+# operation, not three.
+#
+# Measured: all four directories below are read by `opencode debug skill`. Note
+# the native global directory is `skill` (singular) and `skills` (plural) also
+# resolves; both are listed so an existing user layout is seen either way.
+[skills]
+dirs = [
+  "~/.agents/skills",
+  "{xdg_config}/opencode/skill",
+  "{xdg_config}/opencode/skills",
+]

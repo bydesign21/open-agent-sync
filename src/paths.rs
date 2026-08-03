@@ -6,8 +6,34 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-/// Expand a leading `~` or `$HOME`. Anything else is returned unchanged.
+/// `$XDG_CONFIG_HOME`, defaulting to `~/.config`.
+///
+/// XDG-rooted hosts must resolve through this rather than a hardcoded
+/// `~/.config`. The OpenCode-family live gate runs entirely under a temporary
+/// `XDG_CONFIG_HOME`, so a hardcoded home path would silently read and write
+/// the caller's real configuration instead of the isolated one.
+pub fn xdg_config_home() -> PathBuf {
+    if let Ok(explicit) = std::env::var("XDG_CONFIG_HOME")
+        && !explicit.is_empty()
+    {
+        return PathBuf::from(explicit);
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config")
+}
+
+/// Expand a leading `~` or `$HOME`, and the `{xdg_config}` placeholder.
+/// Anything else is returned unchanged.
 pub fn expand(input: &str) -> PathBuf {
+    let input = if let Some(rest) = input.strip_prefix("{xdg_config}/") {
+        return xdg_config_home().join(rest);
+    } else if input == "{xdg_config}" {
+        return xdg_config_home();
+    } else {
+        input
+    };
+
     let home = dirs::home_dir();
     let Some(home) = home else {
         return PathBuf::from(input);

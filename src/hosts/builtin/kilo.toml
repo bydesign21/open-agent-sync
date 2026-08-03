@@ -1,0 +1,39 @@
+# Kilo CLI — https://kilo.ai/cli
+#
+# Kilo is a fork of OpenCode and shares its command surface, config shape, and
+# plugin model. It is NOT an alias: it has its own XDG roots, its own KILO_*
+# environment prefix, its own project directory names, and its own config file
+# names. Measured against kilo 7.4.17 under a temporary XDG_CONFIG_HOME.
+#
+# Measured cross-read isolation: Kilo ignores `.opencode/`, and OpenCode ignores
+# `.kilo/`. Neither host may ever read the other's values.
+#
+# Kilo reads its current `.kilo/` project directory and the documented legacy
+# `.kilocode/` name; both resolve, with `.kilo/` outranking the legacy name.
+#
+# Layer resolution, including the KILO_CONFIG_DIR active profile, lives in
+# `hosts::opencode_family::layers`. Measured: KILO_CONFIG_DIR outranks the
+# project layer and adds a layer rather than replacing the global one, and
+# `kilo debug paths` does NOT reflect it — so the active profile can only be
+# resolved from the environment.
+
+name = "kilo"
+display = "Kilo CLI"
+detect = { bin = "kilo" }
+
+[instructions]
+# The active KILO_CONFIG_DIR profile takes precedence over this path. A flat
+# descriptor cannot express that fallback, so the profile-aware resolution is
+# applied by the layer engine; this is the default global location.
+user = "{xdg_config}/kilo/AGENTS.md"
+project = "{repo}/AGENTS.md"
+# no `local`: Kilo has no counterpart to CLAUDE.local.md.
+
+# dirs[0] is the shared write target, identical to Codex and OpenCode, so one
+# skill synced to several hosts produces one filesystem operation.
+[skills]
+dirs = [
+  "~/.agents/skills",
+  "{xdg_config}/kilo/skill",
+  "{xdg_config}/kilo/skills",
+]
