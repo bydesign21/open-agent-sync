@@ -293,9 +293,86 @@ Commit intent: `Add guarded JSONC config patches`.
 
 ---
 
+## Verified runtime contracts (measured, not documented)
+
+Both pinned runtimes are installed on this machine, so the contracts below were
+**measured** by writing a distinguishing key into each candidate layer and
+reading back `<host> debug config`. This table outranks the design notes. Where
+it contradicts an earlier correction, the measurement wins.
+
+Environment used for every probe: temporary `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`XDG_CACHE_HOME`, `XDG_STATE_HOME`. `HOME` was never repurposed and the user's
+real config was never read or written.
+
+| Fact | Measured result |
+|---|---|
+| Installed versions | `opencode 1.18.11`, `kilo 7.4.17` — both exactly the pinned versions |
+| Isolation | `XDG_*` fully isolates both hosts; `debug paths` confirms every root |
+| Global config dir | `$XDG_CONFIG_HOME/opencode`, `$XDG_CONFIG_HOME/kilo` |
+| Config file names | `<id>.jsonc` and `<id>.json`; **both are read and deep-merged** |
+| JSONC vs JSON | `.jsonc` outranks `.json` in the same directory |
+| Comments | JSONC comments parse and survive |
+| Deep merge | a partial higher layer does not erase lower fields |
+| Project dirs | OpenCode `.opencode/`; Kilo `.kilo/` **and** legacy `.kilocode/` |
+| Cross-reads | Kilo ignores `.opencode/`; OpenCode ignores `.kilo/` |
+| `debug config` output | clean machine JSON, safe to parse |
+| Error output | **ANSI-styled text on stderr, never JSON** — must not be parsed |
+| Plugin scan dirs | **both** `<config>/plugin/` and `<config>/plugins/` load |
+| Plugin module shape | any exported async function is a plugin; ctx keys `$, client, directory, experimental_workspace, project, serverUrl, worktree` |
+| Hook callbacks | `config`, `auth`, `event`, `chat.message`, `chat.params`, `tool.execute.before`, `tool.execute.after`, `session.idle`, `session.error` |
+| `config` hook | fires on `debug config`, receives resolved config including `plugin_origins` |
+| Instruction files | `AGENTS.md` and `CLAUDE.md` |
+| Skill dirs | `.agents/skills`, `.claude/skills`, `.opencode/skill` (**singular** `skill`) |
+
+### Measured precedence, highest first
+
+| Rank | Layer | Writable |
+|---|---|---|
+| 1 | `<PREFIX>_CONFIG_CONTENT` (inline) | no |
+| 2 | `<PREFIX>_CONFIG_DIR` profile | yes |
+| 3 | project dir (`.opencode` / `.kilo`, `.kilocode`) | yes |
+| 4 | `<PREFIX>_CONFIG` explicit file | yes |
+| 5 | default XDG global config | yes |
+
+### Corrections this forced on the approved plan
+
+1. **`OPENCODE_CONFIG_DIR` exists.** The plan modeled only `KILO_CONFIG_DIR`.
+   Both hosts have the full symmetric set: `_CONFIG`, `_CONFIG_CONTENT`,
+   `_CONFIG_DIR`, `_PURE`, `_DISABLE_PROJECT_CONFIG`.
+2. **`<PREFIX>_CONFIG_DIR` outranks the project layer**, and **adds** a layer
+   rather than replacing the default global one. Correction 9 called it "the
+   active writable global profile", which implied lower precedence than project.
+   That was wrong; project keys still merge underneath it.
+3. **`<PREFIX>_CONFIG` ranks *below* the project layer**, not above it.
+4. **`debug paths` does not reflect `<PREFIX>_CONFIG_DIR`.** It still reports the
+   XDG config dir, so the active profile can never be read back from it and must
+   be resolved from the environment.
+5. **Descriptors need an XDG-aware placeholder.** Existing descriptors expand
+   only `~` and `{repo}`. Both new hosts are XDG-rooted, so a hardcoded `~`
+   breaks the moment `XDG_CONFIG_HOME` is set — which the OW-011 live gate
+   requires. Tracked as part of OW-004.
+
+---
+
 ## OW-003 — OpenCode-family layer discovery and origin tracking
 
-**State: designed, not implemented. Release blocker. Depends on OW-002.**
+**State: layer engine implemented and self-verified; the `--test diff`
+gate is deferred into OW-004 because it needs the host descriptors. Release
+blocker. Depends on OW-002.**
+
+Delivered on `master` as `f3c29ab` "Read OpenCode family config layers":
+`src/hosts/opencode_family/{mod,layers}.rs`, 11 tests, all measured precedence
+encoded with the evidence recorded in the module docs.
+
+The tests were **mutation-checked**, not merely observed green: reversing the
+`.jsonc`/`.json` order failed 2 tests, and ranking the profile dir below the
+project layer failed 1. They detect wrong precedence rather than restating the
+implementation.
+
+Honest limitation: implementation and tests were written together, so there was
+no separate RED phase for this task. The mutation check is the compensating
+evidence, and this task is **self-verified only** — no independent reviewer has
+seen it.
 
 Create one shared layer engine with separate OpenCode and Kilo profiles. The
 shared engine must not make the hosts aliases.
@@ -330,7 +407,7 @@ Commit intent: `Read OpenCode family config layers`.
 {
   "id": "OW-003",
   "title": "OpenCode-family layer discovery and origin tracking",
-  "state": "designed-not-implemented",
+  "state": "implemented-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-002"]
 }
