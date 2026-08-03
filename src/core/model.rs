@@ -194,6 +194,76 @@ pub enum HookOutputStrategy {
     #[default]
     Legacy,
     CodexV1,
+    /// OpenCode's measured hook callback surface. Shares the bridge action
+    /// translator with `KiloV1` (see `src/shim/bridge_output.rs`), because
+    /// both hosts were measured to expose the identical callback names.
+    OpenCodeV1,
+    /// Kilo's measured hook callback surface. Kilo is a fork of OpenCode and
+    /// was measured to expose the same nine callbacks, so it shares
+    /// `OpenCodeV1`'s bridge action translator rather than inventing a
+    /// second shape for an identical contract.
+    KiloV1,
+}
+
+/// How faithfully a bridged hook callback can stand in for the event it
+/// emulates.
+///
+/// This is the per-event fidelity contract: `Exact` events may be applied
+/// with a normal action, because the bridge can fully drive the intercepted
+/// operation the same way the native hook would. `SideEffectOnly` and
+/// `BestEffort` events can only ever be approximations — a side effect with
+/// no way to affect the flow, or a translation whose 1:1 behaviour was never
+/// confirmed against the running host — so both require a WARNING action the
+/// user must explicitly accept, never a silent normal one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFidelity {
+    /// The bridge can fully drive the intercepted operation.
+    Exact,
+    /// The bridge can only produce a side effect (a log line, a message) and
+    /// cannot affect the operation itself.
+    SideEffectOnly,
+    /// The bridge's behaviour was not confirmed 1:1 against the measured
+    /// runtime.
+    BestEffort,
+}
+
+impl HookFidelity {
+    /// Only `Exact` may be applied without the user explicitly accepting it.
+    pub fn requires_acceptance(self) -> bool {
+        !matches!(self, HookFidelity::Exact)
+    }
+}
+
+/// Fidelity for one of the runtime callbacks measured against the pinned
+/// OpenCode-family runtimes (`opencode 1.18.11`, `kilo 7.4.17`; see
+/// `docs/open-work.md`, "Verified runtime contracts").
+///
+/// `None` means the callback is either not one of the nine measured names, or
+/// was measured to fire with no output channel a bridged action could travel
+/// through (`config`, `auth`, `event`). Claiming delivery for one of those
+/// would be exactly the "plausible value manufactured in place of missing
+/// data" failure this contract exists to prevent, so they stay unsupported
+/// and blocked rather than guessed at. Do not add a name here that was not
+/// measured — report it as unverified instead.
+pub fn opencode_family_hook_fidelity(callback: &str) -> Option<HookFidelity> {
+    match callback {
+        // Wraps a tool call and can act on it before/after it runs — the
+        // closest structural match to the tool hooks this model already
+        // knows (`PreToolUse`/`PostToolUse`).
+        "tool.execute.before" | "tool.execute.after" => Some(HookFidelity::Exact),
+        // Lifecycle signals: a bridge can run a side effect (log, notify) but
+        // has no way to change what already happened.
+        "session.idle" | "session.error" => Some(HookFidelity::SideEffectOnly),
+        // These fire, and can plausibly carry a return value back, but the
+        // exact contract of what a returned value does was not confirmed
+        // against the pinned runtime.
+        "chat.message" | "chat.params" => Some(HookFidelity::BestEffort),
+        // Measured to fire, but never confirmed to carry an output channel
+        // back into an intercepted operation.
+        "config" | "auth" | "event" => None,
+        _ => None,
+    }
 }
 
 impl HookOutputField {
@@ -994,5 +1064,73 @@ mod tests {
             id.to_string(),
             "security-guidance@claude-plugins-official:hooks/hooks.json:post_tool_use:1:4"
         );
+    }
+
+    #[test]
+    fn hook_event_contract_exact_events_need_no_acceptance() {
+        assert!(!HookFidelity::Exact.requires_acceptance());
+    }
+
+    #[test]
+    fn hook_event_contract_side_effect_and_best_effort_need_explicit_acceptance() {
+        assert!(HookFidelity::SideEffectOnly.requires_acceptance());
+        assert!(HookFidelity::BestEffort.requires_acceptance());
+    }
+
+    #[test]
+    fn hook_event_contract_tool_execute_callbacks_are_exact() {
+        assert_eq!(
+            opencode_family_hook_fidelity("tool.execute.before"),
+            Some(HookFidelity::Exact)
+        );
+        assert_eq!(
+            opencode_family_hook_fidelity("tool.execute.after"),
+            Some(HookFidelity::Exact)
+        );
+    }
+
+    #[test]
+    fn hook_event_contract_session_lifecycle_callbacks_are_side_effect_only() {
+        assert_eq!(
+            opencode_family_hook_fidelity("session.idle"),
+            Some(HookFidelity::SideEffectOnly)
+        );
+        assert_eq!(
+            opencode_family_hook_fidelity("session.error"),
+            Some(HookFidelity::SideEffectOnly)
+        );
+    }
+
+    #[test]
+    fn hook_event_contract_chat_callbacks_are_best_effort() {
+        assert_eq!(
+            opencode_family_hook_fidelity("chat.message"),
+            Some(HookFidelity::BestEffort)
+        );
+        assert_eq!(
+            opencode_family_hook_fidelity("chat.params"),
+            Some(HookFidelity::BestEffort)
+        );
+    }
+
+    #[test]
+    fn hook_event_contract_callbacks_with_no_output_channel_get_no_fidelity() {
+        // `config`, `auth`, and `event` were measured to fire, but never to
+        // carry an output channel a bridged action could travel through.
+        // Never invent a fidelity that would let a caller treat these as
+        // deliverable.
+        for callback in ["config", "auth", "event"] {
+            assert_eq!(
+                opencode_family_hook_fidelity(callback),
+                None,
+                "{callback} must not be assigned a fidelity"
+            );
+        }
+    }
+
+    #[test]
+    fn hook_event_contract_an_unmeasured_callback_name_is_never_invented() {
+        assert_eq!(opencode_family_hook_fidelity("tool.execute.retry"), None);
+        assert_eq!(opencode_family_hook_fidelity(""), None);
     }
 }

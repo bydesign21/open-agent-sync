@@ -287,6 +287,7 @@ mod tests {
             fold_into_system_message: vec!["rewakeMessage".into()],
             rewake_message: None,
             rewake_summary: None,
+            timeout_seconds: None,
         }
     }
 
