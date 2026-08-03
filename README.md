@@ -585,7 +585,7 @@ temporary `XDG_CONFIG_HOME` — never assumed from documentation. See
 | Plugins | no marketplace or CLI plugin command; npm/local targets are copied to host-owned files under `<profile>/plugin(s)/agentsync-<name>` | same |
 | Pure mode | `OPENCODE_PURE=1` — reported DISABLED, never healthy | `KILO_PURE=1` — reported DISABLED, never healthy |
 | Hooks — generator | implemented and tested (`src/shim/bridges/opencode.rs`); nine measured callbacks, two (`tool.execute.before`/`after`) have a real event mapping | implemented and tested (`src/shim/bridges/kilo.rs`), including genuine execution proof through the real binary |
-| Hooks — wired into production | **yes** — `domains/hooks.rs` calls `spec_for` and maps `PreToolUse`/`PostToolUse` onto the two OpenCode callbacks that have one | **not yet** — `spec_for` is only called from Kilo's own tests today. The portable-event-to-Kilo-callback mapping has not been measured, so wiring it into `domains/hooks.rs` is separate, currently-in-progress work. Describing this as wired would be aspirational, not observed |
+| Hooks — wired into production | **yes** — `domains/hooks.rs` calls `spec_for` and maps `PreToolUse`/`PostToolUse` onto the two OpenCode callbacks that have one | **yes** — `domains/hooks.rs` calls `kilo::spec_for`; the active profile resolves through the `KILO_CONFIG_DIR`-aware layer engine. A production-generated sidecar carries `"event": "tool.execute.before"` and was executed end to end through the real release binary, returning the expected action |
 
 **Release-blocking, and worth repeating outside the measurement log:** an
 `{env:NAME}` reference is substituted only when the host *resolves* its
@@ -610,9 +610,15 @@ Known gaps:
 - Codex's project-scoped `.mcp.json` support is inferred from its loader strings,
   not confirmed. Its descriptor declares `scopes = ["user"]` until it is. Claude
   Code's three scopes are confirmed against `claude mcp add --help`.
-- Kilo's hook bridge generator is implemented and tested end to end, but is not
-  yet wired into `domains/hooks.rs` — see the host support matrix above. Until
-  that lands, Kilo hooks are readable and reportable but not pushable.
+- The portable-event to hook-callback mapping covers only `PreToolUse` and
+  `PostToolUse`, for both OpenCode and Kilo. The other seven measured callbacks
+  have no source-side handler that could populate them, so every other event is
+  reported blocked by name rather than given an invented mapping.
+- Six of the nine measured callbacks (`tool.execute.before`/`after`,
+  `chat.message`/`params`, `session.idle`/`error`) have not been triggered live:
+  doing so needs model-provider credentials that were unavailable. Their names
+  are confirmed from the installed binaries; `config` and `event` were fired
+  live against isolated profiles.
 - `timeout`'s unit for OpenCode/Kilo MCP servers could not be established
   against the pinned runtimes. It round-trips as an exact, opaque number; no
   seconds/milliseconds conversion is applied, because inventing one would be
