@@ -1194,21 +1194,30 @@ Neither was reachable by unit tests; both would have shipped.
 
 Both have regression tests.
 
-## KNOWN DEFECT — a hook matcher silently never matches on a live host
+## FIXED — a hook matcher would have silently never fired
 
-Measured during the live gate and **not fixed**: the bridged `if_pattern` /
-matcher compares against Claude-shaped ctx keys (`tool_name`, `tool_input`),
-but the live OpenCode/Kilo ctx uses different keys (`tool`, `sessionID`,
-`callID`). A handler carrying a non-empty matcher therefore **never fires on a
-real host, silently**.
+Measured during the live gate: the bridged `if_pattern` / matcher is compared
+against Claude-shaped ctx keys (`tool_name`, `tool_input`), but a live
+OpenCode/Kilo `tool.execute.*` ctx supplies `tool`, `sessionID`, `callID`. A
+handler carrying a matcher would therefore never fire on a real host — silently.
+No error, bridge installed, doctor clean, hook dead. The "renders as health"
+class.
 
-This is the dangerous class: it renders as healthy. Nothing errors, the bridge
-installs, doctor is clean, and the hook simply never runs. The gate's own
-fixture omits `matcher` deliberately and documents why.
+**Fixed by the lead** (`58fd1fb`): a non-empty `matcher` or `if_pattern` on an
+OpenCode/Kilo bridge row is now reported **Blocked**, with a headline saying it
+would never fire and a detail naming the key mismatch. It offers no mutating
+action, so "accept everything" cannot install a dead hook.
 
-Release decision required before `v0.0.9` ships: either translate the matcher to
-live ctx keys, or report any non-empty matcher on an OpenCode/Kilo bridge row as
-BLOCKED so no one believes it is working. Shipping it silent is not acceptable.
+Discovered while fixing it, and worth recording: the existing
+`pre_tool_use_handler()` helper in `tests/diff.rs` set `matcher = Some("Bash")`,
+so **every** OW-008/OW-009 bridge test was asserting that a matchered handler
+gets bridged — i.e. the test suite was pinning the broken behaviour in place.
+The helper now omits the matcher, and a dedicated test covers the blocked path
+for both `matcher` and `if_pattern`, on both hosts, with an explicit
+no-matcher baseline so it cannot pass for the wrong reason.
+
+Mutation-verified: disabling the guard fails the new test. The live gate still
+exits 0 with 17 proved-live afterwards.
 
 ## KNOWN DEFECT — cross-domain apply ordering
 
