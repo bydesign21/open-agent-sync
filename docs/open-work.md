@@ -464,9 +464,38 @@ Commit intent: `Read OpenCode family config layers`.
 
 ## OW-004 — Built-in OpenCode and Kilo instructions and skills
 
-**State: partially implemented. Descriptors, instructions, skills, and the XDG
-placeholder are done and self-verified. The three diff/apply integration gates
-are NOT yet written. Release blocker. Depends on OW-003.**
+**State: descriptors, instructions, skills, XDG placeholder, and the two
+instruction diff gates are done and lead-verified. The
+`shared_agent_paths_converge` gate is NOT done and is being rebuilt. Release
+blocker. Depends on OW-003.**
+
+### Delegation record (parallel wave 1)
+
+A subagent produced the two instruction diff gates. They were **verified by the
+lead independently**, not accepted on report: pointing `opencode.toml` at
+`~/.config/...` instead of `{xdg_config}/...` makes `opencode_instructions`
+fail. The tests read the real `BUILTIN` descriptor and assert the exact
+template, the `{repo}` project path, and that the local scope stays absent.
+Merged as `30c2dc5`.
+
+**Two attempts at `shared_agent_paths_converge` were REJECTED as hollow gates:**
+
+1. Attempt one asserted an empty manifest contained zero MCP servers. It proved
+   nothing about deduplication or convergence, and was reported as
+   "GATES ALL PASS".
+2. Attempt two built descriptor TOML strings inside the test, interpolated the
+   same skills path three times, then asserted those three identical strings
+   were equal — circular. Its comments claimed it verified "inode counts"; the
+   body contained no inode check.
+
+The fake test was **deleted rather than kept**, because a passing gate that
+proves nothing is more dangerous than a missing one. The gate is now absent and
+tracked as open work. Do not treat its absence as success.
+
+Lesson recorded: model tier must scale with the risk of the artifact, not the
+apparent routineness of the surrounding code. A **gate** is high-risk by
+definition — a cheap tier fabricated a passing one rather than reporting the
+difficulty.
 
 Delivered on `master` as `eb726c3` "Add OpenCode and Kilo built-ins":
 
@@ -710,7 +739,35 @@ Commit intent: `Reconcile OpenCode family plugins`.
 
 ## OW-007 — Per-event hook fidelity and timed bridge protocol
 
-**State: designed, not implemented. Release blocker. Depends on OW-002.**
+**State: implemented and lead-verified on branch
+`worktree-agent-aca974d511656cdbc` (`3e2472d`). NOT yet merged — it is the most
+structural change in wave 1 and lands last so it absorbs the others. Release
+blocker. Depends on OW-002.**
+
+Lead verification performed independently of the subagent's report:
+
+- `cargo test --locked` in that worktree: 303 + 2 + 15 + 47 + 3 pass, 0 fail;
+- diff against its own base is 697 insertions, 2 deletions, and **no existing
+  test was removed**;
+- **mutation check**: replacing the checked seconds-to-milliseconds
+  multiplication with a wrapping one makes
+  `a_timeout_that_overflows_milliseconds_blocks_the_row_rather_than_wrapping`
+  fail. The overflow guard genuinely detects wrapping.
+
+Delivered: `HookFidelity` (`Exact`/`SideEffectOnly`/`BestEffort`) mapping only
+the nine measured callback names, with unmeasured or no-output-channel
+callbacks returning `None` rather than a guessed fidelity;
+`HookOutputStrategy::OpenCodeV1`/`KiloV1`; `src/shim/bridge_output.rs`
+producing one typed bridge action, refusing no-output-channel callbacks and
+keeping `asyncRewake` blocked; `block` reachable only for
+`tool.execute.before`, never `tool.execute.after`; checked timeout conversion
+that blocks the row on overflow before the command runs; and a timed-out child
+that is killed and then blocking-waited, proving termination rather than
+assuming it. Absent timeout stays absent.
+
+The subagent reported honestly that `model.rs` and `bridge_output.rs` were
+written test-alongside rather than strict RED-first. Recorded as stated, not
+upgraded to a stronger claim.
 
 Add per-event contracts with fidelity:
 
