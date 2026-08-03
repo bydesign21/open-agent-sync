@@ -217,6 +217,17 @@ pub enum FileOperation {
         path: PathBuf,
         precondition: FilePrecondition,
     },
+    /// Claim a directory that does not exist yet as agentsync-owned, by
+    /// creating it and planting `.agentsync-owned` inside it.
+    ///
+    /// This is the *only* legitimate way to bootstrap ownership of a tree
+    /// outside `paths::state_dir()`: it is checked against the real
+    /// filesystem, not against `is_agentsync_owned`, because a brand-new
+    /// directory has no ancestor marker to inherit from yet. The check that
+    /// makes this safe is `!dir.exists()` — a directory that is already
+    /// there, empty or not, is never claimed. Ownership of anything already
+    /// on disk must come from a marker that was already there.
+    ClaimFreshDirectory { dir: PathBuf },
 }
 
 /// A transaction for atomic multi-file operations.
@@ -441,6 +452,14 @@ impl FileTransaction {
         self
     }
 
+    /// Claim a directory that does not exist yet. See
+    /// [`FileOperation::ClaimFreshDirectory`].
+    pub fn claim_fresh_directory(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.operations
+            .push(FileOperation::ClaimFreshDirectory { dir: dir.into() });
+        self
+    }
+
     /// Execute the transaction atomically.
     pub fn execute(&mut self) -> Result<(), TransactionError> {
         self.created_files.clear();
@@ -448,7 +467,23 @@ impl FileTransaction {
 
         // All ownership and race checks happen before the first mutation. A
         // later failure must never leave a valid earlier operation applied.
+        //
+        // `ClaimFreshDirectory` is checked differently from every other
+        // operation: it is legal exactly when the directory does not exist
+        // yet, never via `is_agentsync_owned` (which has nothing to check
+        // yet for a directory that is not there). Once claimed here, later
+        // operations in the same transaction that fall under that directory
+        // are recognized as owned without re-deriving it from disk — the
+        // claim itself, checked against the real filesystem, is the proof.
+        let mut claimed_dirs: Vec<PathBuf> = Vec::new();
         for op in &self.operations {
+            if let FileOperation::ClaimFreshDirectory { dir } = op {
+                if dir.exists() {
+                    return Err(TransactionError::UnownedDestination { path: dir.clone() });
+                }
+                claimed_dirs.push(dir.clone());
+                continue;
+            }
             let (path, precondition) = match op {
                 FileOperation::Write {
                     path, precondition, ..
@@ -458,8 +493,11 @@ impl FileTransaction {
                 }
                 | FileOperation::Remove { path, precondition }
                 | FileOperation::RemoveStaleSidecar { path, precondition } => (path, precondition),
+                FileOperation::ClaimFreshDirectory { .. } => unreachable!("handled above"),
             };
-            if !is_agentsync_owned(path) {
+            let owned =
+                is_agentsync_owned(path) || claimed_dirs.iter().any(|dir| path.starts_with(dir));
+            if !owned {
                 return Err(TransactionError::UnownedDestination { path: path.clone() });
             }
             if let Err(error) = verify_precondition(path, precondition) {
@@ -471,16 +509,17 @@ impl FileTransaction {
                 FileOperation::Write { path, .. }
                 | FileOperation::WriteGenerated { path, .. }
                 | FileOperation::Remove { path, .. }
-                | FileOperation::RemoveStaleSidecar { path, .. } => path,
+                | FileOperation::RemoveStaleSidecar { path, .. } => path.clone(),
+                FileOperation::ClaimFreshDirectory { dir } => dir.join(".agentsync-owned"),
             };
             if path.exists() {
                 self.backup_content
                     .entry(path.clone())
-                    .or_insert(std::fs::read(path).map_err(|e| TransactionError::IoError {
+                    .or_insert(std::fs::read(&path).map_err(|e| TransactionError::IoError {
                         path: path.clone(),
                         message: e.to_string(),
                     })?);
-            } else if !self.created_files.contains(path) {
+            } else if !self.created_files.contains(&path) {
                 self.created_files.push(path.clone());
             }
         }
@@ -497,6 +536,15 @@ impl FileTransaction {
     /// Execute a single operation.
     fn execute_operation(&mut self, op: &FileOperation) -> Result<PathBuf, TransactionError> {
         match op {
+            FileOperation::ClaimFreshDirectory { dir } => {
+                std::fs::create_dir_all(dir).map_err(|e| TransactionError::IoError {
+                    path: dir.clone(),
+                    message: e.to_string(),
+                })?;
+                let marker = dir.join(".agentsync-owned");
+                atomic_write(&marker, b"")?;
+                Ok(marker)
+            }
             FileOperation::Write {
                 path,
                 content,
@@ -551,6 +599,7 @@ impl FileTransaction {
                 | FileOperation::WriteGenerated { path, .. }
                 | FileOperation::Remove { path, .. }
                 | FileOperation::RemoveStaleSidecar { path, .. } => path.clone(),
+                FileOperation::ClaimFreshDirectory { dir } => dir.join(".agentsync-owned"),
             })
             .collect();
         paths.dedup();
@@ -1604,6 +1653,99 @@ mod tests {
         assert_eq!(
             std::fs::read(&sidecar).unwrap(),
             b"user changed this sidecar"
+        );
+    }
+
+    #[test]
+    fn claim_fresh_directory_refuses_a_directory_that_already_exists() {
+        // A directory that is already there — whether empty or full of the
+        // user's own files — must never be silently claimed. Only a
+        // genuinely absent directory, one agentsync itself is about to
+        // create, may be claimed.
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("plugin");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("users-own-plugin.ts"), b"user content").unwrap();
+
+        let mut tx = FileTransaction::new()
+            .claim_fresh_directory(&existing)
+            .write(
+                existing.join("agentsync-thing.ts"),
+                b"generated",
+                FilePrecondition::Absent,
+            );
+
+        let result = tx.execute();
+
+        assert!(
+            matches!(result, Err(TransactionError::UnownedDestination { .. })),
+            "an already-existing directory must never be claimed: {result:?}"
+        );
+        assert!(
+            !existing.join(".agentsync-owned").exists(),
+            "no marker may appear in a pre-existing, unowned directory"
+        );
+        assert!(
+            !existing.join("agentsync-thing.ts").exists(),
+            "nothing may be written into an unowned directory"
+        );
+        assert_eq!(
+            std::fs::read(existing.join("users-own-plugin.ts")).unwrap(),
+            b"user content",
+            "the user's own file must be completely untouched"
+        );
+    }
+
+    #[test]
+    fn claim_fresh_directory_succeeds_only_when_the_directory_is_genuinely_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fresh = tmp.path().join("plugin");
+
+        let mut tx = FileTransaction::new().claim_fresh_directory(&fresh).write(
+            fresh.join("agentsync-thing.ts"),
+            b"generated",
+            FilePrecondition::Absent,
+        );
+
+        assert!(
+            tx.execute().is_ok(),
+            "a genuinely fresh directory may be claimed"
+        );
+        assert!(fresh.join(".agentsync-owned").exists());
+        assert_eq!(
+            std::fs::read(fresh.join("agentsync-thing.ts")).unwrap(),
+            b"generated"
+        );
+        // Ownership, once claimed, is real: a second write under the same
+        // directory is now recognized without needing to claim it again.
+        assert!(is_agentsync_owned(&fresh.join("another-file.ts")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_fresh_directory_rolls_back_the_marker_when_a_later_operation_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fresh = tmp.path().join("plugin");
+        // At the time both operations are checked, `fresh` genuinely does not
+        // exist, so both the claim and this write's `Absent` precondition
+        // legitimately pass. But by the time this *second* operation actually
+        // executes, the first operation has already created `fresh` as a
+        // real directory — and renaming a generated file onto an existing
+        // directory path fails. That makes this a genuine post-partial-
+        // execution failure, not a precondition rejection that never ran
+        // anything.
+        let mut tx = FileTransaction::new().claim_fresh_directory(&fresh).write(
+            &fresh,
+            b"generated",
+            FilePrecondition::Absent,
+        );
+
+        let result = tx.execute();
+
+        assert!(result.is_err(), "the doomed write must fail: {result:?}");
+        assert!(
+            !fresh.join(".agentsync-owned").exists(),
+            "a transaction that fails after claiming a directory must not leave the marker behind"
         );
     }
 }

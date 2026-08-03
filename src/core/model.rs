@@ -727,6 +727,13 @@ pub struct PluginTargetState {
     /// (`agentsync-<name>`). More than one entry for a key is a duplicate,
     /// reported rather than collapsed.
     pub occurrences: BTreeMap<String, Vec<PluginOccurrence>>,
+    /// Whether the local-plugin destination directory for each scope may be
+    /// written into: either it does not exist yet (agentsync would create and
+    /// claim it fresh) or it already carries agentsync's own ownership
+    /// marker. `false` means a pre-existing directory with no marker —
+    /// copying a local target there must be blocked and reported rather than
+    /// silently claiming someone else's directory.
+    pub local_dir_claimable: BTreeMap<ScopeKind, bool>,
 }
 
 // ---------------------------------------------------------------------------

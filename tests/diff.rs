@@ -1317,6 +1317,84 @@ fn kilo_plugins_a_declared_local_target_missing_from_the_host_is_reported_and_pl
 }
 
 #[test]
+fn kilo_plugins_an_existing_unowned_local_directory_blocks_rather_than_claims_it() {
+    // A directory the user already has, with their own file inside and no
+    // agentsync ownership marker, must never be silently claimed. The row
+    // must report it as blocked, and even "accept everything" must produce
+    // no mutation for it.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("plugins")).unwrap();
+    std::fs::write(
+        tmp.path().join("plugins/local-policy.ts"),
+        "export async function AgentsyncHooks() {}\n",
+    )
+    .unwrap();
+    let dest_dir = tmp.path().join("repo/.kilo/plugin");
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    std::fs::write(dest_dir.join("users-own-plugin.ts"), b"user content").unwrap();
+
+    let mut manifest = Manifest::default();
+    manifest.plugins.insert(
+        "local-policy".into(),
+        plugin_entry_with_target(
+            "kilo",
+            local_target("plugins/local-policy.ts", ScopeKind::Project),
+        ),
+    );
+
+    let mut kilo = snapshot("kilo", &[]);
+    kilo.plugin_targets
+        .profile_dir
+        .insert(ScopeKind::Project, tmp.path().join("repo/.kilo"));
+    // This is exactly what a real read would find: the directory exists and
+    // carries no marker, so it is not claimable.
+    kilo.plugin_targets
+        .local_dir_claimable
+        .insert(ScopeKind::Project, false);
+    let opencode = snapshot("opencode", &[]);
+    let mut w = oc_world(manifest, opencode, kilo);
+    w.manifest_path = tmp.path().join(".agentsync.toml");
+
+    let mut rows = w.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.name == "local-policy" && r.domain == Domain::Plugins)
+        .expect("target row present");
+    assert_eq!(row.severity, Severity::Blocked, "{}", row.headline);
+    assert!(
+        row.headline.contains("unowned"),
+        "headline was {:?}",
+        row.headline
+    );
+    assert!(
+        !row.actionable(),
+        "a blocked row must offer nothing to accept"
+    );
+
+    for r in rows.iter_mut() {
+        r.accepted = r.actionable();
+    }
+    let plan = w.plan(&rows);
+    assert!(
+        !plan.steps.iter().any(|s| matches!(
+            &s.step,
+            Step::FileTransaction(_) | Step::ConfigTransaction(_)
+        )),
+        "accepting everything must not plant a marker or write into an unowned directory: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert!(
+        !dest_dir.join(".agentsync-owned").exists(),
+        "no marker may appear in a pre-existing, unowned directory"
+    );
+    assert_eq!(
+        std::fs::read(dest_dir.join("users-own-plugin.ts")).unwrap(),
+        b"user content",
+        "the user's own file must be completely untouched"
+    );
+}
+
+#[test]
 fn kilo_plugins_npm_and_local_identities_never_collide() {
     // An npm spec and a local host-owned destination live in different
     // identity namespaces, even when their text happens to coincide.

@@ -918,6 +918,10 @@ fn target_row(world: &World, name: &str, entry: &PluginEntry) -> Option<Row> {
     let mut present = Vec::new();
     let mut duplicate: Vec<(String, usize)> = Vec::new();
     let mut ambiguous: Vec<String> = Vec::new();
+    // A local target whose destination directory already exists and carries
+    // no agentsync ownership marker. Never auto-claimed: reported and left
+    // for explicit user action instead.
+    let mut blocked: Vec<String> = Vec::new();
 
     for (host, target) in &entry.targets {
         let Some(snap) = world.snapshot(host) else {
@@ -929,14 +933,26 @@ fn target_row(world: &World, name: &str, entry: &PluginEntry) -> Option<Row> {
             continue;
         };
         let key = occurrence_key(name, &identity);
-        match snap.plugin_targets.occurrences.get(&key).map(Vec::len) {
+        let count = snap.plugin_targets.occurrences.get(&key).map(Vec::len);
+        if matches!(identity, PluginIdentity::Local(_))
+            && matches!(count, None | Some(0))
+            && snap
+                .plugin_targets
+                .local_dir_claimable
+                .get(&target.scope)
+                .is_some_and(|claimable| !claimable)
+        {
+            blocked.push(host.clone());
+            continue;
+        }
+        match count {
             None | Some(0) => missing.push(host.clone()),
             Some(1) => present.push(host.clone()),
             Some(n) => duplicate.push((host.clone(), n)),
         }
     }
 
-    if missing.is_empty() && duplicate.is_empty() && ambiguous.is_empty() {
+    if missing.is_empty() && duplicate.is_empty() && ambiguous.is_empty() && blocked.is_empty() {
         if present.is_empty() {
             return None;
         }
@@ -953,7 +969,15 @@ fn target_row(world: &World, name: &str, entry: &PluginEntry) -> Option<Row> {
         return Some(row);
     }
 
-    let (severity, headline) = if !ambiguous.is_empty() {
+    let (severity, headline) = if !blocked.is_empty() {
+        (
+            Severity::Blocked,
+            format!(
+                "an existing, unowned directory blocks copying to {}",
+                join_hosts(&blocked)
+            ),
+        )
+    } else if !ambiguous.is_empty() {
         (
             Severity::Warn,
             format!(
@@ -985,7 +1009,7 @@ fn target_row(world: &World, name: &str, entry: &PluginEntry) -> Option<Row> {
             },
         ));
     }
-    if ambiguous.is_empty() && duplicate.is_empty() && !present.is_empty() {
+    if ambiguous.is_empty() && duplicate.is_empty() && blocked.is_empty() && !present.is_empty() {
         actions.extend(removal_actions(&present, "remove", false));
     }
     if actions.is_empty() {
@@ -1215,25 +1239,40 @@ fn push_local_target(
         }
     };
     let destination = ocp::host_owned_local_path(family, profile_dir, name, &source_path);
+    let Some(plugin_dir) = destination.parent() else {
+        plan.note(format!(
+            "{name}: {host}'s destination has no parent directory"
+        ));
+        return;
+    };
+
+    // A destination under a host's own config tree is not automatically
+    // agentsync-owned. `claim_fresh_directory` only ever succeeds when the
+    // directory does not exist yet — that is the one legitimate way to
+    // establish ownership, because there is no pre-existing content to
+    // endanger. A directory that already exists must already carry the
+    // marker (from an earlier, legitimate claim); otherwise this is a
+    // pre-existing, unowned directory that must never be silently claimed or
+    // written into. The row-level check should already have kept this
+    // function from being called in that case, but the guard here is not
+    // optional: it is what actually stops the write, in depth.
+    if !ocp::local_dir_claimable(plugin_dir) {
+        plan.note(format!(
+            "{name}: {} already exists and is not agentsync-owned; refusing to claim it",
+            plugin_dir.display()
+        ));
+        return;
+    }
+
+    let mut transaction = FileTransaction::new();
+    if !plugin_dir.is_dir() {
+        transaction = transaction.claim_fresh_directory(plugin_dir);
+    }
     let precondition = match std::fs::read(&destination) {
         Ok(existing) => FilePrecondition::Sha256(compute_sha256(&existing)),
         Err(_) => FilePrecondition::Absent,
     };
-    // A destination under a host's own config tree is not automatically
-    // agentsync-owned: ownership is proven by a marker file in the directory,
-    // not merely by the generated name. Plant it (idempotently, ahead of the
-    // guarded write) rather than ever overwriting an unowned destination by
-    // default.
-    if let Some(parent) = destination.parent() {
-        plan.push(
-            format!("mark {} as agentsync-owned", parent.display()),
-            Step::Fs(crate::core::plan::FsOp::WriteFile {
-                path: parent.join(".agentsync-owned"),
-                contents: String::new(),
-            }),
-        );
-    }
-    let transaction = FileTransaction::new().write(&destination, content, precondition);
+    transaction = transaction.write(&destination, content, precondition);
     plan.push(
         format!(
             "copy local target {name} to {host} ({})",

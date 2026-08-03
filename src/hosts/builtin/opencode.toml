@@ -13,6 +13,14 @@
 # default XDG global. `.jsonc` outranks `.json` in the same directory and both
 # are deep-merged. Layer resolution lives in `hosts::opencode_family::layers`,
 # because a flat descriptor path cannot express it.
+#
+# Npm/local plugin targets are read the same way, for the same reason:
+# `Host::read` gates on `Family::from_host_name("opencode")` and calls into
+# `hosts::opencode_family::plugins::read_full_state` directly. There is
+# deliberately no `[plugins]` table here. That generic section describes one
+# file read by one named parser, which fits Claude's and Codex's single
+# marketplace-install file — OpenCode has no marketplace or CLI plugin command
+# at all, so declaring one here would wrongly enroll it in that path.
 
 name = "opencode"
 display = "OpenCode"

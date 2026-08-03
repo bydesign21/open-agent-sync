@@ -167,6 +167,17 @@ pub fn scan_plugin_dirs(dir: &Path, scope: ScopeKind) -> Vec<(String, PluginOccu
     out
 }
 
+/// The directory a local target's host-owned copy lives in, per family.
+///
+/// * OpenCode: `<profile>/plugins/`
+/// * Kilo: `<profile>/plugin/`
+pub fn local_plugin_dir(family: Family, profile_dir: &Path) -> PathBuf {
+    match family {
+        Family::OpenCode => profile_dir.join("plugins"),
+        Family::Kilo => profile_dir.join("plugin"),
+    }
+}
+
 /// Where agentsync copies an explicit local target to, per family — a
 /// host-owned name so an unowned destination is never silently replaced.
 ///
@@ -180,10 +191,16 @@ pub fn host_owned_local_path(
 ) -> PathBuf {
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("ts");
     let file_name = format!("agentsync-{name}.{ext}");
-    match family {
-        Family::OpenCode => profile_dir.join("plugins").join(file_name),
-        Family::Kilo => profile_dir.join("plugin").join(file_name),
-    }
+    local_plugin_dir(family, profile_dir).join(file_name)
+}
+
+/// Whether `dir` may be written into by a guarded local-plugin copy: either
+/// it does not exist yet (agentsync would create and claim it fresh via
+/// `FileTransaction::claim_fresh_directory`), or it already carries
+/// agentsync's own ownership marker. A pre-existing, unmarked directory is
+/// never claimable — the caller must block and report it instead.
+pub fn local_dir_claimable(dir: &Path) -> bool {
+    !dir.is_dir() || crate::transaction::is_agentsync_owned(&dir.join(".agentsync-owned"))
 }
 
 fn to_config_scope(scope: ScopeKind) -> ConfigScope {
@@ -261,6 +278,10 @@ pub fn read_full_state(family: Family, env: &Env, repo: Option<&Path>) -> Plugin
     state
         .profile_dir
         .insert(ScopeKind::User, user_profile.clone());
+    state.local_dir_claimable.insert(
+        ScopeKind::User,
+        local_dir_claimable(&local_plugin_dir(family, &user_profile)),
+    );
     for (name, occurrence) in scan_plugin_dirs(&user_profile, ScopeKind::User) {
         state.occurrences.entry(name).or_default().push(occurrence);
     }
@@ -287,6 +308,10 @@ pub fn read_full_state(family: Family, env: &Env, repo: Option<&Path>) -> Plugin
         state
             .profile_dir
             .insert(ScopeKind::Project, project_dir.clone());
+        state.local_dir_claimable.insert(
+            ScopeKind::Project,
+            local_dir_claimable(&local_plugin_dir(family, &project_dir)),
+        );
         for (name, occurrence) in scan_plugin_dirs(&project_dir, ScopeKind::Project) {
             state.occurrences.entry(name).or_default().push(occurrence);
         }
@@ -438,6 +463,34 @@ mod tests {
             opencode, kilo,
             "npm and local identities, and OpenCode vs Kilo destinations, must never collide"
         );
+    }
+
+    #[test]
+    fn a_directory_that_does_not_exist_yet_is_claimable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fresh = tmp.path().join("plugin");
+        assert!(local_dir_claimable(&fresh));
+    }
+
+    #[test]
+    fn a_preexisting_directory_with_no_marker_is_not_claimable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let existing = tmp.path().join("plugin");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("users-own-plugin.ts"), b"user content").unwrap();
+        assert!(
+            !local_dir_claimable(&existing),
+            "a directory with the user's own content and no marker must never be claimable"
+        );
+    }
+
+    #[test]
+    fn a_directory_already_carrying_the_marker_is_claimable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let owned = tmp.path().join("plugin");
+        std::fs::create_dir_all(&owned).unwrap();
+        std::fs::write(owned.join(".agentsync-owned"), b"").unwrap();
+        assert!(local_dir_claimable(&owned));
     }
 
     #[test]
