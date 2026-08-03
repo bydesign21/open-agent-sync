@@ -969,33 +969,46 @@ Commit intent: `Generate Kilo hook bridges`.
 
 ---
 
-## RELEASE BLOCKER — the Kilo bridge invokes a command that does not exist
+## Bridge execution proof — what is and is not proven
 
-**Corrected finding.** An earlier version of this entry said the dispatcher was
-missing for both hosts. That was wrong. The two bridges diverged:
+The `bridge-shim` contract defect is FIXED. Both bridges now invoke the existing
+`agentsync hook-shim --spec <sidecar>` command. A regression test asserts the
+string `bridge-shim` appears nowhere in generated output.
 
-| Bridge | Invokes | Exists? |
+**Genuine execution proof exists** for the Kilo bridge mechanism. A sentinel
+round-tripped through: bundled JS → `spawnSync` → the real release binary's
+`hook-shim` → the shell command → `bridge_output::translate` → JSON returned to
+a `bun` driver. Reintroducing the old defect bundled cleanly but failed at
+execution with `unrecognized subcommand 'bridge-shim'` — confirming that
+**`bun build` is not evidence of runtime behaviour**, only of syntax.
+
+### But the two hosts are NOT at the same maturity
+
+| | OpenCode | Kilo |
 |---|---|---|
-| OpenCode (`bridges/opencode.rs`) | `agentsync hook-shim --spec <path>` | **yes** — `Command::HookShim` in `src/main.rs:66` |
-| Kilo (`bridges/kilo.rs`) | `agentsync bridge-shim --index <index.json> --callback <name>` | **no** — not registered anywhere |
+| `spec_for` called from production | **yes** — `domains/hooks.rs:631` | **no** — test module only |
+| `[hooks]` in descriptor | yes | no |
+| portable-event → callback mapping | `PreToolUse`/`PostToolUse` wired | none |
 
-OW-008 correctly reused the existing Codex `hook-shim` contract. OW-009
-invented a second one, despite both briefs saying to reuse the existing scheme
-and not build a parallel mechanism.
+Lead-verified consequence: a sidecar produced by the **generator-driven** Kilo
+fixture carries `"event": "PostToolUse"`, and executing it against the real
+binary fails with:
 
-Why the gates did not catch it: `bun build` bundles the TypeScript, it never
-executes it. A bridge calling a nonexistent subcommand bundles perfectly and
-fails only when a real host invokes it. This is a green gate over a path
-nothing executes.
+    PostToolUse has no measured output channel a bridge action could travel
+    through, so ... must stay blocked rather than claim delivery
 
-**Required fix:** make the Kilo bridge use `hook-shim --spec`, matching Codex
-and OpenCode. Do not implement `bridge-shim` — a second dispatcher contract is
-the defect, not the cure.
+The successful Kilo execution proof used a spec built by `spec_for()`, whose
+`event` is the callback name. `spec_for` is called only from tests. So the
+proof demonstrates the **mechanism** works; it does not demonstrate that the
+**product** yet produces working Kilo specs.
 
-**Required proof:** EXECUTE a generated bridge under `bun` against a real
-built `agentsync` binary and assert a sentinel actually appears. Bundling is
-not evidence of runtime behaviour. Until that exists, no OW-011 or OW-013 live
-claim can be made.
+That is not a contradiction of the proof — it is the already-known "Kilo is not
+wired into `domains/hooks.rs`" gap showing up at runtime. Fixing the wiring must
+make production emit callback-named events, and the fix is only proven when a
+sidecar produced by the *production* path executes end to end.
+
+Refusing to fabricate a mapping was correct: the portable-event to Kilo-callback
+mapping is genuinely unmeasured. Measure it before wiring it.
 
 ## OW-009 — bridge generated, not wired
 
