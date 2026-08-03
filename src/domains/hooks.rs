@@ -9,7 +9,7 @@
 use anyhow::Context;
 
 use crate::core::diff::{Action, ActionKind, Domain, Row, Severity};
-use crate::core::model::HookCap;
+use crate::core::model::{HookCap, HookFidelity};
 use crate::core::plan::{FsOp, Plan, PlannedStep, Step};
 use crate::domains::World;
 
@@ -261,6 +261,23 @@ pub fn classify(missing: &[HookCap], target_can_shim: bool) -> Severity {
         Severity::Normal
     } else {
         Severity::Blocked
+    }
+}
+
+/// Severity for a bridged event, given its per-event fidelity contract
+/// (OW-007).
+///
+/// `Exact` is an ordinary resolvable difference. `SideEffectOnly` and
+/// `BestEffort` can only ever be approximations of the native event, so they
+/// must never be applied by the same silent default a normal row gets: they
+/// come back as `Severity::Warn`, and every row starts with `accepted:
+/// false` (see [`crate::core::diff::Row`]), so only a user who explicitly
+/// accepts the row ever has it planned (see `domains::mod::plan`, which
+/// filters on `r.accepted`).
+pub fn severity_for_fidelity(fidelity: HookFidelity) -> Severity {
+    match fidelity {
+        HookFidelity::Exact => Severity::Normal,
+        HookFidelity::SideEffectOnly | HookFidelity::BestEffort => Severity::Warn,
     }
 }
 
@@ -804,5 +821,21 @@ mod tests {
     #[test]
     fn a_target_that_cannot_host_shims_blocks_even_a_shimmable_gap() {
         assert_eq!(classify(&[HookCap::If], false), Severity::Blocked);
+    }
+
+    #[test]
+    fn hook_fidelity_exact_events_get_normal_severity() {
+        assert_eq!(severity_for_fidelity(HookFidelity::Exact), Severity::Normal);
+    }
+
+    #[test]
+    fn hook_fidelity_side_effect_and_best_effort_events_get_a_warning_that_needs_acceptance() {
+        for fidelity in [HookFidelity::SideEffectOnly, HookFidelity::BestEffort] {
+            assert_eq!(
+                severity_for_fidelity(fidelity),
+                Severity::Warn,
+                "{fidelity:?} must surface as a warning requiring explicit acceptance"
+            );
+        }
     }
 }

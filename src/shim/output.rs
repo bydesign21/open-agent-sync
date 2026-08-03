@@ -27,6 +27,13 @@ pub fn normalize(stdout: &str, spec: &ShimSpec) -> Result<String> {
                 .context("Codex shim sidecar is missing its event")?;
             crate::shim::codex_output::translate(stdout, event, spec)
         }
+        HookOutputStrategy::OpenCodeV1 | HookOutputStrategy::KiloV1 => {
+            let callback = spec
+                .event
+                .as_deref()
+                .context("OpenCode-family shim sidecar is missing its callback")?;
+            crate::shim::bridge_output::translate(stdout, callback, spec)
+        }
     }
 }
 
@@ -114,6 +121,7 @@ mod tests {
             fold_into_system_message: fold.iter().map(|s| s.to_string()).collect(),
             rewake_message: None,
             rewake_summary: None,
+            timeout_seconds: None,
         }
     }
 

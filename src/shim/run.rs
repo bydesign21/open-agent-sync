@@ -25,6 +25,31 @@ pub struct Outcome {
 pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
     let mut stderr = String::new();
 
+    // The source value is always seconds. Convert with a CHECKED
+    // multiplication: an overflow must block the row outright, never wrap or
+    // saturate into some smaller, plausible-looking number of milliseconds
+    // that would then silently under-enforce the timeout. This is decided
+    // before the command ever runs, and before the `if` filter even
+    // evaluates, so an unrunnable row never partially runs.
+    let timeout_ms: Option<u64> = match spec.timeout_seconds {
+        None => None,
+        Some(secs) => match secs.checked_mul(1000) {
+            Some(ms) => Some(ms),
+            None => {
+                return Outcome {
+                    stdout: String::new(),
+                    stderr: format!(
+                        "agentsync: the timeout for {} overflows when converted from {secs}s to \
+                         milliseconds; the row is blocked rather than run with a wrapped or \
+                         saturated value\n",
+                        spec.source_id
+                    ),
+                    code: 1,
+                };
+            }
+        },
+    };
+
     if let Some(pattern) = &spec.if_pattern {
         match serde_json::from_str::<serde_json::Value>(stdin) {
             Err(_) => {
@@ -104,7 +129,11 @@ pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
         None
     });
 
-    let done = match child.wait_with_output() {
+    let (result, timed_out) = match timeout_ms {
+        Some(ms) => wait_with_timeout(child, ms),
+        None => (child.wait_with_output(), false),
+    };
+    let done = match result {
         Ok(o) => o,
         Err(e) => {
             return Outcome {
@@ -124,6 +153,13 @@ pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
         stderr.push_str(&format!(
             "agentsync: writing stdin to the hook for {} failed: {e}\n",
             spec.source_id
+        ));
+    }
+    if timed_out {
+        stderr.push_str(&format!(
+            "agentsync: the hook for {} exceeded its {}ms timeout and was terminated\n",
+            spec.source_id,
+            timeout_ms.expect("timed_out is only set when a timeout was configured")
         ));
     }
 
@@ -171,6 +207,74 @@ pub fn execute(spec: &ShimSpec, stdin: &str) -> Outcome {
     }
 }
 
+/// Wait for `child` to finish, killing it if it is still running after
+/// `timeout_ms`.
+///
+/// `stdout`/`stderr` are collected on their own threads rather than through
+/// `Child::wait_with_output`, because that call cannot be interrupted once
+/// started: reading the pipes here, and polling `try_wait` for the exit
+/// status separately, is what lets a slow command actually get killed
+/// instead of waited out.
+///
+/// Returns whether the child was killed for exceeding its timeout. When it
+/// was, the child has already been reaped by a blocking `wait()` on this
+/// thread by the time this function returns — proof the process is gone, not
+/// merely that `kill` was asked for.
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout_ms: u64,
+) -> (std::io::Result<std::process::Output>, bool) {
+    use std::io::Read;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stdout_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let _ = pipe.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    timed_out = true;
+                    // `.wait()` blocks until the kernel has actually reaped
+                    // the process. That is the proof it is gone — a `kill()`
+                    // call returning `Ok` only proves the signal was sent.
+                    break child.kill().and_then(|()| child.wait());
+                }
+                std::thread::sleep(
+                    std::time::Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                );
+            }
+            Err(e) => break Err(e),
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    let output = status.map(|status| std::process::Output {
+        status,
+        stdout,
+        stderr,
+    });
+    (output, timed_out)
+}
+
 /// The `agentsync hook-shim` entry point. Returns the exit code to use.
 pub fn main(spec_path: &Path) -> Result<i32> {
     let spec = ShimSpec::load(spec_path).with_context(|| {
@@ -213,6 +317,7 @@ mod tests {
             fold_into_system_message: vec![],
             rewake_message: None,
             rewake_summary: None,
+            timeout_seconds: None,
         }
     }
 
@@ -380,6 +485,72 @@ mod tests {
         assert_eq!(
             out.code, 3,
             "the hook command's failure code must survive: {out:?}"
+        );
+    }
+
+    #[test]
+    fn absent_timeout_lets_a_slow_command_finish_uninterrupted() {
+        // No timeout configured must never become some invented number. The
+        // command must be able to take its time.
+        let mut s = spec("sleep 0.2; echo done", None);
+        s.timeout_seconds = None;
+        let out = execute(&s, &input("Bash", "x"));
+        assert_eq!(out.code, 0, "got {out:?}");
+        assert!(out.stdout.contains("done"), "got {out:?}");
+    }
+
+    #[test]
+    fn a_command_that_exceeds_its_timeout_is_killed_and_proven_gone() {
+        let mut s = spec("sleep 5; echo SHOULD_NOT_APPEAR", None);
+        // A timeout this small only works because seconds are converted to
+        // milliseconds; a unit bug here would let the sleep finish.
+        s.timeout_seconds = Some(0);
+        let start = std::time::Instant::now();
+        let out = execute(&s, &input("Bash", "x"));
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the child must have been killed rather than waited out: {elapsed:?}"
+        );
+        assert_ne!(out.code, 0, "a killed hook must not look like it succeeded");
+        assert!(
+            !out.stdout.contains("SHOULD_NOT_APPEAR"),
+            "the command must have been terminated before finishing: {out:?}"
+        );
+        assert!(
+            out.stderr.contains("timeout") || out.stderr.contains("timed out"),
+            "the timeout must be named, not a bare generic failure: {out:?}"
+        );
+    }
+
+    #[test]
+    fn timeout_seconds_are_converted_to_milliseconds_not_treated_as_milliseconds() {
+        // One second is enough time for a 200ms sleep to finish normally. If
+        // the runtime mistakenly treated the value as milliseconds, this
+        // would time out and fail.
+        let mut s = spec("sleep 0.2; echo done", None);
+        s.timeout_seconds = Some(1);
+        let out = execute(&s, &input("Bash", "x"));
+        assert_eq!(out.code, 0, "got {out:?}");
+        assert!(out.stdout.contains("done"), "got {out:?}");
+    }
+
+    #[test]
+    fn a_timeout_that_overflows_milliseconds_blocks_the_row_rather_than_wrapping() {
+        let mut s = spec("echo SHOULD_NOT_RUN", None);
+        // u64::MAX seconds * 1000 overflows u64. This must never wrap or
+        // saturate into some smaller, plausible-looking number of ms — it
+        // must block the row outright, and the command must never run.
+        s.timeout_seconds = Some(u64::MAX);
+        let out = execute(&s, &input("Bash", "x"));
+        assert_ne!(out.code, 0, "an overflowed timeout must block: {out:?}");
+        assert!(
+            !out.stdout.contains("SHOULD_NOT_RUN"),
+            "the command must never have run: {out:?}"
+        );
+        assert!(
+            out.stderr.contains("overflow"),
+            "the overflow must be named: {out:?}"
         );
     }
 }

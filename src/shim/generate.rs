@@ -152,6 +152,15 @@ pub fn plan_shim(input: &ShimInput) -> Result<Generated> {
             rewake_summary: (!input.target_caps.contains(&HookCap::RewakeSummary))
                 .then(|| handler.rewake_summary.clone())
                 .flatten(),
+            // Only carried into the spec, for the runtime to enforce itself,
+            // when the target cannot honour a timeout natively. A target that
+            // declares the cap gets the value re-emitted as a real manifest
+            // field below and enforces it with its own engine; giving the
+            // shim runtime a second, redundant timeout to enforce there would
+            // race the host's own timer.
+            timeout_seconds: (!input.target_caps.contains(&HookCap::Timeout))
+                .then_some(handler.timeout)
+                .flatten(),
         };
         ops.push(FsOp::WriteFile {
             path: specs_dir.join(sidecar_name(handler)),

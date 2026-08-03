@@ -7,6 +7,7 @@
 //! agentsync binary, so a fix to a strategy ships with the binary instead of
 //! requiring every generated shim to be rewritten.
 
+pub mod bridge_output;
 pub mod codex_output;
 pub mod generate;
 pub mod matcher;
@@ -63,6 +64,13 @@ pub struct ShimSpec {
     /// Same as `rewake_message`, for the handler's configured `rewakeSummary`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewake_summary: Option<String>,
+    /// The handler's configured timeout, in **seconds** — the unit the
+    /// source config carries it in. `None` means no timeout was configured,
+    /// and must never be defaulted to a number: an absent timeout stays
+    /// absent all the way to the runtime, which then lets the command run
+    /// with no time limit rather than inventing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
 }
 
 impl ShimSpec {
@@ -95,6 +103,7 @@ mod tests {
             fold_into_system_message: vec!["rewakeMessage".into()],
             rewake_message: Some("findings follow".into()),
             rewake_summary: Some("Commit security review found issues".into()),
+            timeout_seconds: Some(30),
         }
     }
 

@@ -1681,6 +1681,67 @@ fn a_target_with_no_hooks_section_is_blocked_not_silently_skipped() {
 }
 
 #[test]
+fn hook_fidelity_only_exact_events_are_severity_normal() {
+    use agentsync::core::model::HookFidelity;
+    use agentsync::domains::hooks::severity_for_fidelity;
+
+    assert_eq!(severity_for_fidelity(HookFidelity::Exact), Severity::Normal);
+}
+
+#[test]
+fn hook_fidelity_side_effect_only_and_best_effort_events_require_explicit_acceptance() {
+    // OW-007: a bridged event that is only a side effect, or whose 1:1
+    // behaviour was never confirmed, must never be applied by the same
+    // silent default an exact row gets. It must come back as a warning, and
+    // a freshly built row always starts unaccepted — so the planner (see
+    // `agentsync::domains::plan`, which only ever plans `r.accepted &&
+    // r.actionable()` rows) cannot apply it until a user explicitly accepts.
+    use agentsync::core::model::HookFidelity;
+    use agentsync::domains::hooks::severity_for_fidelity;
+
+    for fidelity in [HookFidelity::SideEffectOnly, HookFidelity::BestEffort] {
+        let severity = severity_for_fidelity(fidelity);
+        assert_eq!(severity, Severity::Warn, "{fidelity:?} must be a warning");
+
+        let row = Row {
+            domain: Domain::Hooks,
+            name: "demo".into(),
+            headline: "bridged with reduced fidelity".into(),
+            detail: format!("{fidelity:?}"),
+            severity,
+            actions: vec![agentsync::core::diff::Action::new(
+                "bridge it anyway",
+                ActionKind::Push {
+                    hosts: vec!["opencode".into()],
+                },
+            )],
+            chosen: 0,
+            accepted: false,
+            key: Default::default(),
+        };
+        assert!(
+            !row.accepted,
+            "a fresh row must never start pre-accepted: {fidelity:?}"
+        );
+    }
+}
+
+#[test]
+fn hook_fidelity_unmeasured_callbacks_never_get_a_fidelity_to_apply() {
+    use agentsync::core::model::opencode_family_hook_fidelity;
+
+    // config/auth/event were measured to fire with no output channel a
+    // bridged action could travel through. Never claim delivery for them.
+    for callback in ["config", "auth", "event", "something.never.measured"] {
+        assert_eq!(
+            opencode_family_hook_fidelity(callback),
+            None,
+            "{callback} must not be assigned a fidelity to build a row from"
+        );
+    }
+}
+
+#[test]
 fn unmodelled_fields_are_reported_even_with_no_other_gap() {
     // Regression for `unknown_fields` being collected but never surfaced: a
     // handler with a field agentsync does not model must never look portable.
