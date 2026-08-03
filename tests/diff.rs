@@ -2049,3 +2049,86 @@ fn a_settings_file_path_containing_an_at_sign_is_not_offered_a_shim() {
         row.action().kind
     );
 }
+
+// ---------------------------------------------------------------------------
+// Instructions: OpenCode and Kilo
+// ---------------------------------------------------------------------------
+
+#[test]
+fn opencode_instructions() {
+    // OpenCode declares user scope in {xdg_config}/opencode/AGENTS.md and project
+    // scope in {repo}/AGENTS.md. Neither should be invented; both should be
+    // reported at detection time.
+    let mut opencode = snapshot("opencode", &[]);
+
+    with_instruction(
+        &mut opencode,
+        Scope::User,
+        "/tmp/xdg/opencode/AGENTS.md",
+        LinkState::Owned,
+    );
+    with_instruction(
+        &mut opencode,
+        Scope::Project("/repos/one".into()),
+        "/repos/one/AGENTS.md",
+        LinkState::Owned,
+    );
+
+    let w = World {
+        manifest: Manifest::default(),
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![host("opencode")],
+        snapshots: vec![opencode],
+        repos: vec!["/repos/one".to_string()],
+        warnings: Vec::new(),
+    };
+
+    let rows = w.rows();
+
+    // Check that user instruction row exists and is detected.
+    let user_row = instruction_row(&rows, "user");
+    assert_eq!(user_row.headline, "only in opencode");
+
+    // Check that project instruction row exists and is detected.
+    let project_row = instruction_row(&rows, "repos-one");
+    assert_eq!(project_row.headline, "only in opencode");
+}
+
+#[test]
+fn kilo_instructions() {
+    // Kilo declares user scope in {xdg_config}/kilo/AGENTS.md and project scope
+    // in {repo}/AGENTS.md. Like OpenCode, neither should be invented.
+    let mut kilo = snapshot("kilo", &[]);
+
+    with_instruction(
+        &mut kilo,
+        Scope::User,
+        "/tmp/xdg/kilo/AGENTS.md",
+        LinkState::Owned,
+    );
+    with_instruction(
+        &mut kilo,
+        Scope::Project("/repos/one".into()),
+        "/repos/one/AGENTS.md",
+        LinkState::Owned,
+    );
+
+    let w = World {
+        manifest: Manifest::default(),
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![host("kilo")],
+        snapshots: vec![kilo],
+        repos: vec!["/repos/one".to_string()],
+        warnings: Vec::new(),
+    };
+
+    let rows = w.rows();
+
+    // Check that user instruction row exists and is detected.
+    let user_row = instruction_row(&rows, "user");
+    assert_eq!(user_row.headline, "only in kilo");
+
+    // Check that project instruction row exists and is detected.
+    let project_row = instruction_row(&rows, "repos-one");
+    assert_eq!(project_row.headline, "only in kilo");
+}
