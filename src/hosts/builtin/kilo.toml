@@ -21,6 +21,32 @@ name = "kilo"
 display = "Kilo CLI"
 detect = { bin = "kilo" }
 
+# Kilo's MCP schema is identical to OpenCode's (measured, both forks share the
+# same `mcp.<name>` shape and resolver). There is no `kilo mcp remove` either,
+# so add/update/remove all go through a guarded JSONC edit against the raw
+# file (`jsonc`, below). `.kilocode/` is read first so the current `.kilo/`
+# name, listed second, wins when both are present — matching the measured
+# precedence (`.kilo/` outranks the legacy name).
+[mcp]
+scopes = ["user", "project"]
+caps = ["stdio", "http", "env", "env_from", "headers", "bearer_env"]
+
+[[mcp.read]]
+file = "{xdg_config}/kilo/kilo.jsonc"
+parser = "kilo_mcp_jsonc_v1"
+
+[[mcp.read]]
+file = "{repo}/.kilocode/kilo.jsonc"
+parser = "kilo_mcp_project_jsonc_v1"
+
+[[mcp.read]]
+file = "{repo}/.kilo/kilo.jsonc"
+parser = "kilo_mcp_project_jsonc_v1"
+
+[mcp.jsonc]
+user_file = "{xdg_config}/kilo/kilo.jsonc"
+project_file = "{repo}/.kilo/kilo.jsonc"
+
 [instructions]
 # The active KILO_CONFIG_DIR profile takes precedence over this path. A flat
 # descriptor cannot express that fallback, so the profile-aware resolution is
