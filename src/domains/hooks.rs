@@ -328,6 +328,17 @@ pub fn rows(world: &World) -> Vec<Row> {
                     // difference resolvable", not "is anything generated
                     // yet"); see `src/shim/bridges/opencode.rs`.
                     opencode_bridge_row(world, handler, source_host.name(), target_host.name())
+                } else if declared
+                    .shim
+                    .as_ref()
+                    .is_some_and(|shim| shim.output_strategy == HookOutputStrategy::KiloV1)
+                {
+                    // Kilo has no native manifest to write handler
+                    // capabilities into either (it is a fork of OpenCode and
+                    // shares that property) — every bridged handler always
+                    // needs the generated bridge; see
+                    // `src/shim/bridges/kilo.rs`.
+                    kilo_bridge_row(world, handler, source_host.name(), target_host.name())
                 } else {
                     let missing = target.missing_caps(&handler.required_caps());
                     match classify(&missing, target.can_shim()) {
@@ -719,6 +730,242 @@ fn opencode_bridge_row(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Kilo hook bridge (OW-009)
+// ---------------------------------------------------------------------------
+//
+// Mirrors the OpenCode bridge above exactly, except for the generator it
+// calls into (`crate::shim::bridges::kilo`, a different module shape and a
+// different set of resolved paths — see that module's docs) and how the
+// active write target directory is resolved: Kilo's active profile is
+// `KILO_CONFIG_DIR` when set, otherwise the XDG global config dir, resolved
+// through the shared `hosts::opencode_family::layers` engine because
+// `kilo debug paths` was measured to NOT reflect `KILO_CONFIG_DIR` (see
+// `docs/open-work.md`).
+
+/// Claude-shaped event name -> the Kilo callback structurally closest to it.
+/// Mirrors `opencode_callback_for`'s honest subset exactly: only the two
+/// events with a genuine 1:1 structural mapping are bridged. Every other
+/// Claude event is left unmapped rather than guessed at, matching what was
+/// actually measured against the Kilo runtime (`docs/open-work.md`,
+/// "Verified runtime contracts") — Kilo was measured to expose the identical
+/// nine callback names as OpenCode, so this mapping is the same mapping, not
+/// a separately-invented one.
+fn kilo_callback_for(event: &str) -> Option<&'static str> {
+    match event {
+        "PreToolUse" => Some("tool.execute.before"),
+        "PostToolUse" => Some("tool.execute.after"),
+        _ => None,
+    }
+}
+
+/// Every handler from `plugin@marketplace` on `source_name` that maps to a
+/// bridgeable Kilo callback, built into the input
+/// `crate::shim::bridges::kilo` needs to (re)generate the whole bridge. As
+/// with the OpenCode bridge, the whole plugin is regenerated together from
+/// every one of its bridgeable handlers, never partially.
+fn kilo_bridge_input(
+    world: &World,
+    source_name: &str,
+    plugin: &str,
+    marketplace: &str,
+) -> anyhow::Result<crate::shim::bridges::kilo::KiloBridgeInput> {
+    let source = world
+        .snapshot(source_name)
+        .context("source host is not detected")?;
+    let mut handlers: Vec<crate::shim::bridges::kilo::BridgedHandler> = source
+        .hooks
+        .values()
+        .filter(|h| {
+            split_source(&h.id.source)
+                .is_some_and(|origin| origin == (plugin.to_string(), marketplace.to_string()))
+        })
+        .filter_map(|h| {
+            let callback = kilo_callback_for(&h.event)?;
+            let mut spec =
+                crate::shim::bridges::kilo::spec_for(callback, &h.id.to_string(), &h.command);
+            spec.if_pattern = h.if_pattern.clone().or_else(|| h.matcher.clone());
+            spec.plugin_root = h.plugin_root.clone();
+            spec.rewake_message = h.rewake_message.clone();
+            spec.rewake_summary = h.rewake_summary.clone();
+            spec.timeout_seconds = h.timeout;
+            Some(crate::shim::bridges::kilo::BridgedHandler {
+                callback: callback.to_string(),
+                spec,
+            })
+        })
+        .collect();
+    handlers.sort_by(|a, b| a.spec.source_id.cmp(&b.spec.source_id));
+
+    let env = crate::hosts::opencode_family::layers::Env::from_process();
+    let layers = crate::hosts::opencode_family::layers::discover(
+        crate::hosts::opencode_family::layers::Family::Kilo,
+        &env,
+        None,
+    );
+
+    Ok(crate::shim::bridges::kilo::KiloBridgeInput {
+        active_profile_dir: layers.active_profile_dir,
+        state_home: crate::paths::state_dir()?,
+        agentsync_bin: std::env::current_exe()
+            .context("cannot find the agentsync binary to invoke from the bridge")?,
+        handlers,
+    })
+}
+
+/// Whether `target` is a Kilo bridge target rather than a Claude-plugin
+/// marketplace shim target or an OpenCode bridge target.
+fn is_kilo_bridge_target(target: &crate::hosts::Host) -> bool {
+    target
+        .descriptor
+        .hooks
+        .as_ref()
+        .and_then(|h| h.shim.as_ref())
+        .is_some_and(|shim| shim.output_strategy == crate::core::model::HookOutputStrategy::KiloV1)
+}
+
+/// Whether every artifact `generated` describes already matches what is on
+/// disk, so a plan would have nothing left to do. Deliberately re-derives
+/// the generation from `input` and reads the real files back (never trusts a
+/// stale index), the same reasoning
+/// `crate::shim::bridges::opencode::already_converged` applies.
+fn kilo_already_converged(input: &crate::shim::bridges::kilo::KiloBridgeInput) -> bool {
+    let Ok(generated) = crate::shim::bridges::kilo::generate(input) else {
+        return false;
+    };
+    let plugin_dir_exists = generated.plugin_dir.exists();
+    let state_dir_exists = generated.state_dir.exists();
+    let existing_bridge = std::fs::read(&generated.bridge_path).ok();
+    let existing_index = std::fs::read(&generated.index_path).ok();
+    let existing_sidecars: Vec<Option<Vec<u8>>> = generated
+        .sidecars
+        .iter()
+        .map(|(path, _)| std::fs::read(path).ok())
+        .collect();
+    let tx = generated.transaction(
+        plugin_dir_exists,
+        state_dir_exists,
+        existing_bridge.as_deref(),
+        existing_index.as_deref(),
+        &existing_sidecars,
+    );
+    matches!(tx, Ok(None)) && generated.verify_on_disk().is_ok()
+}
+
+fn kilo_bridge_row(
+    world: &World,
+    handler: &crate::core::model::HookHandler,
+    source_name: &str,
+    target_name: &str,
+) -> Option<Row> {
+    let (plugin, marketplace) = split_source(&handler.id.source)?;
+    let input = kilo_bridge_input(world, source_name, &plugin, &marketplace).ok()?;
+    if input.handlers.is_empty() {
+        return None;
+    }
+    let key = crate::core::diff::RowKey {
+        source_host: Some(source_name.to_string()),
+        marketplace: Some(handler.id.source.clone()),
+        ..Default::default()
+    };
+    if kilo_already_converged(&input) {
+        let mut row = Row::synced(
+            Domain::Hooks,
+            handler.id.short(),
+            format!("bridged to {target_name} by the generated Kilo hook plugin"),
+        );
+        row.key = key;
+        return Some(row);
+    }
+    Some(Row {
+        domain: Domain::Hooks,
+        name: handler.id.short(),
+        headline: format!("{target_name} has no native hook engine for this"),
+        detail: format!(
+            "a generated Kilo plugin can bridge this handler to {target_name} \
+             (see src/shim/bridges/kilo.rs)"
+        ),
+        severity: Severity::Normal,
+        actions: vec![
+            Action::new(
+                format!("generate the Kilo hook bridge on {target_name}"),
+                ActionKind::Push {
+                    hosts: vec![target_name.to_string()],
+                },
+            ),
+            Action::new("nothing to do", ActionKind::Nothing),
+        ],
+        chosen: 0,
+        accepted: false,
+        key,
+    })
+}
+
+fn plan_kilo_bridge_row(
+    world: &World,
+    row: &Row,
+    target_name: &str,
+    plan: &mut Plan,
+) -> anyhow::Result<()> {
+    let source_name = row
+        .key
+        .source_host
+        .as_deref()
+        .context("row does not record which host the hook came from")?;
+    let origin = row
+        .key
+        .marketplace
+        .clone()
+        .context("row does not record which plugin the hook came from")?;
+    let (plugin, marketplace) =
+        split_source(&origin).context("only plugin hooks can be bridged today")?;
+
+    // Mirrors `plan_opencode_bridge_row`'s guard: the bridge covers every
+    // bridgeable handler of this plugin at once, so a later row for the same
+    // plugin (PostToolUse after PreToolUse) must not regenerate it twice in
+    // one plan.
+    let guard = format!("kilo-bridge:{target_name}:{plugin}@{marketplace}");
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.guard.as_deref() == Some(guard.as_str()))
+    {
+        return Ok(());
+    }
+
+    let input = kilo_bridge_input(world, source_name, &plugin, &marketplace)?;
+    if input.handlers.is_empty() {
+        return Ok(());
+    }
+    let generated = crate::shim::bridges::kilo::generate(&input)?;
+    let plugin_dir_exists = generated.plugin_dir.exists();
+    let state_dir_exists = generated.state_dir.exists();
+    let existing_bridge = std::fs::read(&generated.bridge_path).ok();
+    let existing_index = std::fs::read(&generated.index_path).ok();
+    let existing_sidecars: Vec<Option<Vec<u8>>> = generated
+        .sidecars
+        .iter()
+        .map(|(path, _)| std::fs::read(path).ok())
+        .collect();
+    let Some(tx) = generated.transaction(
+        plugin_dir_exists,
+        state_dir_exists,
+        existing_bridge.as_deref(),
+        existing_index.as_deref(),
+        &existing_sidecars,
+    )?
+    else {
+        return Ok(());
+    };
+    plan.steps.push(PlannedStep {
+        label: format!("generate the Kilo hook bridge for {plugin}"),
+        step: Step::FileTransaction(tx),
+        order_hint: None,
+        guard: Some(guard),
+    });
+    Ok(())
+}
+
 fn plan_opencode_bridge_row(
     world: &World,
     row: &Row,
@@ -779,6 +1026,9 @@ fn plan_one(world: &World, row: &Row, target_name: &str, plan: &mut Plan) -> any
 
     if is_opencode_bridge_target(target) {
         return plan_opencode_bridge_row(world, row, target_name, plan);
+    }
+    if is_kilo_bridge_target(target) {
+        return plan_kilo_bridge_row(world, row, target_name, plan);
     }
 
     // The row records the handler's own full source (not its `short()` name),
