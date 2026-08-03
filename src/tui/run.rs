@@ -341,6 +341,11 @@ pub fn as_shell_script(world: &World, plan: &Plan) -> String {
         match &step.step {
             Step::Manifest(_) => out.push_str("#   (manifest edit \u{2014} run agentsync)\n"),
             Step::Manual(text) => out.push_str(&format!("#   TODO by hand: {text}\n")),
+            Step::ConfigTransaction(_) | Step::FileTransaction(_) => {
+                let description = effect_of(world, &step.step)
+                    .unwrap_or_else(|| "apply guarded transaction".into());
+                out.push_str(&format!("#   {description} \u{2014} run agentsync\n"));
+            }
             other => match effect_of(world, other) {
                 Some(line) => out.push_str(&format!("{line}\n")),
                 None => out.push_str("#   (nothing to run)\n"),
@@ -410,5 +415,34 @@ mod tests {
         plan.note("skipped codex \u{2014} unsupported: headers");
         let script = as_shell_script(&world(), &plan);
         assert!(script.contains("# note: skipped codex"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn transaction_descriptions_are_not_executed_as_shell_commands() {
+        let mut plan = Plan::default();
+        plan.push(
+            "patch config",
+            Step::ConfigTransaction(crate::transaction::ConfigTransaction::new(
+                serde_json::json!({}),
+            )),
+        );
+        plan.push(
+            "write bridge",
+            Step::FileTransaction(crate::transaction::FileTransaction::new()),
+        );
+        let script = as_shell_script(&world(), &plan);
+
+        let output = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("bash runs the exported script");
+
+        assert!(
+            output.status.success(),
+            "a shell export with transaction steps must be safe to run: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

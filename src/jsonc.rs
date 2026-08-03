@@ -251,20 +251,23 @@ fn remove_member(text: &str, path: &[String]) -> Result<String> {
         .iter()
         .position(|member| &member.key == key)
         .context("cannot remove a member that does not exist")?;
-    let (start, end) = if let Some(next) = members.get(index + 1) {
-        (members[index].key_start, next.key_start)
-    } else if index > 0 {
-        (
-            members[index - 1]
-                .comma_start
-                .context("missing separator before final object member")?,
-            members[index].value_end,
-        )
-    } else {
-        (members[index].key_start, members[index].value_end)
-    };
     let mut out = text.to_string();
-    out.replace_range(start..end, "");
+    let member = &members[index];
+    if let Some(comma) = member.comma_start {
+        // Delete only the member's own tokens and separator. Trivia after the
+        // comma can include a comment that documents the next sibling.
+        out.replace_range(member.key_start..comma + 1, "");
+    } else if index > 0 {
+        // For the final member, remove the previous separator separately so
+        // comments between the separator and this key remain byte-for-byte.
+        let previous_comma = members[index - 1]
+            .comma_start
+            .context("missing separator before final object member")?;
+        out.replace_range(member.key_start..member.value_end, "");
+        out.replace_range(previous_comma..previous_comma + 1, "");
+    } else {
+        out.replace_range(member.key_start..member.value_end, "");
+    }
     Ok(out)
 }
 
@@ -700,5 +703,27 @@ mod tests {
         let result = apply_edit(&doc, &edit).expect("edit applies");
         assert!(result.contains("\"keep\""), "keep preserved: {}", result);
         assert!(!result.contains("\"remove\""), "remove deleted: {}", result);
+    }
+
+    #[test]
+    fn remove_preserves_a_comment_owned_by_the_next_sibling() {
+        let input = "{\n  \"remove\": true,\n  // The keep option is intentionally disabled.\n  \"keep\": false\n}\n";
+        let doc = parse(input).expect("valid JSONC");
+        let edit = JsoncEdit {
+            pointer: JsoncPointer {
+                path: vec![PathSegment::key("remove")],
+                owning_node: None,
+            },
+            operation: EditOperation::Remove,
+        };
+
+        let result = apply_edit(&doc, &edit).expect("edit applies");
+
+        assert!(
+            result.contains("// The keep option is intentionally disabled."),
+            "removing one member must not remove the next member's comment: {result}"
+        );
+        let reparsed = parse(&result).expect("the edited JSONC remains valid");
+        assert_eq!(reparsed.value, serde_json::json!({"keep": false}));
     }
 }

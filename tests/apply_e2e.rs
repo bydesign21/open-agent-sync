@@ -222,14 +222,18 @@ fn config_patch_removal_reveals_the_lower_precedence_value() {
     std::fs::write(&lower, lower_bytes).unwrap();
     std::fs::write(&higher, higher_bytes).unwrap();
     let higher_hash = compute_sha256(higher_bytes);
+    let lower_hash = compute_sha256(lower_bytes);
     let transaction = ConfigTransaction::new(serde_json::json!({
         "mcp": {"url": "https://global.test", "keep": 1}
     }))
-    .with_source(GuardedSource::with_hash(
-        &lower,
-        compute_sha256(lower_bytes),
-    ))
+    .with_source(GuardedSource::with_hash(&lower, &lower_hash))
     .with_source(GuardedSource::with_hash(&higher, &higher_hash))
+    .with_origin(ConfigOrigin::new(
+        &lower,
+        ConfigScope::Global,
+        20,
+        lower_hash,
+    ))
     .with_edit(SourceEdit {
         origin: ConfigOrigin::new(&higher, ConfigScope::Project, 1, higher_hash),
         config_path: vec!["mcp".into(), "url".into()],
@@ -241,6 +245,42 @@ fn config_patch_removal_reveals_the_lower_precedence_value() {
     assert_eq!(report.results[0].outcome, Outcome::Done);
     assert_eq!(std::fs::read(&lower).unwrap(), lower_bytes);
     assert_eq!(std::fs::read_to_string(&higher).unwrap(), "{\"mcp\":{}}\n");
+}
+
+#[test]
+fn config_patch_rejects_missing_origin_precedence_for_a_layered_projection() {
+    let tmp = tempfile::tempdir().unwrap();
+    let global = tmp.path().join("global.jsonc");
+    let project = tmp.path().join("project.jsonc");
+    let global_bytes = b"{\"value\":\"global\"}\n";
+    let project_bytes = b"{\"value\":\"project\"}\n";
+    std::fs::write(&global, global_bytes).unwrap();
+    std::fs::write(&project, project_bytes).unwrap();
+    let global_hash = compute_sha256(global_bytes);
+    let project_hash = compute_sha256(project_bytes);
+    let transaction = ConfigTransaction::new(serde_json::json!({"value": "project"}))
+        .with_source(GuardedSource::with_hash(&global, &global_hash))
+        .with_source(GuardedSource::with_hash(&project, &project_hash))
+        // Project is known, but the global layer's precedence is absent.
+        .with_origin(ConfigOrigin::new(
+            &project,
+            ConfigScope::Project,
+            10,
+            project_hash,
+        ));
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Failed);
+    assert!(
+        report.results[0]
+            .message
+            .contains("missing origin precedence"),
+        "missing precedence must be reported instead of guessed: {}",
+        report.results[0].message
+    );
+    assert_eq!(std::fs::read(&global).unwrap(), global_bytes);
+    assert_eq!(std::fs::read(&project).unwrap(), project_bytes);
 }
 
 #[test]
@@ -268,6 +308,149 @@ fn config_patch_blocks_an_externally_controlled_origin() {
     assert_eq!(report.results[0].outcome, Outcome::Failed);
     assert!(report.results[0].message.contains("managed policy"));
     assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn config_patch_composes_mcp_and_plugin_edits_across_origin_precedence() {
+    let tmp = tempfile::tempdir().unwrap();
+    let global = tmp.path().join("global.jsonc");
+    let project = tmp.path().join("project.jsonc");
+    let global_bytes =
+        b"{\"mcp\":{\"demo\":{\"url\":\"https://global.test\"}},\"plugin\":[\"global-plugin\"]}\n";
+    let project_bytes = b"{\"mcp\":{\"demo\":{\"url\":\"https://project.test\"}},\"plugin\":[\"project-plugin\"]}\n";
+    std::fs::write(&global, global_bytes).unwrap();
+    std::fs::write(&project, project_bytes).unwrap();
+    let global_hash = compute_sha256(global_bytes);
+    let project_hash = compute_sha256(project_bytes);
+    let global_origin = ConfigOrigin::new(&global, ConfigScope::Global, 20, &global_hash);
+    let project_origin = ConfigOrigin::new(&project, ConfigScope::Project, 10, &project_hash);
+
+    // Deliberately list the higher-precedence project source first. Resolution
+    // must use origin precedence, not incidental source insertion order.
+    let transaction = ConfigTransaction::new(serde_json::json!({
+        "mcp": {"demo": {"url": "https://project.test", "timeout": 5000}},
+        "plugin": ["project-plugin", {"enabled": null}]
+    }))
+    .with_source(GuardedSource::with_hash(&project, &project_hash))
+    .with_source(GuardedSource::with_hash(&global, &global_hash))
+    .with_edit(SourceEdit {
+        origin: global_origin,
+        config_path: vec!["mcp".into(), "demo".into(), "timeout".into()],
+        operation: ConfigEditOperation::Set {
+            value: serde_json::json!(5000),
+            raw_json: Some("5000".into()),
+        },
+    })
+    .with_edit(SourceEdit {
+        origin: project_origin,
+        config_path: vec!["plugin".into()],
+        operation: ConfigEditOperation::Set {
+            value: serde_json::json!(["project-plugin", {"enabled": null}]),
+            raw_json: Some(r#"["project-plugin", {"enabled": null}]"#.into()),
+        },
+    });
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(
+        report.results[0].outcome,
+        Outcome::Done,
+        "split-origin resolution must honor explicit precedence: {}",
+        report.results[0].message
+    );
+    let global_value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&global).unwrap()).unwrap();
+    assert_eq!(global_value["mcp"]["demo"]["timeout"], 5000);
+    assert!(
+        std::fs::read_to_string(&project)
+            .unwrap()
+            .contains(r#"["project-plugin", {"enabled": null}]"#)
+    );
+}
+
+#[test]
+fn config_patch_resolves_environment_placeholders_from_resolver_context() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.jsonc");
+    let original = b"{\"endpoint\":\"{env:DEMO_ENDPOINT}\",\"enabled\":true}\n";
+    std::fs::write(&path, original).unwrap();
+    let hash = compute_sha256(original);
+    let origin = ConfigOrigin::new(&path, ConfigScope::Global, 10, &hash);
+    let mut transaction = ConfigTransaction::new(serde_json::json!({
+        "endpoint": "https://resolved.test",
+        "enabled": false
+    }))
+    .with_source(GuardedSource::with_hash(&path, &hash))
+    .with_edit(SourceEdit {
+        origin,
+        config_path: vec!["enabled".into()],
+        operation: ConfigEditOperation::Set {
+            value: serde_json::json!(false),
+            raw_json: None,
+        },
+    });
+    transaction
+        .resolver_context
+        .env_vars
+        .insert("DEMO_ENDPOINT".into(), "https://resolved.test".into());
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(
+        report.results[0].outcome,
+        Outcome::Done,
+        "effective projection must use the supplied resolver context: {}",
+        report.results[0].message
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "{\"endpoint\":\"{env:DEMO_ENDPOINT}\",\"enabled\":false}\n",
+        "resolver expansion verifies the projection without rewriting user placeholders"
+    );
+}
+
+#[test]
+fn config_patch_resolves_file_placeholders_from_resolver_search_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.jsonc");
+    let include_dir = tmp.path().join("includes");
+    std::fs::create_dir_all(&include_dir).unwrap();
+    std::fs::write(
+        include_dir.join("instructions.md"),
+        "Keep this exact text.\n",
+    )
+    .unwrap();
+    let original = b"{\"instructions\":\"{file:instructions.md}\",\"enabled\":true}\n";
+    std::fs::write(&path, original).unwrap();
+    let hash = compute_sha256(original);
+    let origin = ConfigOrigin::new(&path, ConfigScope::Global, 10, &hash);
+    let mut transaction = ConfigTransaction::new(serde_json::json!({
+        "instructions": "Keep this exact text.\n",
+        "enabled": false
+    }))
+    .with_source(GuardedSource::with_hash(&path, &hash))
+    .with_edit(SourceEdit {
+        origin,
+        config_path: vec!["enabled".into()],
+        operation: ConfigEditOperation::Set {
+            value: serde_json::json!(false),
+            raw_json: None,
+        },
+    });
+    transaction.resolver_context.search_paths.push(include_dir);
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(
+        report.results[0].outcome,
+        Outcome::Done,
+        "effective projection must resolve files through search paths: {}",
+        report.results[0].message
+    );
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "{\"instructions\":\"{file:instructions.md}\",\"enabled\":false}\n"
+    );
 }
 
 #[test]

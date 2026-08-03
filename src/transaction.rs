@@ -138,6 +138,8 @@ pub struct ConfigTransaction {
     pub resolver_context: ResolverContext,
     /// The edits to apply.
     pub edits: Vec<SourceEdit>,
+    /// Origins for sources that participate in projection but are not edited.
+    pub origins: Vec<ConfigOrigin>,
     /// Expected effective projection after edits (for verification).
     pub expected_projection: serde_json::Value,
 }
@@ -197,8 +199,20 @@ pub enum FileOperation {
         content: Vec<u8>,
         precondition: FilePrecondition,
     },
+    /// Write an agentsync-generated artifact whose prior bytes must match the
+    /// generated hash recorded during planning.
+    WriteGenerated {
+        path: PathBuf,
+        content: Vec<u8>,
+        precondition: FilePrecondition,
+    },
     /// Remove a file.
     Remove {
+        path: PathBuf,
+        precondition: FilePrecondition,
+    },
+    /// Remove a generated hook sidecar only if its planned bytes are intact.
+    RemoveStaleSidecar {
         path: PathBuf,
         precondition: FilePrecondition,
     },
@@ -242,6 +256,11 @@ pub enum TransactionError {
     VerificationFailed { expected: String, actual: String },
     /// IO error.
     IoError { path: PathBuf, message: String },
+    /// One or more original files could not be restored after a failed write.
+    RollbackFailed {
+        operation_error: Option<Box<TransactionError>>,
+        rollback_errors: Vec<TransactionError>,
+    },
 }
 
 impl std::fmt::Display for TransactionError {
@@ -296,6 +315,20 @@ impl std::fmt::Display for TransactionError {
             }
             TransactionError::IoError { path, message } => {
                 write!(f, "io error at {}: {}", path.display(), message)
+            }
+            TransactionError::RollbackFailed {
+                operation_error,
+                rollback_errors,
+            } => {
+                if let Some(error) = operation_error {
+                    write!(f, "{error}; rollback also failed")?;
+                } else {
+                    write!(f, "rollback failed")?;
+                }
+                for error in rollback_errors {
+                    write!(f, "; {error}")?;
+                }
+                Ok(())
             }
         }
     }
@@ -370,9 +403,37 @@ impl FileTransaction {
         self
     }
 
+    /// Add a tamper-evident generated artifact write.
+    pub fn write_generated(
+        mut self,
+        path: impl Into<PathBuf>,
+        content: impl Into<Vec<u8>>,
+        precondition: FilePrecondition,
+    ) -> Self {
+        self.operations.push(FileOperation::WriteGenerated {
+            path: path.into(),
+            content: content.into(),
+            precondition,
+        });
+        self
+    }
+
     /// Add a remove operation.
     pub fn remove(mut self, path: impl Into<PathBuf>, precondition: FilePrecondition) -> Self {
         self.operations.push(FileOperation::Remove {
+            path: path.into(),
+            precondition,
+        });
+        self
+    }
+
+    /// Add a stale-sidecar removal guarded by its planned content hash.
+    pub fn remove_stale_sidecar(
+        mut self,
+        path: impl Into<PathBuf>,
+        precondition: FilePrecondition,
+    ) -> Self {
+        self.operations.push(FileOperation::RemoveStaleSidecar {
             path: path.into(),
             precondition,
         });
@@ -391,16 +452,25 @@ impl FileTransaction {
                 FileOperation::Write {
                     path, precondition, ..
                 }
-                | FileOperation::Remove { path, precondition } => (path, precondition),
+                | FileOperation::WriteGenerated {
+                    path, precondition, ..
+                }
+                | FileOperation::Remove { path, precondition }
+                | FileOperation::RemoveStaleSidecar { path, precondition } => (path, precondition),
             };
             if !is_agentsync_owned(path) {
                 return Err(TransactionError::UnownedDestination { path: path.clone() });
             }
-            verify_precondition(path, precondition)?;
+            if let Err(error) = verify_precondition(path, precondition) {
+                return Err(classify_artifact_precondition_error(op, error));
+            }
         }
         for op in &self.operations {
             let path = match op {
-                FileOperation::Write { path, .. } | FileOperation::Remove { path, .. } => path,
+                FileOperation::Write { path, .. }
+                | FileOperation::WriteGenerated { path, .. }
+                | FileOperation::Remove { path, .. }
+                | FileOperation::RemoveStaleSidecar { path, .. } => path,
             };
             if path.exists() {
                 self.backup_content
@@ -417,8 +487,7 @@ impl FileTransaction {
         let ops = self.operations.clone();
         for op in &ops {
             if let Err(error) = self.execute_operation(op) {
-                self.rollback()?;
-                return Err(error);
+                return Err(combine_rollback_error(error, self.rollback()));
             }
         }
         Ok(())
@@ -428,6 +497,11 @@ impl FileTransaction {
     fn execute_operation(&mut self, op: &FileOperation) -> Result<PathBuf, TransactionError> {
         match op {
             FileOperation::Write {
+                path,
+                content,
+                precondition,
+            }
+            | FileOperation::WriteGenerated {
                 path,
                 content,
                 precondition,
@@ -451,7 +525,8 @@ impl FileTransaction {
 
                 Ok(path.clone())
             }
-            FileOperation::Remove { path, precondition } => {
+            FileOperation::Remove { path, precondition }
+            | FileOperation::RemoveStaleSidecar { path, precondition } => {
                 let _ = precondition;
                 if path.exists() {
                     std::fs::remove_file(path).map_err(|e| TransactionError::IoError {
@@ -471,23 +546,87 @@ impl FileTransaction {
             .operations
             .iter()
             .map(|op| match op {
-                FileOperation::Write { path, .. } | FileOperation::Remove { path, .. } => {
-                    path.clone()
-                }
+                FileOperation::Write { path, .. }
+                | FileOperation::WriteGenerated { path, .. }
+                | FileOperation::Remove { path, .. }
+                | FileOperation::RemoveStaleSidecar { path, .. } => path.clone(),
             })
             .collect();
         paths.dedup();
+        let mut rollback_errors = Vec::new();
         for path in paths.iter().rev() {
             if let Some(backup) = self.backup_content.get(path) {
-                atomic_write(path, backup).map_err(|error| TransactionError::IoError {
+                if let Err(error) = atomic_write(path, backup) {
+                    rollback_errors.push(TransactionError::IoError {
+                        path: path.clone(),
+                        message: format!("restoring original bytes failed: {error}"),
+                    });
+                }
+            } else if self.created_files.contains(path)
+                && let Err(error) = std::fs::remove_file(path)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                rollback_errors.push(TransactionError::IoError {
                     path: path.clone(),
-                    message: format!("rollback failed: {error}"),
-                })?;
-            } else if self.created_files.contains(path) {
-                let _ = std::fs::remove_file(path);
+                    message: format!("removing created file failed: {error}"),
+                });
             }
         }
-        Ok(())
+        if rollback_errors.is_empty() {
+            Ok(())
+        } else {
+            Err(TransactionError::RollbackFailed {
+                operation_error: None,
+                rollback_errors,
+            })
+        }
+    }
+}
+
+fn classify_artifact_precondition_error(
+    operation: &FileOperation,
+    error: TransactionError,
+) -> TransactionError {
+    match (operation, error) {
+        (
+            FileOperation::WriteGenerated { path, .. },
+            TransactionError::PreconditionFailed {
+                expected: FilePrecondition::Sha256(expected_hash),
+                actual: Some(actual_hash),
+                ..
+            },
+        ) => TransactionError::TamperedArtifact {
+            path: path.clone(),
+            expected_hash,
+            actual_hash,
+        },
+        (
+            FileOperation::RemoveStaleSidecar { path, .. },
+            TransactionError::PreconditionFailed { .. },
+        ) => TransactionError::UnsafeStaleSidecarRemoval {
+            path: path.clone(),
+            reason: "the sidecar changed after it was selected for removal".into(),
+        },
+        (_, error) => error,
+    }
+}
+
+fn combine_rollback_error(
+    operation_error: TransactionError,
+    rollback: Result<(), TransactionError>,
+) -> TransactionError {
+    match rollback {
+        Ok(()) => operation_error,
+        Err(TransactionError::RollbackFailed {
+            rollback_errors, ..
+        }) => TransactionError::RollbackFailed {
+            operation_error: Some(Box::new(operation_error)),
+            rollback_errors,
+        },
+        Err(error) => TransactionError::RollbackFailed {
+            operation_error: Some(Box::new(operation_error)),
+            rollback_errors: vec![error],
+        },
     }
 }
 
@@ -498,6 +637,7 @@ impl ConfigTransaction {
             sources: Vec::new(),
             resolver_context: ResolverContext::default(),
             edits: Vec::new(),
+            origins: Vec::new(),
             expected_projection,
         }
     }
@@ -511,6 +651,12 @@ impl ConfigTransaction {
     /// Add an edit.
     pub fn with_edit(mut self, edit: SourceEdit) -> Self {
         self.edits.push(edit);
+        self
+    }
+
+    /// Record an origin for a source that may not itself receive an edit.
+    pub fn with_origin(mut self, origin: ConfigOrigin) -> Self {
+        self.origins.push(origin);
         self
     }
 
@@ -545,7 +691,12 @@ impl ConfigTransaction {
     /// Apply all source edits as one guarded transaction and verify the
     /// effective ordered-layer projection before accepting the writes.
     pub fn execute(&mut self) -> Result<ConfigTransactionResult, TransactionError> {
-        let origins: Vec<_> = self.edits.iter().map(|edit| edit.origin.clone()).collect();
+        let origins: Vec<_> = self
+            .origins
+            .iter()
+            .cloned()
+            .chain(self.edits.iter().map(|edit| edit.origin.clone()))
+            .collect();
         Self::can_create(&origins).map_err(|message| TransactionError::VerificationFailed {
             expected: "writable config origins".into(),
             actual: message,
@@ -633,22 +784,19 @@ impl ConfigTransaction {
         for source in &self.sources {
             let output = outputs.get(&source.path).expect("guarded source output");
             if let Err(error) = atomic_write(&source.path, output.as_bytes()) {
-                rollback_config(&originals);
-                return Err(error);
+                return Err(combine_rollback_error(error, rollback_config(&originals)));
             }
             written.push(source.path.clone());
         }
 
-        let projection = match resolve_projection(&self.sources) {
+        let projection = match resolve_projection(&self.sources, &origins, &self.resolver_context) {
             Ok(projection) => projection,
             Err(error) => {
-                rollback_config(&originals);
-                return Err(error);
+                return Err(combine_rollback_error(error, rollback_config(&originals)));
             }
         };
         if let Err(error) = self.verify_projection(&projection) {
-            rollback_config(&originals);
-            return Err(error);
+            return Err(combine_rollback_error(error, rollback_config(&originals)));
         }
         Ok(ConfigTransactionResult {
             written_files: written,
@@ -658,9 +806,45 @@ impl ConfigTransaction {
     }
 }
 
-fn resolve_projection(sources: &[GuardedSource]) -> Result<serde_json::Value, TransactionError> {
-    let mut effective = serde_json::json!({});
+fn resolve_projection(
+    sources: &[GuardedSource],
+    origins: &[ConfigOrigin],
+    resolver_context: &ResolverContext,
+) -> Result<serde_json::Value, TransactionError> {
+    let mut ranked_sources = Vec::with_capacity(sources.len());
     for source in sources {
+        let matching: Vec<_> = origins
+            .iter()
+            .filter(|origin| origin.path.as_deref() == Some(source.path.as_path()))
+            .collect();
+        if sources.len() > 1 && matching.is_empty() {
+            return Err(TransactionError::VerificationFailed {
+                expected: format!("origin precedence for {}", source.path.display()),
+                actual: "missing origin precedence".into(),
+            });
+        }
+        let precedence = matching
+            .first()
+            .map(|origin| origin.precedence)
+            .unwrap_or(0);
+        if matching
+            .iter()
+            .any(|origin| origin.precedence != precedence)
+        {
+            return Err(TransactionError::VerificationFailed {
+                expected: format!("one precedence for origin {}", source.path.display()),
+                actual: "conflicting precedence values".into(),
+            });
+        }
+        ranked_sources.push((precedence, source));
+    }
+    // A smaller number means higher precedence. Merge low-precedence sources
+    // first so higher-precedence values are the final overlay. Stable source
+    // order remains the fallback for legacy callers that have no origin yet.
+    ranked_sources.sort_by_key(|source| std::cmp::Reverse(source.0));
+
+    let mut effective = serde_json::json!({});
+    for (_, source) in ranked_sources {
         let text =
             std::fs::read_to_string(&source.path).map_err(|e| TransactionError::IoError {
                 path: source.path.clone(),
@@ -674,7 +858,86 @@ fn resolve_projection(sources: &[GuardedSource]) -> Result<serde_json::Value, Tr
             .value;
         deep_merge(&mut effective, value);
     }
+    resolve_value(&mut effective, resolver_context)?;
     Ok(effective)
+}
+
+fn resolve_value(
+    value: &mut serde_json::Value,
+    context: &ResolverContext,
+) -> Result<(), TransactionError> {
+    match value {
+        serde_json::Value::String(text) => {
+            *text = resolve_string(text, context)?;
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                resolve_value(value, context)?;
+            }
+        }
+        serde_json::Value::Object(values) => {
+            for value in values.values_mut() {
+                resolve_value(value, context)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn resolve_string(text: &str, context: &ResolverContext) -> Result<String, TransactionError> {
+    let mut output = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(open) = remaining.find('{') {
+        output.push_str(&remaining[..open]);
+        let candidate = &remaining[open..];
+        let Some(close) = candidate.find('}') else {
+            output.push_str(candidate);
+            return Ok(output);
+        };
+        let token = &candidate[1..close];
+        if let Some(name) = token.strip_prefix("env:") {
+            let value =
+                context
+                    .env_vars
+                    .get(name)
+                    .ok_or_else(|| TransactionError::VerificationFailed {
+                        expected: format!("resolver context variable {name}"),
+                        actual: "missing".into(),
+                    })?;
+            output.push_str(value);
+        } else if let Some(file) = token.strip_prefix("file:") {
+            let path = resolve_file_path(file, context).ok_or_else(|| {
+                TransactionError::VerificationFailed {
+                    expected: format!("resolver file {file}"),
+                    actual: "not found in resolver search paths".into(),
+                }
+            })?;
+            let contents =
+                std::fs::read_to_string(&path).map_err(|error| TransactionError::IoError {
+                    path,
+                    message: error.to_string(),
+                })?;
+            output.push_str(&contents);
+        } else {
+            output.push_str(&candidate[..=close]);
+        }
+        remaining = &candidate[close + 1..];
+    }
+    output.push_str(remaining);
+    Ok(output)
+}
+
+fn resolve_file_path(file: &str, context: &ResolverContext) -> Option<PathBuf> {
+    let path = PathBuf::from(file);
+    if path.is_absolute() {
+        return path.is_file().then_some(path);
+    }
+    context
+        .search_paths
+        .iter()
+        .map(|root| root.join(&path))
+        .find(|candidate| candidate.is_file())
 }
 
 fn deep_merge(base: &mut serde_json::Value, overlay: serde_json::Value) {
@@ -688,16 +951,37 @@ fn deep_merge(base: &mut serde_json::Value, overlay: serde_json::Value) {
     }
 }
 
-fn rollback_config(originals: &HashMap<PathBuf, Option<Vec<u8>>>) {
+fn rollback_config(originals: &HashMap<PathBuf, Option<Vec<u8>>>) -> Result<(), TransactionError> {
+    let mut rollback_errors = Vec::new();
     for (path, original) in originals {
         match original {
             Some(bytes) => {
-                let _ = atomic_write(path, bytes);
+                if let Err(error) = atomic_write(path, bytes) {
+                    rollback_errors.push(TransactionError::IoError {
+                        path: path.clone(),
+                        message: format!("restoring original config bytes failed: {error}"),
+                    });
+                }
             }
             None => {
-                let _ = std::fs::remove_file(path);
+                if let Err(error) = std::fs::remove_file(path)
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    rollback_errors.push(TransactionError::IoError {
+                        path: path.clone(),
+                        message: format!("removing created config failed: {error}"),
+                    });
+                }
             }
         }
+    }
+    if rollback_errors.is_empty() {
+        Ok(())
+    } else {
+        Err(TransactionError::RollbackFailed {
+            operation_error: None,
+            rollback_errors,
+        })
     }
 }
 
@@ -728,6 +1012,12 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<(), TransactionError> {
 
 /// Check if a destination is owned by agentsync.
 pub fn is_agentsync_owned(path: &Path) -> bool {
+    if path
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return false;
+    }
     if let Ok(state_dir) = crate::paths::state_dir()
         && path.starts_with(&state_dir)
     {
@@ -1056,5 +1346,115 @@ mod tests {
             FilePrecondition::Sha256(h) => assert_eq!(h, "abc123"),
             _ => panic!("expected Sha256 precondition"),
         }
+    }
+
+    #[test]
+    fn ownership_rejects_a_lexical_parent_directory_escape() {
+        let tmp = owned_tmp();
+        let outside = tmp
+            .path()
+            .join("nested")
+            .join("..")
+            .join("..")
+            .join("outside")
+            .join("bridge.ts");
+
+        assert!(
+            !is_agentsync_owned(&outside),
+            "a path containing '..' must not inherit ownership from a lexical ancestor"
+        );
+    }
+
+    #[test]
+    fn rollback_reports_a_restore_failure_and_continues_restoring_other_paths() {
+        let tmp = owned_tmp();
+        let restored = tmp.path().join("restored.txt");
+        std::fs::write(&restored, b"changed").unwrap();
+
+        let non_directory = tmp.path().join("not-a-directory");
+        std::fs::write(&non_directory, b"regular file").unwrap();
+        let cannot_restore = non_directory.join("child.txt");
+
+        let mut backups = HashMap::new();
+        backups.insert(restored.clone(), b"original".to_vec());
+        backups.insert(cannot_restore.clone(), b"also original".to_vec());
+        let tx = FileTransaction {
+            operations: vec![
+                FileOperation::Write {
+                    path: restored.clone(),
+                    content: b"changed".to_vec(),
+                    precondition: FilePrecondition::Absent,
+                },
+                FileOperation::Write {
+                    path: cannot_restore.clone(),
+                    content: b"changed".to_vec(),
+                    precondition: FilePrecondition::Absent,
+                },
+            ],
+            created_files: Vec::new(),
+            backup_content: backups,
+        };
+
+        let error = tx.rollback().expect_err("one restoration cannot succeed");
+
+        assert!(
+            error
+                .to_string()
+                .contains(&cannot_restore.display().to_string()),
+            "the restoration error names the path that could not be restored: {error}"
+        );
+        assert_eq!(
+            std::fs::read(&restored).unwrap(),
+            b"original",
+            "rollback must continue after another restoration fails"
+        );
+    }
+
+    #[test]
+    fn changed_generated_artifact_is_reported_as_tampered() {
+        let tmp = owned_tmp();
+        let artifact = tmp.path().join("bridge.ts");
+        std::fs::write(&artifact, b"changed outside agentsync").unwrap();
+        let mut tx = FileTransaction::new().write_generated(
+            &artifact,
+            b"next generated bytes",
+            FilePrecondition::Sha256(compute_sha256(b"expected generated bytes")),
+        );
+
+        let result = tx.execute();
+
+        assert!(
+            matches!(result, Err(TransactionError::TamperedArtifact { .. })),
+            "changed generated bytes must be classified as tampering: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&artifact).unwrap(),
+            b"changed outside agentsync"
+        );
+    }
+
+    #[test]
+    fn changed_stale_sidecar_is_not_removed() {
+        let tmp = owned_tmp();
+        let sidecar = tmp.path().join("hook-0.json");
+        std::fs::write(&sidecar, b"user changed this sidecar").unwrap();
+        let mut tx = FileTransaction::new().remove_stale_sidecar(
+            &sidecar,
+            FilePrecondition::Sha256(compute_sha256(b"planned stale sidecar")),
+        );
+
+        let result = tx.execute();
+
+        assert!(
+            matches!(
+                result,
+                Err(TransactionError::UnsafeStaleSidecarRemoval { .. })
+            ),
+            "a stale sidecar whose bytes changed must be rejected explicitly: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(&sidecar).unwrap(),
+            b"user changed this sidecar"
+        );
     }
 }
