@@ -2003,9 +2003,20 @@ fn kilo_bridge_test_spec() -> agentsync::shim::ShimSpec {
 
 #[test]
 fn kilo_hooks_converge_after_two_passes() {
+    // `state_home` is injected explicitly below, but the ownership guard
+    // resolves `paths::state_dir()`, which reads AGENTSYNC_STATE_HOME from the
+    // *process* environment. Without this lock a concurrently running hook test
+    // that sets that variable steers this test's writes into its fixture, and
+    // the convergence assertion then fails for a reason that has nothing to do
+    // with convergence.
+    let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_restore = EnvRestore::capture(&["XDG_CONFIG_HOME", "AGENTSYNC_STATE_HOME"]);
     let tmp = tempfile::tempdir().unwrap();
     let profile = tmp.path().join("profile");
     let state = tmp.path().join("state");
+    unsafe {
+        std::env::set_var("AGENTSYNC_STATE_HOME", &state);
+    }
     let bin = tmp.path().join("bin/agentsync");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
     std::fs::write(&bin, b"fake-agentsync-binary-bytes").unwrap();
