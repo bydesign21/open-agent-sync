@@ -575,6 +575,15 @@ fn adopt(
 }
 
 fn link_into(world: &World, name: &str, canonical: &Path, hosts: &[String], plan: &mut Plan) {
+    // Several hosts can declare the *same* write target (`~/.agents/skills` is
+    // shared by Codex, OpenCode and Kilo). Planning one `Link` step per host
+    // would symlink-then-unlink-then-relink the identical path repeatedly,
+    // which is not just wasteful but risks tripping the backup-on-replace
+    // logic in `apply_fs_op` against agentsync's own prior write. Group hosts
+    // by the link path they resolve to, so a skill shared by N hosts at one
+    // location produces exactly one `Link` step, naming every host it serves.
+    let mut hosts_by_link: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+
     for (host, snap) in world.detected() {
         let hname = host.name().to_string();
         if !hosts.contains(&hname) {
@@ -586,11 +595,16 @@ fn link_into(world: &World, name: &str, canonical: &Path, hosts: &[String], plan
         if matches!(snap.skills.get(name), Some(LinkState::Linked)) {
             continue;
         }
+        let link = dir.join(name);
+        hosts_by_link.entry(link).or_default().push(hname);
+    }
+
+    for (link, sharing_hosts) in hosts_by_link {
         plan.push(
-            format!("link {name} into {hname}"),
+            format!("link {name} into {}", join_hosts(&sharing_hosts)),
             Step::Fs(FsOp::Link {
                 target: canonical.to_path_buf(),
-                link: dir.join(name),
+                link,
             }),
         );
     }

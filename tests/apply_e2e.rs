@@ -15,17 +15,54 @@
 //! covered by the unit tests.
 #![cfg(unix)]
 
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
+use std::sync::Mutex;
 
 use agentsync::core::apply::{self, Outcome};
 use agentsync::core::diff::{ActionKind, Domain};
-use agentsync::core::plan::{Plan, Step};
+use agentsync::core::plan::{FsOp, Plan, Step};
 use agentsync::domains::World;
 use agentsync::manifest::Manifest;
 use agentsync::transaction::{
     ConfigEditOperation, ConfigOrigin, ConfigScope, ConfigTransaction, FilePrecondition,
     FileTransaction, GuardedSource, SourceEdit, compute_sha256,
 };
+
+/// `HOME`, `XDG_CONFIG_HOME`, `AGENTSYNC_HOME` and `PATH` are process-global.
+/// Any two tests in this file that redirect them concurrently would point one
+/// another's temp directories at the wrong process, which fails in ways that
+/// look like a bug in the code under test rather than a race. Both tests that
+/// touch these variables hold this lock for as long as the mutation matters.
+static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+/// Captures the current value of each named environment variable and puts it
+/// back when dropped (Rust runs destructors during an unwinding panic, so a
+/// failed assertion mid-test still restores them). Holding the lock alone is
+/// not enough: it only serializes *concurrent* mutation, it does not undo a
+/// mutation once the lock is released. Without this, whichever of these tests
+/// happens to run second inherits the first one's `PATH` (missing `python3`)
+/// or `HOME` (a directory that no longer exists once its `TempDir` drops).
+struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+impl EnvRestore {
+    fn capture(names: &[&'static str]) -> Self {
+        EnvRestore(names.iter().map(|&n| (n, std::env::var(n).ok())).collect())
+    }
+}
+
+impl Drop for EnvRestore {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            unsafe {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+}
 
 /// A stand-in host CLI. It logs its argv and maintains a real config file, so a
 /// second pass sees the world the first pass produced. `__LOG__` and `__CFG__`
@@ -598,6 +635,8 @@ fn file_transaction_creates_an_absent_owned_artifact() {
 
 #[test]
 fn shim_reconciliation_converges_after_two_full_passes() {
+    let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_restore = EnvRestore::capture(&["AGENTSYNC_HOME", "PATH"]);
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();
 
@@ -1016,5 +1055,336 @@ hosts = ["fakehost"]
     assert!(
         !marker.exists(),
         "the guarded removal must never have been spawned, but its marker file exists"
+    );
+}
+
+/// Codex, OpenCode and Kilo all declare `~/.agents/skills` as `dirs[0]` (the
+/// skill write target) and `{repo}/AGENTS.md` as the project instructions
+/// path — see `src/hosts/builtin/{codex,opencode,kilo}.toml`. Real content at
+/// one shared location must be synced with exactly one filesystem mutation,
+/// not one per host that happens to agree on the path, and a second full
+/// apply pass must mutate nothing further.
+///
+/// This test uses the real built-in descriptors (`hosts::descriptor::BUILTIN`)
+/// rather than hand-written TOML, so it exercises the actual product
+/// configuration instead of a fixture that could drift from it.
+#[test]
+fn shared_agent_paths_converge() {
+    let _env_guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_restore = EnvRestore::capture(&["HOME", "XDG_CONFIG_HOME", "AGENTSYNC_HOME", "PATH"]);
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // Everything `~` and `{xdg_config}` can expand to lives under `root`, so a
+    // bug in this test (or in the code under test) cannot touch the real
+    // machine's `~/.agents/skills` or `~/.config`.
+    let fake_home = root.join("home");
+    let fake_xdg = root.join("xdg-config");
+    let agentsync_home = root.join("agentsync-home");
+    let bindir = root.join("bin");
+    let repo = root.join("repo");
+    for dir in [&fake_home, &fake_xdg, &agentsync_home, &bindir, &repo] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+
+    // Fake `codex`, `opencode` and `kilo` binaries so all three hosts are
+    // detected. Skills and instructions never invoke the host CLI (they are
+    // pure filesystem operations), so these need not do anything.
+    for bin in ["codex", "opencode", "kilo"] {
+        write_exec(&bindir.join(bin), "#!/bin/sh\nexit 0\n");
+    }
+
+    // Redirect every path root this test touches BEFORE calling any
+    // `paths::` helper (directly or through `instructions::canonical_for`
+    // below) — those helpers read these variables live, so computing a
+    // "canonical" path before this point would resolve against whatever the
+    // process's real or previously-test-set environment happens to be.
+    unsafe {
+        std::env::set_var("HOME", &fake_home);
+        std::env::set_var("XDG_CONFIG_HOME", &fake_xdg);
+        std::env::set_var("AGENTSYNC_HOME", &agentsync_home);
+        std::env::set_var("PATH", &bindir);
+    }
+
+    // Canonical skill content that all three hosts should end up linking to.
+    let canonical_skill = agentsync_home.join("skills/demo-skill");
+    std::fs::create_dir_all(&canonical_skill).unwrap();
+    std::fs::write(
+        canonical_skill.join("SKILL.md"),
+        "---\nname: demo-skill\ndescription: test\n---\nversion one\n",
+    )
+    .unwrap();
+
+    // Canonical project instructions content. The read path (`Host::read` in
+    // `src/hosts/mod.rs`) classifies a host's link against
+    // `instructions::canonical_for(&scope)` unconditionally — it does not
+    // consult the manifest's `source` override — so the manifest entry's name
+    // and the file it points at must agree with the tool's own default
+    // naming, or a correctly-synced link reads back as "foreign" on the next
+    // load. Using the product's own naming functions here (rather than an
+    // arbitrary name picked for the test) is what keeps this test honest
+    // about that coupling instead of accidentally dodging it.
+    let scope = agentsync::core::model::Scope::Project(repo.display().to_string());
+    let instructions_name = agentsync::domains::instructions::default_name(&scope);
+    let canonical_instructions = agentsync::domains::instructions::canonical_for(&scope);
+    std::fs::create_dir_all(canonical_instructions.parent().unwrap()).unwrap();
+    std::fs::write(&canonical_instructions, "shared project instructions\n").unwrap();
+
+    let manifest_path = agentsync_home.join("manifest.toml");
+    std::fs::write(
+        &manifest_path,
+        format!(
+            r#"
+[skills.demo-skill]
+source = "skills/demo-skill"
+
+[instructions."{instructions_name}"]
+source = "{source}"
+scope = "project"
+repos = ["{repo}"]
+"#,
+            instructions_name = instructions_name,
+            source = canonical_instructions.display(),
+            repo = repo.display()
+        ),
+    )
+    .unwrap();
+
+    let world = World::load(&manifest_path, &[repo.display().to_string()]).expect("world loads");
+
+    let detected: Vec<String> = world
+        .detected()
+        .map(|(h, _)| h.name().to_string())
+        .collect();
+    for name in ["codex", "opencode", "kilo"] {
+        assert!(detected.contains(&name.to_string()), "{detected:?}");
+    }
+    assert!(
+        !detected.contains(&"claude".to_string()),
+        "the real claude must not be reachable from this test: {detected:?}"
+    );
+
+    // ---- proof 1: the shared skills write target is genuinely shared ----
+    let expected_skills_dir = fake_home.join(".agents/skills");
+    let mut skills_link_dirs = Vec::new();
+    for name in ["codex", "opencode", "kilo"] {
+        let dir = world
+            .host(name)
+            .unwrap()
+            .skills_link_dir()
+            .unwrap_or_else(|| panic!("{name} has no skills_link_dir"));
+        assert_eq!(
+            dir, expected_skills_dir,
+            "{name} must resolve dirs[0] to the shared skills directory"
+        );
+        skills_link_dirs.push(dir);
+    }
+
+    // ---- proof 1b: the shared project instructions path is genuinely shared ----
+    let expected_agents_md = repo.join("AGENTS.md");
+    for name in ["codex", "opencode", "kilo"] {
+        let path = world
+            .host(name)
+            .unwrap()
+            .instruction_path(&agentsync::core::model::Scope::Project(
+                repo.display().to_string(),
+            ))
+            .unwrap_or_else(|| panic!("{name} has no project instruction path"));
+        assert_eq!(
+            path, expected_agents_md,
+            "{name} must resolve the project instructions path to the shared AGENTS.md"
+        );
+    }
+
+    let mut rows = world.rows();
+    let skill_row = rows
+        .iter()
+        .find(|r| r.name == "demo-skill" && r.domain == Domain::Skills)
+        .expect("a row for demo-skill");
+    assert_eq!(
+        skill_row.headline, "missing from codex, kilo and opencode",
+        "unexpected headline: {}",
+        skill_row.headline
+    );
+    let instructions_row = rows
+        .iter()
+        .find(|r| r.name == instructions_name && r.domain == Domain::Instructions)
+        .expect("a row for repo-agents");
+    assert_eq!(
+        instructions_row.headline, "missing from codex, kilo and opencode",
+        "unexpected headline: {}",
+        instructions_row.headline
+    );
+
+    for row in rows.iter_mut() {
+        if (row.name == "demo-skill" && row.domain == Domain::Skills)
+            || (row.name == instructions_name && row.domain == Domain::Instructions)
+        {
+            row.accepted = true;
+        }
+    }
+
+    let plan = world.plan(&rows);
+
+    // ---- proof 2 & 3: one filesystem operation, not three, per shared path ----
+    //
+    // Counting steps in the *plan* is a real-effect count, not a precondition:
+    // `apply::run` executes `plan.steps` one-for-one with no deduplication of
+    // its own (see `src/core/apply.rs`), so the number of `FsOp::Link` steps
+    // that name a given path is exactly the number of `symlink()` calls that
+    // will happen against that path.
+    let links_to = |target: &Path| -> Vec<&Path> {
+        plan.steps
+            .iter()
+            .filter_map(|s| match &s.step {
+                Step::Fs(FsOp::Link { link, .. }) if link == target => Some(link.as_path()),
+                _ => None,
+            })
+            .collect()
+    };
+    let skill_link_path = expected_skills_dir.join("demo-skill");
+    assert_eq!(
+        links_to(&skill_link_path).len(),
+        1,
+        "syncing demo-skill to codex, opencode and kilo (all sharing {}) must be one \
+         filesystem operation, not three: {:#?}",
+        skill_link_path.display(),
+        plan.steps
+    );
+    assert_eq!(
+        links_to(&expected_agents_md).len(),
+        1,
+        "linking AGENTS.md into codex, opencode and kilo (all sharing {}) must be one \
+         filesystem operation, not three: {:#?}",
+        expected_agents_md.display(),
+        plan.steps
+    );
+
+    let mut manifest = world.manifest.clone();
+    let report = apply::run(&plan, &mut manifest, &manifest_path, &world.hosts, |_| {});
+    assert!(
+        !report.any_failed(),
+        "pass 1 must apply cleanly: {:?}",
+        report.results
+    );
+
+    // ---- the filesystem side, pass 1 ----
+    let skill_meta = skill_link_path
+        .symlink_metadata()
+        .expect("the skill link exists");
+    assert!(skill_meta.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_link(&skill_link_path).unwrap(),
+        canonical_skill
+    );
+    let agents_meta = expected_agents_md
+        .symlink_metadata()
+        .expect("the AGENTS.md link exists");
+    assert!(agents_meta.file_type().is_symlink());
+    assert_eq!(
+        std::fs::read_link(&expected_agents_md).unwrap(),
+        canonical_instructions
+    );
+
+    // Concrete state captured after pass 1: path, inode of the link itself,
+    // and byte content read through it. This is what pass 2 must reproduce
+    // exactly for convergence to be proven rather than assumed.
+    let skill_ino_1 = skill_meta.ino();
+    let agents_ino_1 = agents_meta.ino();
+    let skill_bytes_1 = std::fs::read(skill_link_path.join("SKILL.md")).unwrap();
+    let agents_bytes_1 = std::fs::read(&expected_agents_md).unwrap();
+
+    // ---- proof 4: a second full pass mutates nothing further ----
+    let world2 = World::load(&manifest_path, &[repo.display().to_string()]).unwrap();
+    let mut rows2 = world2.rows();
+    let still_open: Vec<String> = rows2
+        .iter()
+        .filter(|r| {
+            r.severity != agentsync::core::diff::Severity::Synced
+                && matches!(r.name.as_str(), n if n == "demo-skill" || n == instructions_name)
+        })
+        .map(|r| format!("{} ({})", r.name, r.headline))
+        .collect();
+    assert!(
+        still_open.is_empty(),
+        "a second run must not re-report work pass 1 already did: {still_open:?}"
+    );
+
+    for row in rows2.iter_mut() {
+        if row.actionable() {
+            row.accepted = true;
+        }
+    }
+    let plan2 = world2.plan(&rows2);
+    let leftover_links: Vec<_> = plan2
+        .steps
+        .iter()
+        .filter(|s| {
+            matches!(&s.step, Step::Fs(FsOp::Link { link, .. })
+                if link == &skill_link_path || link == &expected_agents_md)
+        })
+        .map(|s| s.label.clone())
+        .collect();
+    assert!(
+        leftover_links.is_empty(),
+        "a converged second plan must contain no further link steps for the shared paths: \
+         {leftover_links:?}"
+    );
+
+    let mut manifest2 = world2.manifest.clone();
+    let report2 = apply::run(
+        &plan2,
+        &mut manifest2,
+        &manifest_path,
+        &world2.hosts,
+        |_| {},
+    );
+    assert!(
+        !report2.any_failed(),
+        "pass 2 must apply cleanly: {:?}",
+        report2.results
+    );
+
+    // The real convergence proof: identical path, identical inode, identical
+    // bytes. Not "apply returned Ok" — the actual link and its target must be
+    // untouched by the second pass.
+    let skill_meta_2 = skill_link_path
+        .symlink_metadata()
+        .expect("the skill link must still exist after pass 2");
+    let agents_meta_2 = expected_agents_md
+        .symlink_metadata()
+        .expect("the AGENTS.md link must still exist after pass 2");
+    assert_eq!(
+        skill_meta_2.ino(),
+        skill_ino_1,
+        "pass 2 must not have recreated the skill symlink"
+    );
+    assert_eq!(
+        agents_meta_2.ino(),
+        agents_ino_1,
+        "pass 2 must not have recreated the AGENTS.md symlink"
+    );
+    assert_eq!(
+        std::fs::read(skill_link_path.join("SKILL.md")).unwrap(),
+        skill_bytes_1,
+        "the skill content reached through the link must be byte-identical after pass 2"
+    );
+    assert_eq!(
+        std::fs::read(&expected_agents_md).unwrap(),
+        agents_bytes_1,
+        "the AGENTS.md content reached through the link must be byte-identical after pass 2"
+    );
+
+    // ---- no artifact escapes the temp dir: the shared skills dir must hold
+    // exactly the one entry this test created ----
+    let entries: Vec<_> = std::fs::read_dir(&expected_skills_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        entries,
+        vec![std::ffi::OsString::from("demo-skill")],
+        "the shared skills directory must contain exactly the one linked skill: {entries:?}"
     );
 }
