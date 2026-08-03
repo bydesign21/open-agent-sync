@@ -30,35 +30,41 @@ Do not create or push `v0.0.9` before the two new hosts pass their live gates.
 
 ## Current repository state
 
-| Item | Current fact |
-|---|---|
-| Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` |
-| Isolated worktree | `/Users/loganvasquez/Documents/Repos/agentsync/.claude/worktrees/codex-hook-shim-correctness` |
-| Feature branch | `feature/codex-hook-shim-correctness` |
-| Feature HEAD | `697dc48e13f8c747246f9a7b8b75b7d283a9401a` |
-| Local `master` | `d7954842053e4585beb339e7804eebb1393dcdbd` |
-| Last observed `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` |
-| Package version on feature branch | `0.0.9` |
-| Local `v0.0.9` tag | absent when this ledger was written |
-| GitHub `v0.0.9` release | not created |
-| Installed user binary | not upgraded by this work |
-| User hook/plugin state | not mutated by this work |
+**Active work location changed.** Work did not continue on the isolated
+worktree. Every commit after `697dc48` was made directly on local `master` in
+the main checkout. The worktree branch is now a stale dead end and must not be
+treated as the source of truth.
 
-Remote verification could not run while this ledger was written because DNS
-resolution for `github.com` failed. The last verified remote state is retained
-above as an observation, not treated as a fresh check.
+| Item | Current fact | Verified |
+|---|---|---|
+| Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` | `git worktree list` |
+| Active branch | `master` in the main checkout | `git status --short --branch` |
+| Local `master` HEAD | `0b466c6` "Stop transaction writes from touching unedited sources" | `git rev-parse HEAD` |
+| `master` ahead of `origin/master` by | 14 commits, unpushed | `git status --short --branch` |
+| Stale worktree | `.claude/worktrees/codex-hook-shim-correctness` at `7559e08` | `git worktree list` |
+| Stale feature branch | `feature/codex-hook-shim-correctness`, superseded, do not build on | `git log` |
+| `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` | `git ls-remote` |
+| Package version | `0.0.9` | `Cargo.toml` |
+| Local and remote `v0.0.9` tag | absent | `git ls-remote --tags` |
+| GitHub `v0.0.9` release | not created | not checked this session |
+| Installed user binary | not upgraded by this work | not checked this session |
+| User hook/plugin state | not mutated by this work | no apply run |
+
+The stale worktree still holds an older copy of this ledger. Reconcile or remove
+that worktree before the OW-012 whole-branch review, so the reviewer cannot
+diff the wrong tip.
 
 Recheck before work resumes:
 
 ```sh
-cd /Users/loganvasquez/Documents/Repos/agentsync/.claude/worktrees/codex-hook-shim-correctness
+cd /Users/loganvasquez/Documents/Repos/agentsync
 git status --short --branch
 git rev-parse HEAD
-git log --oneline --decorate -12
+git log --oneline --decorate -16
 git ls-remote --heads --tags origin master refs/tags/v0.0.9
 ```
 
-Expected feature HEAD: `697dc48e13f8c747246f9a7b8b75b7d283a9401a`.
+Expected `master` HEAD: `0b466c6`.
 
 ## Work already completed and independently verified
 
@@ -109,7 +115,7 @@ Existing legacy shims need regeneration after the final release is installed.
 
 ## OW-001 — Correct and re-review the shared OpenCode/Kilo implementation plan
 
-**State: corrections written; fresh re-review not run. Release blocker.**
+**State: approved by fresh independent architecture review. Release blocker.**
 
 Official-runtime research and initial designs exist locally in the `.gitignore`d
 `docs/superpowers/` directory as working artifacts. They are not committed and
@@ -117,8 +123,9 @@ serve as design reference only. The authoritative design is the corrections
 list below.
 
 The first independent architecture review rejected the plan. It found two
-Critical and five Important defects. Corrections were applied, but the session
-was interrupted before a fresh reviewer checked them.
+Critical and five Important defects. Corrections were applied and a fresh
+independent reviewer approved the corrected designs. The implementation still
+has separate release-blocking gaps tracked under OW-002.
 
 Corrections now present in the local plan/designs:
 
@@ -183,9 +190,38 @@ All 12 originally rejected defect areas are addressed by these corrections.
 
 ## OW-002 — Guarded JSONC and artifact transactions
 
-**State: designed, not implemented. Release blocker. Depends on OW-001.**
+**State: implemented, all nine invariants covered, task gates green, awaiting
+independent review. Release blocker. Depends on OW-001.**
 
-Implement the write foundation before any host-specific mutation.
+The write foundation is implemented and wired into `Step`/`apply`. All nine
+required invariants below have named tests and every task gate passes. This is
+**self-verified only**. No fresh reviewer has checked this work, so OW-002 is
+not approved and remains a release blocker.
+
+Commits on `master` delivering OW-002:
+
+| Commit | Result |
+|---|---|
+| `8aa1a47` | Add guarded JSONC config patches |
+| `5a4dd4a` | Wire guarded transactions into apply |
+| `daf50d2` | Harden guarded transaction invariants |
+| `42163ca` | Secure transaction ownership checks |
+| `0b466c6` | Stop transaction writes from touching unedited sources |
+
+Two real defects were found by test-first work and fixed in `0b466c6`:
+
+1. `atomic_write` created its temporary file at a predictable path with a plain
+   write. A pre-existing symlink at that path received the generated bytes,
+   corrupting an arbitrary user-owned file outside the destination. Temporary
+   files are now created with `create_new` (`O_EXCL`) under a unique counter, so
+   any existing entry is refused rather than followed.
+   Regression: `atomic_write_does_not_follow_a_preexisting_predictable_temp_symlink`.
+2. `ConfigTransaction::apply` rewrote **every** guarded source, including
+   projection-only sources that no edit targeted. A shadowed, read-only,
+   externally controlled layer was replaced through `rename`, changing its inode
+   and dropping its `0o444` permissions. Only edited sources are written now, and
+   rollback tracks only those sources.
+   Regression: `config_patch_rollback_never_rewrites_a_shadowed_read_only_projection_source`.
 
 Required interfaces:
 
@@ -199,20 +235,26 @@ Required interfaces:
 - `paths::state_dir()` using `AGENTSYNC_STATE_HOME`, defaulting to
   `~/.agentsync`.
 
-Required invariants, written before implementation:
+Required invariants, each with the test that proves it:
 
-1. A nested edit preserves comments, formatting, order, tuple options, and all
-   unrelated bytes.
-2. Missing-file creation accepts only `Absent`.
-3. A changed hash stops before backup and write.
-4. Split-origin objects can change in one transaction.
-5. Removal can reveal a lower-precedence value and verify that result.
-6. MCP and plugin edits in one file compose into one write.
-7. External/unwritable origins cannot produce a transaction.
-8. Any write or verification failure restores all original bytes and deletes
-   all files created by that transaction.
-9. File transactions reject plan/apply races, unowned destinations, tampered
-   artifacts, and unsafe stale-sidecar removal.
+| # | Invariant | Proving test |
+|---|---|---|
+| 1 | A nested edit preserves comments, formatting, order, tuple options, and all unrelated bytes. | `config_patch_preserves_unrelated_jsonc_bytes` |
+| 2 | Missing-file creation accepts only `Absent`. | `missing_file_requires_absent_precondition`, `missing_file_with_sha256_precondition_fails` |
+| 3 | A changed hash stops before backup and write. | `changed_hash_stops_before_backup`, `config_patch_rejects_a_plan_apply_race_without_overwriting_it` |
+| 4 | Split-origin objects can change in one transaction. | `split_origin_change_in_one_transaction` |
+| 5 | Removal can reveal a lower-precedence value and verify that result. | `removal_reveals_lower_precedence`, `config_patch_removal_reveals_the_lower_precedence_value` |
+| 6 | MCP and plugin edits in one file compose into one write. | `multiple_edits_in_one_file_compose_to_one_write`, `config_patch_composes_mcp_and_plugin_edits_across_origin_precedence` |
+| 7 | External/unwritable origins cannot produce a transaction. | `external_origin_cannot_create_transaction`, `unwritable_origin_cannot_create_transaction`, `config_patch_blocks_an_externally_controlled_origin` |
+| 8 | Any write or verification failure restores all original bytes and deletes all files created by that transaction. | `failure_restores_original_bytes`, `failure_deletes_created_files`, `config_patch_rolls_back_when_effective_projection_is_wrong` |
+| 9 | File transactions reject plan/apply races, unowned destinations, tampered artifacts, and unsafe stale-sidecar removal. | `file_transaction_rejects_a_plan_apply_race_without_overwriting_it`, `file_transaction_rejects_unowned_destinations`, `changed_generated_artifact_is_reported_as_tampered`, `changed_stale_sidecar_is_not_removed` |
+
+Additional hardening tests beyond the nine required invariants:
+`ownership_rejects_a_lexical_parent_directory_escape`,
+`ownership_rejects_a_symlink_escape_from_an_owned_tree`,
+`rollback_reports_a_restore_failure_and_continues_restoring_other_paths`,
+`atomic_write_does_not_follow_a_preexisting_predictable_temp_symlink`,
+`config_patch_rollback_never_rewrites_a_shadowed_read_only_projection_source`.
 
 Task gates:
 
@@ -224,13 +266,26 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+Observed at `0b466c6`, self-run, not reviewer-run:
+
+| Gate | Result |
+|---|---|
+| `cargo test jsonc` | 12 passed, 0 failed |
+| `cargo test --test apply_e2e config_patch` | 11 passed, 0 failed |
+| `cargo test --test apply_e2e file_transaction` | 3 passed, 0 failed |
+| `cargo fmt --check` | clean |
+| `cargo clippy --all-targets -- -D warnings` | exit 0, no warnings |
+| `cargo test --locked` (whole suite) | 315 passed, 0 failed |
+
+Release build and installed-binary checks were **not** run this session.
+
 Commit intent: `Add guarded JSONC config patches`.
 
 ```openwork
 {
   "id": "OW-002",
   "title": "Guarded JSONC and artifact transactions",
-  "state": "designed-not-implemented",
+  "state": "implemented-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-001"]
 }
