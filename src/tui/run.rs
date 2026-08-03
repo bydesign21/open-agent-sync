@@ -308,6 +308,14 @@ pub fn effect_of(world: &World, step: &Step) -> Option<String> {
             paths::contract(path)
         )),
         Step::Fs(FsOp::WriteFile { path, .. }) => Some(format!("write {}", paths::contract(path))),
+        Step::ConfigTransaction(transaction) => Some(format!(
+            "patch {} guarded config source(s)",
+            transaction.sources.len()
+        )),
+        Step::FileTransaction(transaction) => Some(format!(
+            "apply {} guarded file operation(s)",
+            transaction.operations.len()
+        )),
         Step::Manual(text) => Some(format!("you must: {text}")),
         Step::Manifest(op) => Some(format!("manifest: {}", op.describe())),
     }

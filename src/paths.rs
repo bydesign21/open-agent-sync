@@ -78,8 +78,7 @@ pub fn state_dir() -> Result<PathBuf> {
     if let Ok(explicit) = std::env::var("AGENTSYNC_STATE_HOME") {
         return Ok(PathBuf::from(explicit));
     }
-    let home = dirs::home_dir()
-        .context("determining home directory for state directory")?;
+    let home = dirs::home_dir().context("determining home directory for state directory")?;
     Ok(home.join(".agentsync"))
 }
 

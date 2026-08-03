@@ -203,6 +203,42 @@ pub fn run(
                 },
             },
 
+            Step::ConfigTransaction(transaction) => {
+                let mut transaction = transaction.clone();
+                match transaction.execute() {
+                    Ok(result) => StepResult {
+                        label: planned.label.clone(),
+                        outcome: Outcome::Done,
+                        command: None,
+                        message: format!("updated {} config source(s)", result.written_files.len()),
+                    },
+                    Err(e) => StepResult {
+                        label: planned.label.clone(),
+                        outcome: Outcome::Failed,
+                        command: None,
+                        message: e.to_string(),
+                    },
+                }
+            }
+
+            Step::FileTransaction(transaction) => {
+                let mut transaction = transaction.clone();
+                match transaction.execute() {
+                    Ok(()) => StepResult {
+                        label: planned.label.clone(),
+                        outcome: Outcome::Done,
+                        command: None,
+                        message: "updated guarded artifacts".into(),
+                    },
+                    Err(e) => StepResult {
+                        label: planned.label.clone(),
+                        outcome: Outcome::Failed,
+                        command: None,
+                        message: e.to_string(),
+                    },
+                }
+            }
+
             Step::Manual(text) => StepResult {
                 label: planned.label.clone(),
                 outcome: Outcome::Skipped,

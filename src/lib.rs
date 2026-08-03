@@ -23,8 +23,8 @@ pub mod paths;
 pub mod platform;
 pub mod report;
 pub mod shim;
-pub mod transaction;
 #[cfg(test)]
 pub(crate) mod testutil;
+pub mod transaction;
 pub mod tui;
 pub mod update;

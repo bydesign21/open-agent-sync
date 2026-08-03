@@ -19,7 +19,13 @@ use std::path::Path;
 
 use agentsync::core::apply::{self, Outcome};
 use agentsync::core::diff::{ActionKind, Domain};
+use agentsync::core::plan::{Plan, Step};
 use agentsync::domains::World;
+use agentsync::manifest::Manifest;
+use agentsync::transaction::{
+    ConfigEditOperation, ConfigOrigin, ConfigScope, ConfigTransaction, FilePrecondition,
+    FileTransaction, GuardedSource, SourceEdit, compute_sha256,
+};
 
 /// A stand-in host CLI. It logs its argv and maintains a real config file, so a
 /// second pass sees the world the first pass produced. `__LOG__` and `__CFG__`
@@ -107,6 +113,206 @@ fn write_exec(path: &Path, body: &str) {
     let mut perms = std::fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(path, perms).unwrap();
+}
+
+fn apply_transaction_step(step: Step) -> apply::Report {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut plan = Plan::default();
+    plan.push("guarded transaction", step);
+    apply::run(
+        &plan,
+        &mut Manifest::default(),
+        &tmp.path().join("manifest.toml"),
+        &[],
+        |_| {},
+    )
+}
+
+#[test]
+fn config_patch_preserves_unrelated_jsonc_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.jsonc");
+    let original = "{\n  // this comment and all spacing are user-owned\n  \"mcp\": { \"enabled\": true },\n  \"plugin\": [\"pkg\", {\"option\": null}]\n}\n";
+    std::fs::write(&path, original).unwrap();
+    let hash = compute_sha256(original.as_bytes());
+    let origin = ConfigOrigin::new(&path, ConfigScope::Global, 0, &hash);
+    let transaction = ConfigTransaction::new(serde_json::json!({
+        "mcp": {"enabled": false},
+        "plugin": ["pkg", {"option": null}]
+    }))
+    .with_source(GuardedSource::with_hash(&path, hash))
+    .with_edit(SourceEdit {
+        origin,
+        config_path: vec!["mcp".into(), "enabled".into()],
+        operation: ConfigEditOperation::Set {
+            value: serde_json::json!(false),
+            raw_json: Some("false".into()),
+        },
+    });
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Done);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        original.replacen("true", "false", 1),
+        "only the owned value token may change"
+    );
+}
+
+#[test]
+fn config_patch_rejects_a_plan_apply_race_without_overwriting_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.jsonc");
+    let planned = b"{\"enabled\":true}\n";
+    std::fs::write(&path, planned).unwrap();
+    let hash = compute_sha256(planned);
+    let origin = ConfigOrigin::new(&path, ConfigScope::Global, 0, &hash);
+    let transaction = ConfigTransaction::new(serde_json::json!({"enabled": false}))
+        .with_source(GuardedSource::with_hash(&path, hash))
+        .with_edit(SourceEdit {
+            origin,
+            config_path: vec!["enabled".into()],
+            operation: ConfigEditOperation::Set {
+                value: serde_json::json!(false),
+                raw_json: None,
+            },
+        });
+    let raced = b"{\"enabled\":true,\"added_by_user\":true}\n";
+    std::fs::write(&path, raced).unwrap();
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Failed);
+    assert_eq!(std::fs::read(&path).unwrap(), raced);
+}
+
+#[test]
+fn config_patch_rolls_back_when_effective_projection_is_wrong() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("config.jsonc");
+    let original = b"{\"enabled\":true}\n";
+    std::fs::write(&path, original).unwrap();
+    let hash = compute_sha256(original);
+    let origin = ConfigOrigin::new(&path, ConfigScope::Global, 0, &hash);
+    let transaction = ConfigTransaction::new(serde_json::json!({"enabled": "not-the-result"}))
+        .with_source(GuardedSource::with_hash(&path, hash))
+        .with_edit(SourceEdit {
+            origin,
+            config_path: vec!["enabled".into()],
+            operation: ConfigEditOperation::Set {
+                value: serde_json::json!(false),
+                raw_json: None,
+            },
+        });
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Failed);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn config_patch_removal_reveals_the_lower_precedence_value() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lower = tmp.path().join("global.jsonc");
+    let higher = tmp.path().join("project.jsonc");
+    let lower_bytes = b"{\"mcp\":{\"url\":\"https://global.test\",\"keep\":1}}\n";
+    let higher_bytes = b"{\"mcp\":{\"url\":\"https://project.test\"}}\n";
+    std::fs::write(&lower, lower_bytes).unwrap();
+    std::fs::write(&higher, higher_bytes).unwrap();
+    let higher_hash = compute_sha256(higher_bytes);
+    let transaction = ConfigTransaction::new(serde_json::json!({
+        "mcp": {"url": "https://global.test", "keep": 1}
+    }))
+    .with_source(GuardedSource::with_hash(
+        &lower,
+        compute_sha256(lower_bytes),
+    ))
+    .with_source(GuardedSource::with_hash(&higher, &higher_hash))
+    .with_edit(SourceEdit {
+        origin: ConfigOrigin::new(&higher, ConfigScope::Project, 1, higher_hash),
+        config_path: vec!["mcp".into(), "url".into()],
+        operation: ConfigEditOperation::Remove,
+    });
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Done);
+    assert_eq!(std::fs::read(&lower).unwrap(), lower_bytes);
+    assert_eq!(std::fs::read_to_string(&higher).unwrap(), "{\"mcp\":{}}\n");
+}
+
+#[test]
+fn config_patch_blocks_an_externally_controlled_origin() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("managed.jsonc");
+    let original = b"{\"enabled\":true}\n";
+    std::fs::write(&path, original).unwrap();
+    let hash = compute_sha256(original);
+    let origin = ConfigOrigin::new(&path, ConfigScope::Global, 0, &hash)
+        .externally_controlled("managed policy");
+    let transaction = ConfigTransaction::new(serde_json::json!({"enabled": false}))
+        .with_source(GuardedSource::with_hash(&path, hash))
+        .with_edit(SourceEdit {
+            origin,
+            config_path: vec!["enabled".into()],
+            operation: ConfigEditOperation::Set {
+                value: serde_json::json!(false),
+                raw_json: None,
+            },
+        });
+
+    let report = apply_transaction_step(Step::ConfigTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Failed);
+    assert!(report.results[0].message.contains("managed policy"));
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn file_transaction_rejects_unowned_destinations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("user-owned.ts");
+    let transaction = FileTransaction::new().write(&path, b"generated", FilePrecondition::Absent);
+
+    let report = apply_transaction_step(Step::FileTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Failed);
+    assert!(!path.exists());
+}
+
+#[test]
+fn file_transaction_rejects_a_plan_apply_race_without_overwriting_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join(".agentsync-owned"), b"").unwrap();
+    let path = tmp.path().join("bridge.ts");
+    std::fs::write(&path, b"planned bytes").unwrap();
+    let transaction = FileTransaction::new().write(
+        &path,
+        b"new generated bytes",
+        FilePrecondition::Sha256(compute_sha256(b"planned bytes")),
+    );
+    std::fs::write(&path, b"user changed this").unwrap();
+
+    let report = apply_transaction_step(Step::FileTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Failed);
+    assert_eq!(std::fs::read(&path).unwrap(), b"user changed this");
+}
+
+#[test]
+fn file_transaction_creates_an_absent_owned_artifact() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join(".agentsync-owned"), b"").unwrap();
+    let path = tmp.path().join("bridge.ts");
+    let transaction =
+        FileTransaction::new().write(&path, b"export default {};\n", FilePrecondition::Absent);
+
+    let report = apply_transaction_step(Step::FileTransaction(transaction));
+
+    assert_eq!(report.results[0].outcome, Outcome::Done);
+    assert_eq!(std::fs::read(&path).unwrap(), b"export default {};\n");
 }
 
 #[test]

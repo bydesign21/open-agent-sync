@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use crate::manifest::{MarketplaceEntry, McpEntry};
+use crate::transaction::{ConfigTransaction, FileTransaction};
 
 #[derive(Clone, Debug)]
 pub enum ManifestOp {
@@ -156,6 +157,10 @@ pub enum Step {
         cwd: Option<PathBuf>,
     },
     Fs(FsOp),
+    /// Apply guarded edits to one or more JSONC configuration sources.
+    ConfigTransaction(ConfigTransaction),
+    /// Apply guarded writes/removals to agentsync-owned generated artifacts.
+    FileTransaction(FileTransaction),
     /// Something the user must do by hand, for example export an environment
     /// variable. The plan carries this step so the user cannot miss it, and the
     /// report marks it as skipped instead of silently succeeding.
@@ -173,6 +178,7 @@ impl Step {
             Step::Host { argv, .. } if argv.iter().any(|a| a == "remove" || a == "uninstall") => 2,
             Step::Fs(FsOp::Unlink(_)) => 2,
             Step::Fs(FsOp::WriteFile { .. }) => 0,
+            Step::ConfigTransaction(_) | Step::FileTransaction(_) => 0,
             _ => 3,
         }
     }

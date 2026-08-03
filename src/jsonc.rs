@@ -126,7 +126,9 @@ fn strip_comments(text: &str) -> Result<String> {
                             break;
                         }
                     }
-                    if sc == '\\' && let Some(next) = chars.next() {
+                    if sc == '\\'
+                        && let Some(next) = chars.next()
+                    {
                         result.push(next);
                     }
                 }
@@ -134,12 +136,12 @@ fn strip_comments(text: &str) -> Result<String> {
             '/' => match chars.peek() {
                 Some('/') => {
                     chars.next();
-                        for lc in chars.by_ref() {
-                            if lc == '\n' {
-                                result.push('\n');
-                                break;
-                            }
+                    for lc in chars.by_ref() {
+                        if lc == '\n' {
+                            result.push('\n');
+                            break;
                         }
+                    }
                 }
                 Some('*') => {
                     chars.next();
@@ -174,143 +176,259 @@ fn strip_comments(text: &str) -> Result<String> {
 
 /// Apply an edit to a JSONC document, preserving comments and formatting.
 pub fn apply_edit(doc: &JsoncDocument, edit: &JsoncEdit) -> Result<String> {
-    let mut new_value = doc.value.clone();
-    let path: Vec<&str> = edit
+    let path: Vec<String> = edit
         .pointer
         .path
         .iter()
         .map(|seg| match seg {
-            PathSegment::Key(k) => k.as_str(),
+            PathSegment::Key(k) => k.clone(),
             PathSegment::Index(_) => panic!("array indices in path not yet supported"),
         })
         .collect();
 
     match &edit.operation {
         EditOperation::SetExactJson(json_text) => {
-            let value: serde_json::Value = serde_json::from_str(json_text)
+            serde_json::from_str::<serde_json::Value>(json_text)
                 .context("parsing exact JSON text for set operation")?;
-            set_value_at_path(&mut new_value, &path, value)?;
+            set_exact_json(&doc.text, &path, json_text)
         }
-        EditOperation::Remove => {
-            remove_value_at_path(&mut new_value, &path)?;
-        }
+        EditOperation::Remove => remove_member(&doc.text, &path),
         EditOperation::MergeObject(map) => {
-            merge_object_at_path(&mut new_value, &path, map.clone())?;
+            let mut text = doc.text.clone();
+            for (key, value) in map {
+                let mut child = path.clone();
+                child.push(key.clone());
+                text = set_exact_json(&text, &child, &serde_json::to_string(value)?)?;
+            }
+            Ok(text)
         }
     }
-
-    let new_text =
-        serde_json::to_string_pretty(&new_value).context("serializing edited JSONC value")?;
-
-    Ok(new_text)
 }
 
-fn set_value_at_path(
-    value: &mut serde_json::Value,
-    path: &[&str],
-    new_value: serde_json::Value,
-) -> Result<()> {
-    if path.is_empty() {
-        *value = new_value;
-        return Ok(());
-    }
-
-    let target = get_or_create_parent(value, path)?;
-    let key = path.last().unwrap();
-
-    if let Some(obj) = target.as_object_mut() {
-        obj.insert(key.to_string(), new_value);
-    } else if let Some(arr) = target.as_array_mut() {
-        let index: usize = key.parse().context("parsing array index")?;
-        if index >= arr.len() {
-            arr.resize_with(index + 1, || serde_json::Value::Null);
-        }
-        arr[index] = new_value;
-    } else {
-        anyhow::bail!("cannot set value at path: target is not object or array");
-    }
-
-    Ok(())
+#[derive(Clone, Debug)]
+struct MemberSpan {
+    key: String,
+    key_start: usize,
+    value_start: usize,
+    value_end: usize,
+    comma_start: Option<usize>,
 }
 
-fn remove_value_at_path(value: &mut serde_json::Value, path: &[&str]) -> Result<()> {
-    if path.is_empty() {
-        anyhow::bail!("cannot remove root value");
+fn set_exact_json(text: &str, path: &[String], replacement: &str) -> Result<String> {
+    if let Some((start, end)) = locate_value(text, path)? {
+        let mut out = String::with_capacity(text.len() + replacement.len());
+        out.push_str(&text[..start]);
+        out.push_str(replacement);
+        out.push_str(&text[end..]);
+        return Ok(out);
     }
 
-    let parent_path = &path[..path.len() - 1];
-    let key = path.last().unwrap();
-
-    let parent = if parent_path.is_empty() {
-        value
+    let (parent_start, parent_end) = locate_value(text, &path[..path.len().saturating_sub(1)])?
+        .context("cannot insert a value whose parent does not exist")?;
+    let key = path.last().context("cannot set an empty JSON path")?;
+    if text.as_bytes().get(parent_start) != Some(&b'{') {
+        anyhow::bail!("cannot insert object member into a non-object value");
+    }
+    let members = object_members(text, parent_start)?;
+    let close = parent_end - 1;
+    let key = serde_json::to_string(key)?;
+    let insertion = if members.is_empty() {
+        format!("\n  {key}: {replacement}\n")
     } else {
-        get_value_mut(value, parent_path).context("getting parent for remove operation")?
+        format!(",\n  {key}: {replacement}")
     };
-
-    if let Some(obj) = parent.as_object_mut() {
-        obj.remove(*key);
-    } else if let Some(arr) = parent.as_array_mut() {
-        let index: usize = key.parse().context("parsing array index for removal")?;
-        if index < arr.len() {
-            arr.remove(index);
-        }
-    } else {
-        anyhow::bail!("cannot remove value: parent is not object or array");
-    }
-
-    Ok(())
+    let mut out = text.to_string();
+    out.insert_str(close, &insertion);
+    Ok(out)
 }
 
-fn merge_object_at_path(
-    value: &mut serde_json::Value,
-    path: &[&str],
-    merge_map: serde_json::Map<String, serde_json::Value>,
-) -> Result<()> {
-    let target = if path.is_empty() {
-        value
+fn remove_member(text: &str, path: &[String]) -> Result<String> {
+    let key = path.last().context("cannot remove the JSON root")?;
+    let (parent_start, _) = locate_value(text, &path[..path.len() - 1])?
+        .context("cannot remove a member whose parent does not exist")?;
+    let members = object_members(text, parent_start)?;
+    let index = members
+        .iter()
+        .position(|member| &member.key == key)
+        .context("cannot remove a member that does not exist")?;
+    let (start, end) = if let Some(next) = members.get(index + 1) {
+        (members[index].key_start, next.key_start)
+    } else if index > 0 {
+        (
+            members[index - 1]
+                .comma_start
+                .context("missing separator before final object member")?,
+            members[index].value_end,
+        )
     } else {
-        get_or_create_parent(value, path)?
+        (members[index].key_start, members[index].value_end)
     };
-
-    if let Some(obj) = target.as_object_mut() {
-        for (k, v) in merge_map {
-            obj.insert(k, v);
-        }
-    } else {
-        anyhow::bail!("cannot merge object: target is not an object");
-    }
-
-    Ok(())
+    let mut out = text.to_string();
+    out.replace_range(start..end, "");
+    Ok(out)
 }
 
-fn get_or_create_parent<'a>(
-    value: &'a mut serde_json::Value,
-    path: &[&str],
-) -> Result<&'a mut serde_json::Value> {
-    let mut current = value;
-    for key in path.iter().take(path.len().saturating_sub(1)) {
-        if current.get(*key).is_none() && let Some(obj) = current.as_object_mut() {
-            obj.insert(
-                key.to_string(),
-                serde_json::Value::Object(serde_json::Map::new()),
-            );
-        }
-        current = current
-            .get_mut(*key)
-            .context(format!("creating intermediate path segment: {}", key))?;
-    }
-    Ok(current)
+fn locate_value(text: &str, path: &[String]) -> Result<Option<(usize, usize)>> {
+    locate_value_from(text, skip_trivia(text, 0)?, path)
 }
 
-fn get_value_mut<'a>(
-    value: &'a mut serde_json::Value,
-    path: &[&str],
-) -> Option<&'a mut serde_json::Value> {
-    let mut current = value;
-    for key in path {
-        current = current.get_mut(*key)?;
+fn locate_value_from(text: &str, start: usize, path: &[String]) -> Result<Option<(usize, usize)>> {
+    let start = skip_trivia(text, start)?;
+    let end = skip_value(text, start)?;
+    if path.is_empty() {
+        return Ok(Some((start, end)));
     }
-    Some(current)
+    if text.as_bytes().get(start) != Some(&b'{') {
+        return Ok(None);
+    }
+    let Some(member) = object_members(text, start)?
+        .into_iter()
+        .find(|member| member.key == path[0])
+    else {
+        return Ok(None);
+    };
+    locate_value_from(text, member.value_start, &path[1..])
+}
+
+fn object_members(text: &str, start: usize) -> Result<Vec<MemberSpan>> {
+    if text.as_bytes().get(start) != Some(&b'{') {
+        anyhow::bail!("expected object at byte {start}");
+    }
+    let mut members = Vec::new();
+    let mut pos = skip_trivia(text, start + 1)?;
+    while text.as_bytes().get(pos) != Some(&b'}') {
+        let key_start = pos;
+        let key_end = scan_string(text, key_start)?;
+        let key: String = serde_json::from_str(&text[key_start..key_end])?;
+        pos = skip_trivia(text, key_end)?;
+        if text.as_bytes().get(pos) != Some(&b':') {
+            anyhow::bail!("expected ':' after object key at byte {pos}");
+        }
+        let value_start = skip_trivia(text, pos + 1)?;
+        let value_end = skip_value(text, value_start)?;
+        pos = skip_trivia(text, value_end)?;
+        let comma_start = (text.as_bytes().get(pos) == Some(&b',')).then_some(pos);
+        if comma_start.is_some() {
+            pos = skip_trivia(text, pos + 1)?;
+        } else if text.as_bytes().get(pos) != Some(&b'}') {
+            anyhow::bail!("expected ',' or '}}' at byte {pos}");
+        }
+        members.push(MemberSpan {
+            key,
+            key_start,
+            value_start,
+            value_end,
+            comma_start,
+        });
+    }
+    Ok(members)
+}
+
+fn skip_value(text: &str, start: usize) -> Result<usize> {
+    let bytes = text.as_bytes();
+    let mut pos = skip_trivia(text, start)?;
+    match bytes.get(pos).copied() {
+        Some(b'"') => scan_string(text, pos),
+        Some(b'{') => {
+            pos += 1;
+            loop {
+                pos = skip_trivia(text, pos)?;
+                if bytes.get(pos) == Some(&b'}') {
+                    return Ok(pos + 1);
+                }
+                pos = scan_string(text, pos)?;
+                pos = skip_trivia(text, pos)?;
+                if bytes.get(pos) != Some(&b':') {
+                    anyhow::bail!("expected ':' at byte {pos}");
+                }
+                pos = skip_value(text, pos + 1)?;
+                pos = skip_trivia(text, pos)?;
+                match bytes.get(pos) {
+                    Some(b',') => pos += 1,
+                    Some(b'}') => return Ok(pos + 1),
+                    _ => anyhow::bail!("expected ',' or '}}' at byte {pos}"),
+                }
+            }
+        }
+        Some(b'[') => {
+            pos += 1;
+            loop {
+                pos = skip_trivia(text, pos)?;
+                if bytes.get(pos) == Some(&b']') {
+                    return Ok(pos + 1);
+                }
+                pos = skip_value(text, pos)?;
+                pos = skip_trivia(text, pos)?;
+                match bytes.get(pos) {
+                    Some(b',') => pos += 1,
+                    Some(b']') => return Ok(pos + 1),
+                    _ => anyhow::bail!("expected ',' or ']' at byte {pos}"),
+                }
+            }
+        }
+        Some(_) => {
+            while let Some(byte) = bytes.get(pos) {
+                if byte.is_ascii_whitespace() || matches!(byte, b',' | b'}' | b']') {
+                    break;
+                }
+                pos += 1;
+            }
+            Ok(pos)
+        }
+        None => anyhow::bail!("expected JSON value at end of input"),
+    }
+}
+
+fn scan_string(text: &str, start: usize) -> Result<usize> {
+    let bytes = text.as_bytes();
+    if bytes.get(start) != Some(&b'"') {
+        anyhow::bail!("expected string at byte {start}");
+    }
+    let mut pos = start + 1;
+    while let Some(byte) = bytes.get(pos) {
+        match byte {
+            b'\\' => pos += 2,
+            b'"' => return Ok(pos + 1),
+            _ => pos += 1,
+        }
+    }
+    anyhow::bail!("unterminated string at byte {start}")
+}
+
+fn skip_trivia(text: &str, mut pos: usize) -> Result<usize> {
+    let bytes = text.as_bytes();
+    loop {
+        while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+            pos += 1;
+        }
+        if bytes.get(pos..pos + 2) == Some(b"//") {
+            pos += 2;
+            while bytes.get(pos).is_some_and(|byte| *byte != b'\n') {
+                pos += 1;
+            }
+            continue;
+        }
+        if bytes.get(pos..pos + 2) == Some(b"/*") {
+            let mut depth = 1usize;
+            pos += 2;
+            while depth > 0 {
+                match bytes.get(pos..pos + 2) {
+                    Some(b"/*") => {
+                        depth += 1;
+                        pos += 2;
+                    }
+                    Some(b"*/") => {
+                        depth -= 1;
+                        pos += 2;
+                    }
+                    Some(_) => pos += 1,
+                    None => anyhow::bail!("unterminated block comment"),
+                }
+            }
+            continue;
+        }
+        return Ok(pos);
+    }
 }
 
 /// Parse tuple options from a JSONC object.
