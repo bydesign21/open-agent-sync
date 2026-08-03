@@ -312,7 +312,12 @@ impl Host {
             .mcp
             .as_ref()
             .with_context(|| format!("host {} declares no mcp section", self.name()))?;
-        let add = &mcp.add;
+        let add = mcp.add.as_ref().with_context(|| {
+            format!(
+                "host {} writes mcp through guarded JSONC edits, not a CLI add",
+                self.name()
+            )
+        })?;
 
         let mut scalars = BTreeMap::from([
             ("name".to_string(), server.name.clone()),
@@ -377,11 +382,54 @@ impl Host {
             .mcp
             .as_ref()
             .with_context(|| format!("host {} declares no mcp section", self.name()))?;
+        let remove = mcp.remove.as_ref().with_context(|| {
+            format!(
+                "host {} writes mcp through guarded JSONC edits, not a CLI remove",
+                self.name()
+            )
+        })?;
         let scalars = BTreeMap::from([
             ("name".to_string(), name.to_string()),
             ("scope".to_string(), scope.cli_name().to_string()),
         ]);
-        runner::render(&mcp.remove.argv, &scalars, &BTreeMap::new())
+        runner::render(&remove.argv, &scalars, &BTreeMap::new())
+    }
+
+    /// Whether this host writes `mcp` through guarded JSONC edits rather than
+    /// its own CLI. Measured: `opencode mcp` has no `remove` subcommand at
+    /// all, so a host in this mode never builds a [`Self::mcp_remove_argv`]
+    /// call.
+    pub fn uses_jsonc_mcp_write(&self) -> bool {
+        self.descriptor
+            .mcp
+            .as_ref()
+            .is_some_and(|m| m.jsonc.is_some())
+    }
+
+    /// The raw JSONC file this host's `mcp` section for `scope` lives in, when
+    /// this host writes through guarded JSONC edits.
+    pub fn mcp_jsonc_target(&self, scope: &Scope) -> Result<PathBuf> {
+        let mcp = self
+            .descriptor
+            .mcp
+            .as_ref()
+            .with_context(|| format!("host {} declares no mcp section", self.name()))?;
+        let jsonc = mcp
+            .jsonc
+            .as_ref()
+            .with_context(|| format!("host {} has no jsonc mcp write section", self.name()))?;
+        match scope {
+            Scope::User => Ok(paths::expand(&jsonc.user_file)),
+            Scope::Project(repo) => {
+                let template = jsonc.project_file.as_ref().with_context(|| {
+                    format!("host {} has no project-scope jsonc mcp file", self.name())
+                })?;
+                Ok(paths::expand(&template.replace("{repo}", repo)))
+            }
+            Scope::Local(_) => {
+                anyhow::bail!("host {} has no local-scope jsonc mcp file", self.name())
+            }
+        }
     }
 
     /// argv that authenticates `name` interactively, if the host declares one.

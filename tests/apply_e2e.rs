@@ -15,13 +15,16 @@
 //! covered by the unit tests.
 #![cfg(unix)]
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use agentsync::core::apply::{self, Outcome};
 use agentsync::core::diff::{ActionKind, Domain};
+use agentsync::core::model::{Scope, ScopeKind, StdioServer, Transport};
 use agentsync::core::plan::{Plan, Step};
 use agentsync::domains::World;
-use agentsync::manifest::Manifest;
+use agentsync::hosts::{Host, descriptor};
+use agentsync::manifest::{Manifest, McpEntry};
 use agentsync::transaction::{
     ConfigEditOperation, ConfigOrigin, ConfigScope, ConfigTransaction, FilePrecondition,
     FileTransaction, GuardedSource, SourceEdit, compute_sha256,
@@ -1017,4 +1020,232 @@ hosts = ["fakehost"]
         !marker.exists(),
         "the guarded removal must never have been spawned, but its marker file exists"
     );
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode-family MCP write path: two full applies must converge.
+//
+// Unlike the CLI-based hosts above, this needs no fake host process at all —
+// the whole write path is a guarded JSONC edit against a real temp file, so
+// the real `hosts::opencode_family` parsers and `transaction::ConfigTransaction`
+// machinery run end to end. The descriptor points at an isolated temp path
+// (never `{xdg_config}`), so this never touches the machine running the test.
+// ---------------------------------------------------------------------------
+
+fn opencode_family_descriptor(
+    name: &str,
+    parser_user: &str,
+    parser_project: &str,
+    user_file: &Path,
+    project_file_template: &str,
+) -> String {
+    format!(
+        r#"
+name = "{name}"
+display = "{name}"
+detect = {{ bin = "{name}" }}
+
+[mcp]
+scopes = ["user", "project"]
+caps = ["stdio", "http", "env", "env_from", "headers", "bearer_env"]
+
+[[mcp.read]]
+file = "{user_file}"
+parser = "{parser_user}"
+
+[[mcp.read]]
+file = "{project_file_template}"
+parser = "{parser_project}"
+
+[mcp.jsonc]
+user_file = "{user_file}"
+project_file = "{project_file_template}"
+"#,
+        user_file = user_file.display(),
+    )
+}
+
+/// Add `demo` to a host that writes `mcp` through guarded JSONC edits, apply
+/// it, then prove a second full pass reports and does nothing further.
+fn mcp_family_converges_after_two_passes(name: &str, parser_user: &str, parser_project: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let user_file = root.join(format!("{name}.jsonc"));
+    let project_file_template = format!("{{repo}}/.{name}/{name}.jsonc");
+
+    let descriptor_text = opencode_family_descriptor(
+        name,
+        parser_user,
+        parser_project,
+        &user_file,
+        &project_file_template,
+    );
+    let make_host = || Host {
+        descriptor: descriptor::parse(&descriptor_text, name).unwrap(),
+        bin: Some(PathBuf::from(format!("/usr/bin/{name}"))),
+    };
+
+    let repos = vec![repo.display().to_string()];
+    let manifest_path = root.join("manifest.toml");
+
+    let mut manifest = Manifest::default();
+    manifest.mcp.insert(
+        "demo".into(),
+        McpEntry {
+            transport: "stdio".into(),
+            command: Some("node".into()),
+            args: vec!["/x/index.js".into()],
+            env: BTreeMap::from([("LEVEL".to_string(), "info".to_string())]),
+            env_from: vec![],
+            url: None,
+            headers: BTreeMap::new(),
+            bearer_token_env: None,
+            scope: ScopeKind::User,
+            repos: vec![],
+            hosts: None,
+        },
+    );
+
+    // ---- pass 1: the host has nothing yet ----
+    let host1 = make_host();
+    let snap1 = host1
+        .read(&repos)
+        .expect("reading an absent config is not an error");
+    assert!(snap1.mcp.is_empty(), "the host file does not exist yet");
+
+    let world1 = World {
+        manifest: manifest.clone(),
+        manifest_path: manifest_path.clone(),
+        hosts: vec![host1],
+        snapshots: vec![snap1],
+        repos: repos.clone(),
+        warnings: Vec::new(),
+    };
+    let mut rows1 = world1.rows();
+    let row = rows1
+        .iter_mut()
+        .find(|r| r.name == "demo" && r.domain == Domain::Mcp)
+        .expect("a row for demo");
+    assert_eq!(row.headline, format!("missing from {name}"));
+    row.accepted = true;
+
+    let plan1 = world1.plan(&rows1);
+    let tx_steps = plan1
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::ConfigTransaction(_)))
+        .count();
+    assert_eq!(
+        tx_steps,
+        1,
+        "adding demo must be exactly one guarded JSONC edit, not a host CLI call: {:?}",
+        plan1.steps.iter().map(|s| &s.step).collect::<Vec<_>>()
+    );
+    assert!(
+        !plan1
+            .steps
+            .iter()
+            .any(|s| matches!(s.step, Step::Host { .. })),
+        "there is no `{name} mcp remove`, so the write path must never build a host command: {:?}",
+        plan1.steps.iter().map(|s| &s.step).collect::<Vec<_>>()
+    );
+
+    let mut manifest_after_1 = world1.manifest.clone();
+    let report1 = apply::run(
+        &plan1,
+        &mut manifest_after_1,
+        &manifest_path,
+        &world1.hosts,
+        |_| {},
+    );
+    assert_eq!(report1.count(Outcome::Failed), 0, "{:?}", report1.results);
+    assert!(user_file.is_file(), "the write path must create the file");
+    let contents = std::fs::read_to_string(&user_file).unwrap();
+    assert!(contents.contains("\"demo\""), "{contents}");
+
+    // ---- pass 2: reading the file back must round-trip what we wrote ----
+    let host2 = make_host();
+    let snap2 = host2.read(&repos).unwrap();
+    let demo2 = snap2
+        .mcp
+        .get(&(Scope::User, "demo".to_string()))
+        .expect("demo round-trips from disk");
+    assert_eq!(
+        demo2.transport,
+        Transport::Stdio(StdioServer {
+            command: "node".into(),
+            args: vec!["/x/index.js".into()],
+            env: BTreeMap::from([("LEVEL".to_string(), "info".to_string())]),
+            env_from: vec![],
+        })
+    );
+
+    let world2 = World {
+        manifest: manifest_after_1.clone(),
+        manifest_path: manifest_path.clone(),
+        hosts: vec![host2],
+        snapshots: vec![snap2],
+        repos: repos.clone(),
+        warnings: Vec::new(),
+    };
+    let mut rows2 = world2.rows();
+    let demo_row2 = rows2
+        .iter()
+        .find(|r| r.name == "demo" && r.domain == Domain::Mcp)
+        .expect("still a row for demo");
+    assert_eq!(
+        demo_row2.severity,
+        agentsync::core::diff::Severity::Synced,
+        "a second run must not re-report work already done: {} ({})",
+        demo_row2.name,
+        demo_row2.headline
+    );
+
+    for row in rows2.iter_mut() {
+        if row.actionable() {
+            row.accepted = true;
+        }
+    }
+    let plan2 = world2.plan(&rows2);
+    let mutations: Vec<&str> = plan2
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::ConfigTransaction(_) | Step::Host { .. }))
+        .map(|s| s.label.as_str())
+        .collect();
+    assert!(
+        mutations.is_empty(),
+        "the second full plan must not touch mcp again: {mutations:?}"
+    );
+
+    let mut manifest_after_2 = world2.manifest.clone();
+    let report2 = apply::run(
+        &plan2,
+        &mut manifest_after_2,
+        &manifest_path,
+        &world2.hosts,
+        |_| {},
+    );
+    assert_eq!(
+        report2.count(Outcome::Failed),
+        0,
+        "the converged second plan must apply cleanly: {:?}",
+        report2.results
+    );
+}
+
+#[test]
+fn opencode_mcp_converges_after_two_passes() {
+    mcp_family_converges_after_two_passes(
+        "opencode",
+        "opencode_mcp_jsonc_v1",
+        "opencode_mcp_project_jsonc_v1",
+    );
+}
+
+#[test]
+fn kilo_mcp_converges_after_two_passes() {
+    mcp_family_converges_after_two_passes("kilo", "kilo_mcp_jsonc_v1", "kilo_mcp_project_jsonc_v1");
 }

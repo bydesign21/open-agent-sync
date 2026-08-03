@@ -5,7 +5,7 @@
 //! against a real configuration.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use agentsync::core::diff::{ActionKind, Domain, Row, Severity};
 use agentsync::core::model::{
@@ -2048,4 +2048,199 @@ fn a_settings_file_path_containing_an_at_sign_is_not_offered_a_shim() {
          advertise a fix it cannot deliver: {:?}",
         row.action().kind
     );
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode-family MCP write path: a guarded JSONC ConfigTransaction, never a
+// host CLI call — measured, `opencode mcp` has no `remove` subcommand at all,
+// so add/update/remove all go through the same mechanism.
+//
+// These build a host descriptor pointing at an isolated temp file rather than
+// using the shared `host()` helper's BUILTIN descriptor: building the write
+// step reads the target file's current bytes to compute a guarded
+// precondition, so a real descriptor's `{xdg_config}` path would read the
+// machine running these tests.
+// ---------------------------------------------------------------------------
+
+fn opencode_family_host(name: &str, parser_user: &str, user_file: &Path) -> Host {
+    let text = format!(
+        r#"
+name = "{name}"
+display = "{name}"
+detect = {{ bin = "{name}" }}
+
+[mcp]
+scopes = ["user", "project"]
+caps = ["stdio", "http", "env", "env_from", "headers", "bearer_env"]
+
+[[mcp.read]]
+file = "{user_file}"
+parser = "{parser_user}"
+
+[mcp.jsonc]
+user_file = "{user_file}"
+"#,
+        user_file = user_file.display(),
+    );
+    Host {
+        descriptor: descriptor::parse(&text, name).unwrap(),
+        bin: Some(PathBuf::from(format!("/usr/bin/{name}"))),
+    }
+}
+
+fn mcp_entry(command: &str) -> McpEntry {
+    McpEntry {
+        transport: "stdio".into(),
+        command: Some(command.into()),
+        args: vec![],
+        env: BTreeMap::new(),
+        env_from: vec![],
+        url: None,
+        headers: BTreeMap::new(),
+        bearer_token_env: None,
+        scope: ScopeKind::User,
+        repos: vec![],
+        hosts: None,
+    }
+}
+
+fn one_host_world(host: Host, snapshot: HostSnapshot, manifest: Manifest) -> World {
+    World {
+        manifest,
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![host],
+        snapshots: vec![snapshot],
+        repos: vec!["/repos/one".to_string()],
+        warnings: Vec::new(),
+    }
+}
+
+fn assert_mcp_write_is_config_transaction_never_host(plan: &agentsync::core::plan::Plan) {
+    let mcp_steps: Vec<_> = plan.steps.iter().map(|s| &s.step).collect();
+    assert!(
+        !mcp_steps.is_empty(),
+        "expected at least one step in the plan"
+    );
+    assert!(
+        mcp_steps
+            .iter()
+            .all(|s| matches!(s, Step::ConfigTransaction(_)) || matches!(s, Step::Manual(_))),
+        "the OpenCode-family MCP write path must be a guarded JSONC edit, \
+         never a host CLI call: {mcp_steps:?}"
+    );
+    assert!(
+        mcp_steps
+            .iter()
+            .any(|s| matches!(s, Step::ConfigTransaction(_))),
+        "expected a ConfigTransaction step: {mcp_steps:?}"
+    );
+}
+
+#[test]
+fn opencode_mcp_add_is_a_guarded_jsonc_transaction_not_a_host_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let user_file = tmp.path().join("opencode.jsonc");
+    let opencode = opencode_family_host("opencode", "opencode_mcp_jsonc_v1", &user_file);
+
+    let mut manifest = Manifest::default();
+    manifest.mcp.insert("demo".into(), mcp_entry("node"));
+
+    let snap = snapshot("opencode", &[]);
+    let world = one_host_world(opencode, snap, manifest);
+
+    let mut rows = world.rows();
+    assert_eq!(find(&rows, "demo").headline, "missing from opencode");
+
+    accept(&mut rows, "demo");
+    let plan = world.plan(&rows);
+    assert_mcp_write_is_config_transaction_never_host(&plan);
+}
+
+#[test]
+fn kilo_mcp_add_is_a_guarded_jsonc_transaction_not_a_host_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let user_file = tmp.path().join("kilo.jsonc");
+    let kilo = opencode_family_host("kilo", "kilo_mcp_jsonc_v1", &user_file);
+
+    let mut manifest = Manifest::default();
+    manifest.mcp.insert("demo".into(), mcp_entry("node"));
+
+    let snap = snapshot("kilo", &[]);
+    let world = one_host_world(kilo, snap, manifest);
+
+    let mut rows = world.rows();
+    assert_eq!(find(&rows, "demo").headline, "missing from kilo");
+
+    accept(&mut rows, "demo");
+    let plan = world.plan(&rows);
+    assert_mcp_write_is_config_transaction_never_host(&plan);
+}
+
+#[test]
+fn opencode_mcp_removal_is_an_exact_jsonc_origin_removal_not_a_host_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let user_file = tmp.path().join("opencode.jsonc");
+    std::fs::write(
+        &user_file,
+        r#"{"mcp":{"demo":{"type":"local","command":["node"]},"keep":{"type":"local","command":["x"]}}}"#,
+    )
+    .unwrap();
+    let opencode = opencode_family_host("opencode", "opencode_mcp_jsonc_v1", &user_file);
+
+    // Unmanaged: present on the host, absent from the manifest, so the
+    // offered action is a removal.
+    let snap = snapshot("opencode", &[(Scope::User, stdio("demo", "node"))]);
+    let world = one_host_world(opencode, snap, Manifest::default());
+
+    let mut rows = world.rows();
+    let row = rows
+        .iter_mut()
+        .find(|r| r.name == "demo" && r.domain == Domain::Mcp)
+        .expect("a row for demo");
+    row.chosen = row
+        .actions
+        .iter()
+        .position(|a| matches!(a.kind, ActionKind::Delete { .. }))
+        .expect("a delete action");
+    row.accepted = true;
+
+    let plan = world.plan(&rows);
+    assert_mcp_write_is_config_transaction_never_host(&plan);
+    assert!(
+        plan.steps.iter().all(
+            |s| !matches!(&s.step, Step::Host { argv, .. } if argv.iter().any(|a| a == "remove"))
+        ),
+        "there is no `opencode mcp remove`, so no removal argv may ever be built: {:?}",
+        plan.steps
+    );
+}
+
+#[test]
+fn kilo_mcp_removal_is_an_exact_jsonc_origin_removal_not_a_host_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let user_file = tmp.path().join("kilo.jsonc");
+    std::fs::write(
+        &user_file,
+        r#"{"mcp":{"demo":{"type":"local","command":["node"]},"keep":{"type":"local","command":["x"]}}}"#,
+    )
+    .unwrap();
+    let kilo = opencode_family_host("kilo", "kilo_mcp_jsonc_v1", &user_file);
+
+    let snap = snapshot("kilo", &[(Scope::User, stdio("demo", "node"))]);
+    let world = one_host_world(kilo, snap, Manifest::default());
+
+    let mut rows = world.rows();
+    let row = rows
+        .iter_mut()
+        .find(|r| r.name == "demo" && r.domain == Domain::Mcp)
+        .expect("a row for demo");
+    row.chosen = row
+        .actions
+        .iter()
+        .position(|a| matches!(a.kind, ActionKind::Delete { .. }))
+        .expect("a delete action");
+    row.accepted = true;
+
+    let plan = world.plan(&rows);
+    assert_mcp_write_is_config_transaction_never_host(&plan);
 }

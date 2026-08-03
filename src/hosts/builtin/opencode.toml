@@ -18,6 +18,29 @@ name = "opencode"
 display = "OpenCode"
 detect = { bin = "opencode" }
 
+# Measured: `mcp.<name>` accepts type/command/environment/url/headers/
+# enabled/timeout/cwd, round-tripped through `debug config`. There is no
+# `opencode mcp remove` command — `opencode mcp` offers only add, list, auth,
+# logout, debug — so add/update/remove all go through a guarded JSONC edit
+# against the raw file (`jsonc`, below), never a CLI call and never
+# `debug config` output (its `{env:NAME}` substitution destroys the
+# distinction between a literal and a reference).
+[mcp]
+scopes = ["user", "project"]
+caps = ["stdio", "http", "env", "env_from", "headers", "bearer_env"]
+
+[[mcp.read]]
+file = "{xdg_config}/opencode/opencode.jsonc"
+parser = "opencode_mcp_jsonc_v1"
+
+[[mcp.read]]
+file = "{repo}/.opencode/opencode.jsonc"
+parser = "opencode_mcp_project_jsonc_v1"
+
+[mcp.jsonc]
+user_file = "{xdg_config}/opencode/opencode.jsonc"
+project_file = "{repo}/.opencode/opencode.jsonc"
+
 [instructions]
 user = "{xdg_config}/opencode/AGENTS.md"
 project = "{repo}/AGENTS.md"

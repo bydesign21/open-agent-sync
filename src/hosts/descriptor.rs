@@ -115,6 +115,29 @@ pub struct AuthProbe {
     pub parser: String,
 }
 
+/// Where a host keeps its writable JSONC `mcp` section.
+///
+/// This is the alternative write mechanism to [`McpAdd`]/[`Invocation`]:
+/// instead of invoking the host's CLI, agentsync edits the raw JSONC file
+/// directly through a guarded [`crate::transaction::ConfigTransaction`].
+///
+/// Measured against opencode 1.18.11: `opencode mcp` offers only `add`,
+/// `list`, `auth`, `logout`, `debug` — there is no `mcp remove` command, so a
+/// host using this write mode cannot use CLI-based removal at all. Rather
+/// than mixing write mechanisms (CLI add, JSONC remove), add/update/remove
+/// all go through the same guarded JSONC edit for a host declaring this
+/// section.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpJsoncWrite {
+    /// User-scope config file. `{xdg_config}`-templated for the OpenCode
+    /// family.
+    pub user_file: String,
+    /// Project-scope config file. `{repo}` is substituted per repo. Omit for
+    /// a host with no project-scope JSONC file.
+    #[serde(default)]
+    pub project_file: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct McpSection {
     /// Scopes this host can represent. A scope the host lacks renders blocked.
@@ -123,8 +146,17 @@ pub struct McpSection {
     /// lacks makes the row blocked rather than silently lossy.
     pub caps: Vec<Cap>,
     pub read: Vec<ReadSource>,
-    pub add: McpAdd,
-    pub remove: Invocation,
+
+    /// CLI-based write path. Exactly one of this pair or `jsonc` is set.
+    #[serde(default)]
+    pub add: Option<McpAdd>,
+    #[serde(default)]
+    pub remove: Option<Invocation>,
+
+    /// Guarded-JSONC-edit write path. Exactly one of `jsonc` or the
+    /// `add`/`remove` pair is set.
+    #[serde(default)]
+    pub jsonc: Option<McpJsoncWrite>,
 
     /// How to authenticate a server interactively. Declared so that pushing an
     /// OAuth-backed server can tell the user the exact command, instead of
@@ -325,35 +357,49 @@ fn validate(d: &HostDescriptor) -> Result<()> {
         anyhow::bail!("`name` must not be empty");
     }
     if let Some(mcp) = &d.mcp {
-        match mcp.add.style {
-            AddStyle::Json => {
-                if !mcp.add.argv.iter().any(|a| a.contains("{json}")) {
-                    anyhow::bail!("mcp.add.style = \"json\" requires `{{json}}` in argv");
+        match (&mcp.add, &mcp.remove, &mcp.jsonc) {
+            (Some(_), Some(_), None) | (None, None, Some(_)) => {}
+            (None, None, None) => anyhow::bail!(
+                "mcp declares neither add/remove (CLI write) nor jsonc (guarded JSONC edit)"
+            ),
+            _ => anyhow::bail!(
+                "mcp must declare either add+remove (CLI write) or jsonc (guarded JSONC \
+                 edit), never a mix of both"
+            ),
+        }
+        if let Some(add) = &mcp.add {
+            match add.style {
+                AddStyle::Json => {
+                    if !add.argv.iter().any(|a| a.contains("{json}")) {
+                        anyhow::bail!("mcp.add.style = \"json\" requires `{{json}}` in argv");
+                    }
+                    if add.json_serializer.is_none() {
+                        anyhow::bail!("mcp.add.style = \"json\" requires `json_serializer`");
+                    }
                 }
-                if mcp.add.json_serializer.is_none() {
-                    anyhow::bail!("mcp.add.style = \"json\" requires `json_serializer`");
-                }
-            }
-            AddStyle::Flags => {
-                if mcp.add.argv_stdio.is_empty() && mcp.add.argv_http.is_empty() {
-                    anyhow::bail!(
-                        "mcp.add.style = \"flags\" requires argv_stdio, argv_http, or both"
-                    );
-                }
-                if mcp.supports(Cap::Env)
-                    && (mcp.add.env_flag.is_none() || mcp.add.env_format.is_none())
-                {
-                    anyhow::bail!("declares the `env` capability but no env_flag/env_format");
-                }
-                if mcp.supports(Cap::Headers)
-                    && (mcp.add.header_flag.is_none() || mcp.add.header_format.is_none())
-                {
-                    anyhow::bail!(
-                        "declares the `headers` capability but no header_flag/header_format"
-                    );
-                }
-                if mcp.supports(Cap::BearerEnv) && mcp.add.bearer_env_flag.is_none() {
-                    anyhow::bail!("declares the `bearer_env` capability but no bearer_env_flag");
+                AddStyle::Flags => {
+                    if add.argv_stdio.is_empty() && add.argv_http.is_empty() {
+                        anyhow::bail!(
+                            "mcp.add.style = \"flags\" requires argv_stdio, argv_http, or both"
+                        );
+                    }
+                    if mcp.supports(Cap::Env)
+                        && (add.env_flag.is_none() || add.env_format.is_none())
+                    {
+                        anyhow::bail!("declares the `env` capability but no env_flag/env_format");
+                    }
+                    if mcp.supports(Cap::Headers)
+                        && (add.header_flag.is_none() || add.header_format.is_none())
+                    {
+                        anyhow::bail!(
+                            "declares the `headers` capability but no header_flag/header_format"
+                        );
+                    }
+                    if mcp.supports(Cap::BearerEnv) && add.bearer_env_flag.is_none() {
+                        anyhow::bail!(
+                            "declares the `bearer_env` capability but no bearer_env_flag"
+                        );
+                    }
                 }
             }
         }

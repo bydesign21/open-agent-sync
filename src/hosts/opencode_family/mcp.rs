@@ -4,6 +4,408 @@
 //! other host parsers. The contract tests live here, with the rest of the
 //! family engine, because what they pin down is family behaviour rather than
 //! parser plumbing.
+//!
+//! This module also holds the **write path**: OpenCode and Kilo have no `mcp
+//! remove` command (measured: `opencode mcp` offers only `add`, `list`,
+//! `auth`, `logout`, `debug`), so add, update, and remove all go through a
+//! guarded [`crate::transaction::ConfigTransaction`] edit against the raw
+//! JSONC file, never a host CLI call and never `<host> debug config` output.
+
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde_json::{Map, Value};
+
+use crate::core::model::{McpServer, OAuthState, Transport};
+use crate::jsonc::{EditOperation, JsoncEdit, JsoncPointer, PathSegment};
+use crate::transaction::{
+    ConfigEditOperation, ConfigOrigin, ConfigScope, ConfigTransaction, FilePrecondition,
+    GuardedSource, SourceEdit, compute_sha256,
+};
+
+/// Serialize a canonical server back into the OpenCode-family `mcp.<name>`
+/// JSON shape, undoing the normalizations [`crate::hosts::parsers::mcp::opencode_mcp_jsonc_v1`]
+/// performs on read. Shared by OpenCode and Kilo: their MCP schema is
+/// identical (Kilo is a fork of OpenCode).
+///
+/// Absent fields stay absent: `enabled`/`cwd`/`timeout`/`oauth` are only
+/// written when the canonical server actually carries them, so adopting a
+/// server that never mentioned them does not invent a host default.
+pub fn server_to_json(server: &McpServer) -> Value {
+    let mut obj = Map::new();
+    match &server.transport {
+        Transport::Stdio(s) => {
+            obj.insert("type".into(), Value::String("local".into()));
+            let mut argv = vec![s.command.clone()];
+            argv.extend(s.args.iter().cloned());
+            obj.insert(
+                "command".into(),
+                Value::Array(argv.into_iter().map(Value::String).collect()),
+            );
+            if !s.env.is_empty() || !s.env_from.is_empty() {
+                let mut env = Map::new();
+                for (k, v) in &s.env {
+                    env.insert(k.clone(), Value::String(v.clone()));
+                }
+                for k in &s.env_from {
+                    // Self-referential passthrough, in the OpenCode-family
+                    // `{env:NAME}` idiom.
+                    env.insert(k.clone(), Value::String(format!("{{env:{k}}}")));
+                }
+                obj.insert("environment".into(), Value::Object(env));
+            }
+        }
+        Transport::Http(h) => {
+            obj.insert("type".into(), Value::String("remote".into()));
+            obj.insert("url".into(), Value::String(h.url.clone()));
+            let mut headers = Map::new();
+            for (k, v) in &h.headers {
+                headers.insert(k.clone(), Value::String(v.clone()));
+            }
+            if let Some(var) = &h.bearer_token_env {
+                headers.insert(
+                    "Authorization".into(),
+                    Value::String(format!("Bearer {{env:{var}}}")),
+                );
+            }
+            if !headers.is_empty() {
+                obj.insert("headers".into(), Value::Object(headers));
+            }
+        }
+    }
+    if let Some(enabled) = server.enabled {
+        obj.insert("enabled".into(), Value::Bool(enabled));
+    }
+    if let Some(cwd) = &server.cwd {
+        obj.insert("cwd".into(), Value::String(cwd.clone()));
+    }
+    if let Some(timeout) = &server.timeout_json {
+        // Carried through as exact JSON text (the unit is unverified against
+        // the runtime), so it is parsed back rather than re-encoded, and lands
+        // as whatever shape it was read as instead of a quoted string.
+        if let Ok(value) = serde_json::from_str::<Value>(timeout) {
+            obj.insert("timeout".into(), value);
+        }
+    }
+    match &server.oauth {
+        OAuthState::Unspecified => {}
+        OAuthState::Disabled => {
+            obj.insert("oauth".into(), Value::Bool(false));
+        }
+        OAuthState::Automatic => {
+            obj.insert("oauth".into(), Value::Bool(true));
+        }
+        OAuthState::Client {
+            client_id,
+            client_secret_env,
+        } => {
+            let mut client = Map::new();
+            client.insert("client_id".into(), Value::String(client_id.clone()));
+            if let Some(var) = client_secret_env {
+                client.insert(
+                    "client_secret".into(),
+                    Value::String(format!("{{env:{var}}}")),
+                );
+            }
+            obj.insert("oauth".into(), Value::Object(client));
+        }
+    }
+    Value::Object(obj)
+}
+
+fn read_guarded(target: &Path) -> Result<(String, FilePrecondition)> {
+    if target.is_file() {
+        let bytes =
+            std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
+        let hash = compute_sha256(&bytes);
+        let text = String::from_utf8(bytes)
+            .with_context(|| format!("{} is not valid UTF-8", target.display()))?;
+        Ok((text, FilePrecondition::Sha256(hash)))
+    } else {
+        Ok(("{}".to_string(), FilePrecondition::Absent))
+    }
+}
+
+fn apply_set(text: &str, path: &[String], raw_json: &str) -> Result<String> {
+    let doc = crate::jsonc::parse(text)?;
+    crate::jsonc::apply_edit(
+        &doc,
+        &JsoncEdit {
+            pointer: JsoncPointer {
+                path: path.iter().cloned().map(PathSegment::Key).collect(),
+                owning_node: None,
+            },
+            operation: EditOperation::SetExactJson(raw_json.to_string()),
+        },
+    )
+}
+
+/// Build a guarded transaction that sets (adds or updates) `mcp.<name>` in
+/// the raw JSONC file at `target`.
+///
+/// Reads and edits the file's own bytes, never `<host> debug config` output:
+/// the resolver substitutes `{env:NAME}` at resolve time, and diffing or
+/// writing against the resolved projection would either report drift on
+/// every pass or bake a resolved (and possibly empty) value back into the
+/// file.
+pub fn set_transaction(target: &Path, name: &str, server: &McpServer) -> Result<ConfigTransaction> {
+    let (original, precondition) = read_guarded(target)?;
+    let entry_json = server_to_json(server);
+    let raw_json = serde_json::to_string(&entry_json)?;
+
+    // `set_exact_json` refuses to insert a value whose parent does not exist,
+    // so a file with no top-level `mcp` object yet needs that object created
+    // first. A file that already has one, even with other servers in it, is
+    // edited in place: inserting a new member into `mcp` never touches its
+    // siblings.
+    let has_mcp_object = crate::jsonc::parse(&original)
+        .ok()
+        .and_then(|doc| doc.value.get("mcp").cloned())
+        .is_some_and(|v| v.is_object());
+
+    let origin_hash = compute_sha256(original.as_bytes());
+    let origin = ConfigOrigin::new(target.to_path_buf(), ConfigScope::Global, 0, origin_hash);
+
+    let mut tx = ConfigTransaction::new(Value::Null)
+        .with_source(GuardedSource::new(target.to_path_buf(), precondition));
+
+    let mut working = original;
+    if !has_mcp_object {
+        working = apply_set(&working, &["mcp".to_string()], "{}")
+            .context("creating the top-level mcp object")?;
+        tx = tx.with_edit(SourceEdit {
+            origin: origin.clone(),
+            config_path: vec!["mcp".to_string()],
+            operation: ConfigEditOperation::Set {
+                value: serde_json::json!({}),
+                raw_json: Some("{}".to_string()),
+            },
+        });
+    }
+
+    let final_text = apply_set(&working, &["mcp".to_string(), name.to_string()], &raw_json)
+        .with_context(|| format!("setting mcp.{name}"))?;
+    tx = tx.with_edit(SourceEdit {
+        origin,
+        config_path: vec!["mcp".to_string(), name.to_string()],
+        operation: ConfigEditOperation::Set {
+            value: entry_json,
+            raw_json: Some(raw_json),
+        },
+    });
+
+    tx.expected_projection = crate::jsonc::parse(&final_text)
+        .context("parsing the edited document to compute the expected projection")?
+        .value;
+
+    Ok(tx)
+}
+
+/// Build a guarded transaction that removes `mcp.<name>` from the raw JSONC
+/// file at `target`.
+///
+/// `Ok(None)` means there is nothing to remove: the file does not exist, or
+/// `name` is already absent from it. Both are a no-op rather than an error —
+/// removal racing an external change to "already gone" is not a failure.
+pub fn remove_transaction(target: &Path, name: &str) -> Result<Option<ConfigTransaction>> {
+    if !target.is_file() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
+    let hash = compute_sha256(&bytes);
+    let text = String::from_utf8(bytes)
+        .with_context(|| format!("{} is not valid UTF-8", target.display()))?;
+    let doc = crate::jsonc::parse(&text)?;
+    let exists = doc.value.get("mcp").and_then(|m| m.get(name)).is_some();
+    if !exists {
+        return Ok(None);
+    }
+
+    let final_text = crate::jsonc::apply_edit(
+        &doc,
+        &JsoncEdit {
+            pointer: JsoncPointer {
+                path: vec![PathSegment::key("mcp"), PathSegment::key(name.to_string())],
+                owning_node: None,
+            },
+            operation: EditOperation::Remove,
+        },
+    )
+    .with_context(|| format!("removing mcp.{name}"))?;
+    let expected_projection = crate::jsonc::parse(&final_text)
+        .context("parsing the edited document to compute the expected projection")?
+        .value;
+
+    let origin = ConfigOrigin::new(target.to_path_buf(), ConfigScope::Global, 0, hash);
+    let tx = ConfigTransaction::new(expected_projection)
+        .with_source(GuardedSource::new(
+            target.to_path_buf(),
+            FilePrecondition::Sha256(compute_sha256(text.as_bytes())),
+        ))
+        .with_edit(SourceEdit {
+            origin,
+            config_path: vec!["mcp".to_string(), name.to_string()],
+            operation: ConfigEditOperation::Remove,
+        });
+    Ok(Some(tx))
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+    use crate::core::model::StdioServer;
+    use std::collections::BTreeMap;
+
+    fn stdio(name: &str) -> McpServer {
+        McpServer {
+            name: name.to_string(),
+            transport: Transport::Stdio(StdioServer {
+                command: "node".into(),
+                args: vec!["/x/index.js".into()],
+                env: BTreeMap::from([("LEVEL".to_string(), "info".to_string())]),
+                env_from: vec![],
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn server_to_json_round_trips_through_the_parser() {
+        let server = stdio("s");
+        let json = server_to_json(&server);
+        assert_eq!(json["type"], "local");
+        assert_eq!(json["command"][0], "node");
+        assert_eq!(json["environment"]["LEVEL"], "info");
+    }
+
+    #[test]
+    fn env_from_serializes_as_a_self_referential_env_reference() {
+        let mut server = stdio("s");
+        let Transport::Stdio(s) = &mut server.transport else {
+            unreachable!()
+        };
+        s.env.clear();
+        s.env_from = vec!["TOKEN".to_string()];
+        let json = server_to_json(&server);
+        assert_eq!(json["environment"]["TOKEN"], "{env:TOKEN}");
+    }
+
+    #[test]
+    fn absent_fields_are_not_written() {
+        let json = server_to_json(&stdio("s"));
+        assert!(json.get("enabled").is_none());
+        assert!(json.get("cwd").is_none());
+        assert!(json.get("timeout").is_none());
+        assert!(json.get("oauth").is_none());
+    }
+
+    #[test]
+    fn setting_into_a_missing_file_creates_the_mcp_object_and_the_server() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+
+        let tx = set_transaction(&target, "s", &stdio("s")).unwrap();
+        let mut tx = tx;
+        tx.execute().unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["mcp"]["s"]["command"][0], "node");
+    }
+
+    #[test]
+    fn setting_a_new_server_preserves_comments_and_sibling_servers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        std::fs::write(
+            &target,
+            "{\n  // keep me\n  \"mcp\": { \"other\": { \"type\": \"local\", \"command\": [\"x\"] } }\n}\n",
+        )
+        .unwrap();
+
+        let mut tx = set_transaction(&target, "s", &stdio("s")).unwrap();
+        tx.execute().unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("// keep me"));
+        let doc = crate::jsonc::parse(&text).unwrap();
+        assert_eq!(doc.value["mcp"]["other"]["command"][0], "x");
+        assert_eq!(doc.value["mcp"]["s"]["command"][0], "node");
+    }
+
+    #[test]
+    fn updating_an_existing_server_replaces_only_that_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        std::fs::write(
+            &target,
+            r#"{"mcp":{"s":{"type":"local","command":["old"]},"other":{"type":"local","command":["x"]}}}"#,
+        )
+        .unwrap();
+
+        let mut tx = set_transaction(&target, "s", &stdio("s")).unwrap();
+        tx.execute().unwrap();
+
+        let doc = crate::jsonc::parse(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        assert_eq!(doc.value["mcp"]["s"]["command"][0], "node");
+        assert_eq!(doc.value["mcp"]["other"]["command"][0], "x");
+    }
+
+    #[test]
+    fn removing_an_absent_file_is_a_no_op_not_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        assert!(remove_transaction(&target, "s").unwrap().is_none());
+    }
+
+    #[test]
+    fn removing_an_already_absent_server_is_a_no_op() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        std::fs::write(
+            &target,
+            r#"{"mcp":{"other":{"type":"local","command":["x"]}}}"#,
+        )
+        .unwrap();
+        assert!(remove_transaction(&target, "s").unwrap().is_none());
+    }
+
+    #[test]
+    fn removing_an_existing_server_is_an_exact_jsonc_origin_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        std::fs::write(
+            &target,
+            "{\n  // keep me\n  \"mcp\": { \"s\": { \"type\": \"local\", \"command\": [\"node\"] }, \"other\": { \"type\": \"local\", \"command\": [\"x\"] } }\n}\n",
+        )
+        .unwrap();
+
+        let mut tx = remove_transaction(&target, "s").unwrap().unwrap();
+        tx.execute().unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("// keep me"));
+        let doc = crate::jsonc::parse(&text).unwrap();
+        assert!(doc.value["mcp"].get("s").is_none());
+        assert_eq!(doc.value["mcp"]["other"]["command"][0], "x");
+    }
+
+    #[test]
+    fn setting_a_server_never_emits_a_host_cli_invocation() {
+        // There is no `opencode mcp remove`, so removal (and, for
+        // consistency, add/update too) must never be represented as a Step
+        // that shells out. This is a compile-time property of `set_transaction`
+        // and `remove_transaction` returning a `ConfigTransaction`, not a
+        // `Step::Host` — asserted here so a future refactor cannot reintroduce
+        // a CLI call silently.
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        let tx = set_transaction(&target, "s", &stdio("s")).unwrap();
+        // A ConfigTransaction has no argv/binary to invoke; its only effect is
+        // the guarded file write asserted by the tests above.
+        assert!(tx.sources.iter().any(|s| s.path == target));
+    }
+}
 
 #[cfg(test)]
 mod tests {

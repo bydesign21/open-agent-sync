@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use anyhow::Result;
+
 use crate::core::diff::{
     Action, ActionKind, Domain, Row, RowKey, Severity, join_hosts, removal_actions,
 };
@@ -656,15 +658,16 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                     continue;
                 }
                 for scope in dedup(&scopes) {
-                    if let Ok(argv) = host.mcp_remove_argv(&name, &scope) {
-                        plan.push(
+                    match removal_step(host, &name, &scope) {
+                        Ok(Some(step)) => plan.push(
                             format!("remove {name} from {} ({scope})", host.name()),
-                            Step::Host {
-                                host: host.name().to_string(),
-                                argv,
-                                cwd: cwd_for(&scope),
-                            },
-                        );
+                            step,
+                        ),
+                        Ok(None) => {}
+                        Err(e) => plan.note(format!(
+                            "{name}: cannot build {} removal \u{2014} {e:#}",
+                            host.name()
+                        )),
                     }
                 }
             }
@@ -907,10 +910,41 @@ fn push_entry_to(
             if existing.is_some_and(|s| *s == server) {
                 continue;
             }
-            if existing.is_some() {
-                if !replace {
-                    continue;
+            if existing.is_some() && !replace {
+                continue;
+            }
+
+            if host.uses_jsonc_mcp_write() {
+                // A guarded JSONC `Set` upserts in place: it replaces the
+                // value at `mcp.<name>` if present, or inserts it if absent.
+                // There is no separate remove-then-add step, and no CLI call
+                // at all — measured: `opencode mcp` has no `remove`
+                // subcommand, so add and remove must share one write
+                // mechanism rather than mixing a CLI add with a JSONC-edit
+                // removal.
+                match host.mcp_jsonc_target(scope).and_then(|target| {
+                    crate::hosts::opencode_family::mcp::set_transaction(&target, name, &server)
+                }) {
+                    Ok(tx) => plan.push(
+                        format!("set {name} on {hname} ({scope})"),
+                        Step::ConfigTransaction(tx),
+                    ),
+                    Err(e) => plan.note(format!(
+                        "{name}: cannot build {hname} config edit \u{2014} {e:#}"
+                    )),
                 }
+                if server.needs_interactive_login()
+                    && let Some(command) = host.mcp_login_command(name)
+                {
+                    plan.push(
+                        format!("log in to {name} on {hname}"),
+                        Step::Manual(command),
+                    );
+                }
+                continue;
+            }
+
+            if existing.is_some() {
                 // `add` refuses to overwrite, so clear the old definition first.
                 match host.mcp_remove_argv(name, scope) {
                     Ok(argv) => plan.push(
@@ -969,18 +1003,40 @@ fn remove_from_hosts(
             if !keep(&scope) || snap.mcp_at(&scope, name).is_none() {
                 continue;
             }
-            if let Ok(argv) = host.mcp_remove_argv(name, &scope) {
-                plan.push(
+            match removal_step(host, name, &scope) {
+                Ok(Some(step)) => plan.push(
                     format!("remove {name} from {} ({scope})", host.name()),
-                    Step::Host {
-                        host: host.name().to_string(),
-                        argv,
-                        cwd: cwd_for(&scope),
-                    },
-                );
+                    step,
+                ),
+                Ok(None) => {}
+                Err(e) => plan.note(format!(
+                    "{name}: cannot build {} removal \u{2014} {e:#}",
+                    host.name()
+                )),
             }
         }
     }
+}
+
+/// Build the removal step for `name` at `scope` on `host`, through whichever
+/// write mechanism the host declares.
+///
+/// `Ok(None)` means there is nothing to remove: a jsonc-write host whose file
+/// has already lost the entry (a race with an external change, or an earlier
+/// step in the same plan already dropped it), which is a no-op rather than an
+/// error.
+fn removal_step(host: &Host, name: &str, scope: &Scope) -> Result<Option<Step>> {
+    if host.uses_jsonc_mcp_write() {
+        let target = host.mcp_jsonc_target(scope)?;
+        let tx = crate::hosts::opencode_family::mcp::remove_transaction(&target, name)?;
+        return Ok(tx.map(Step::ConfigTransaction));
+    }
+    let argv = host.mcp_remove_argv(name, scope)?;
+    Ok(Some(Step::Host {
+        host: host.name().to_string(),
+        argv,
+        cwd: cwd_for(scope),
+    }))
 }
 
 /// Capabilities the manifest entry needs, for `doctor`.
