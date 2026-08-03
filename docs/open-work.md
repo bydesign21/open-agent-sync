@@ -38,10 +38,10 @@ The originally-planned isolated worktree was abandoned early; every commit after
 |---|---|---|
 | Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` | `git worktree list` |
 | Active branch | `master` in the main checkout | `git status --short --branch` |
-| Local `master` HEAD | see `git rev-parse HEAD`; OW-002..OW-010 all merged | `git rev-parse HEAD` |
-| `master` ahead of `origin/master` by | 55 commits, unpushed | `git status --short --branch` |
-| `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` | `git ls-remote` |
-| Test suite on `master` | 497 pass, 0 fail, 2 ignored (fixture writers); passes twice consecutively | `cargo test --locked` |
+| Local `master` HEAD | `e58af1b`; OW-002..OW-011 all merged | `git rev-parse HEAD` |
+| `master` ahead of `origin/master` by | 3 commits unpushed; `origin/master` is at `c4aa841` | `git status --short --branch` |
+| `origin/master` | `c4aa841` — **pushed**, contains both defects fixed after review | `git ls-remote` |
+| Test suite on `master` | 405 lib + 2 + 28 + 72 + 3 pass, 0 fail; three consecutive clean runs | `cargo test --locked` |
 | Package version | `0.0.9` | `Cargo.toml` |
 | Local and remote `v0.0.9` tag | absent | `git ls-remote --tags` |
 | GitHub `v0.0.9` release | not created | not checked this session |
@@ -67,7 +67,7 @@ git log --oneline --decorate -16
 git ls-remote --heads --tags origin master refs/tags/v0.0.9
 ```
 
-Expected `master` HEAD: `77ee922`.
+Expected `master` HEAD: `e58af1b`.
 
 ## Work already completed and independently verified
 
