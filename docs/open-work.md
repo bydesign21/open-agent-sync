@@ -39,8 +39,8 @@ treated as the source of truth.
 |---|---|---|
 | Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` | `git worktree list` |
 | Active branch | `master` in the main checkout | `git status --short --branch` |
-| Local `master` HEAD | `0b466c6` "Stop transaction writes from touching unedited sources" | `git rev-parse HEAD` |
-| `master` ahead of `origin/master` by | 14 commits, unpushed | `git status --short --branch` |
+| Local `master` HEAD | `ebe268c` "Record OpenCode family MCP progress" | `git rev-parse HEAD` |
+| `master` ahead of `origin/master` by | 22 commits, unpushed | `git status --short --branch` |
 | Stale worktree | `.claude/worktrees/codex-hook-shim-correctness` at `7559e08` | `git worktree list` |
 | Stale feature branch | `feature/codex-hook-shim-correctness`, superseded, do not build on | `git log` |
 | `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` | `git ls-remote` |
@@ -64,7 +64,7 @@ git log --oneline --decorate -16
 git ls-remote --heads --tags origin master refs/tags/v0.0.9
 ```
 
-Expected `master` HEAD: `0b466c6`.
+Expected `master` HEAD: `ebe268c`.
 
 ## Work already completed and independently verified
 
