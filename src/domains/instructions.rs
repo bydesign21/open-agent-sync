@@ -608,6 +608,12 @@ fn manifest_source(world: &World, scope: &Scope) -> String {
 }
 
 fn link_into(world: &World, scope: &Scope, canonical: &Path, hosts: &[String], plan: &mut Plan) {
+    // Several hosts can share the same instruction path (a project's
+    // `AGENTS.md` is read by Codex, OpenCode and Kilo alike). Push at most one
+    // `Link` step per distinct path, so a scope shared by N hosts produces one
+    // filesystem operation rather than N redundant link-replace cycles.
+    let mut hosts_by_path: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
+
     for (host, snap) in world.detected() {
         let hname = host.name().to_string();
         if !hosts.contains(&hname) {
@@ -626,8 +632,12 @@ fn link_into(world: &World, scope: &Scope, canonical: &Path, hosts: &[String], p
         ) {
             continue;
         }
+        hosts_by_path.entry(path).or_default().push(hname);
+    }
+
+    for (path, sharing_hosts) in hosts_by_path {
         plan.push(
-            format!("link {} into {hname}", label(scope)),
+            format!("link {} into {}", label(scope), join_hosts(&sharing_hosts)),
             Step::Fs(FsOp::Link {
                 target: canonical.to_path_buf(),
                 link: path,
