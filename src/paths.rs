@@ -71,6 +71,18 @@ pub fn backups_dir() -> PathBuf {
     config_dir().join("backups")
 }
 
+/// State directory for agentsync-managed files.
+///
+/// Uses `AGENTSYNC_STATE_HOME` if set, otherwise defaults to `~/.agentsync`.
+pub fn state_dir() -> Result<PathBuf> {
+    if let Ok(explicit) = std::env::var("AGENTSYNC_STATE_HOME") {
+        return Ok(PathBuf::from(explicit));
+    }
+    let home = dirs::home_dir()
+        .context("determining home directory for state directory")?;
+    Ok(home.join(".agentsync"))
+}
+
 /// Per-repo manifest, committed alongside the code it configures.
 pub fn project_manifest_path(repo: &Path) -> PathBuf {
     repo.join(".agentsync.toml")

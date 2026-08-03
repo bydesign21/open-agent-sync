@@ -17,11 +17,13 @@
 pub mod core;
 pub mod domains;
 pub mod hosts;
+pub mod jsonc;
 pub mod manifest;
 pub mod paths;
 pub mod platform;
 pub mod report;
 pub mod shim;
+pub mod transaction;
 #[cfg(test)]
 pub(crate) mod testutil;
 pub mod tui;
