@@ -7,10 +7,31 @@
 # unrestricted entry would be reported as permanently, unfixably blocked
 # there — real divergence the tool must report forever, not a convergence
 # bug, but noise this gate does not need for its own purposes.
+#
+# THREE servers, not one: a live regression check for the N-server sync bug
+# (batching N per-server `ConfigTransaction`s against the same guarded JSONC
+# file, each stamped with the same plan-time hash, so only the first write
+# ever survived and the rest failed with a spurious precondition mismatch).
+# A single-server fixture could not have caught that class of bug, and this
+# gate is what is supposed to catch it live going forward.
 [mcp.agentsync-e2e-demo]
 transport = "stdio"
 command = "true"
 args = ["--stdio"]
+scope = "user"
+hosts = ["opencode", "kilo"]
+
+[mcp.agentsync-e2e-demo-2]
+transport = "stdio"
+command = "true"
+args = ["--stdio", "--second"]
+scope = "user"
+hosts = ["opencode", "kilo"]
+
+[mcp.agentsync-e2e-demo-3]
+transport = "stdio"
+command = "true"
+args = ["--stdio", "--third"]
 scope = "user"
 hosts = ["opencode", "kilo"]
 

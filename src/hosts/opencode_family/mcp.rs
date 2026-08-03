@@ -140,6 +140,130 @@ fn apply_set(text: &str, path: &[String], raw_json: &str) -> Result<String> {
     )
 }
 
+/// One queued change to `mcp.<name>` for [`set_transaction_batch`].
+pub enum McpJsoncOp {
+    /// Add or update the entry.
+    Set(Box<McpServer>),
+    /// Remove the entry, if present.
+    Remove,
+}
+
+/// Build ONE guarded transaction that applies every `(name, op)` pair in
+/// `ops` to the same target file.
+///
+/// This exists because two servers landing in the same file can never be
+/// represented as two separate [`ConfigTransaction`]s: each one reads the
+/// file's hash at plan time as its precondition, so both would carry the
+/// *same* original hash. At apply time the first write changes the file and
+/// every other transaction's precondition then fails — the guard behaving
+/// exactly as designed, against a plan that was wrong to split the write in
+/// the first place. Folding every op destined for one file into one
+/// transaction, with one precondition and one write, is the only correct
+/// shape (OW-002 invariant 6, "MCP ... edits in one file compose into one
+/// write").
+///
+/// `Ok(None)` means nothing to do: every op was a no-op removal of an
+/// already-absent entry.
+pub fn set_transaction_batch(
+    target: &Path,
+    ops: &[(String, McpJsoncOp)],
+) -> Result<Option<ConfigTransaction>> {
+    if ops.is_empty() {
+        return Ok(None);
+    }
+
+    let (original, precondition) = read_guarded(target)?;
+    let origin_hash = compute_sha256(original.as_bytes());
+    let origin = ConfigOrigin::new(target.to_path_buf(), ConfigScope::Global, 0, origin_hash);
+
+    let mut tx = ConfigTransaction::new(Value::Null)
+        .with_source(GuardedSource::new(target.to_path_buf(), precondition));
+
+    // `set_exact_json` refuses to insert a value whose parent does not exist,
+    // so a file with no top-level `mcp` object yet needs that object created
+    // first — but only once, however many `Set` ops in this batch need it. A
+    // file that already has one, even with other servers in it, is edited in
+    // place: inserting or removing a member of `mcp` never touches its
+    // siblings.
+    let mut has_mcp_object = crate::jsonc::parse(&original)
+        .ok()
+        .and_then(|doc| doc.value.get("mcp").cloned())
+        .is_some_and(|v| v.is_object());
+
+    let mut working = original;
+    let mut any_edit = false;
+
+    for (name, op) in ops {
+        match op {
+            McpJsoncOp::Set(server) => {
+                if !has_mcp_object {
+                    working = apply_set(&working, &["mcp".to_string()], "{}")
+                        .context("creating the top-level mcp object")?;
+                    tx = tx.with_edit(SourceEdit {
+                        origin: origin.clone(),
+                        config_path: vec!["mcp".to_string()],
+                        operation: ConfigEditOperation::Set {
+                            value: serde_json::json!({}),
+                            raw_json: Some("{}".to_string()),
+                        },
+                    });
+                    has_mcp_object = true;
+                }
+
+                let entry_json = server_to_json(server);
+                let raw_json = serde_json::to_string(&entry_json)?;
+                working = apply_set(&working, &["mcp".to_string(), name.clone()], &raw_json)
+                    .with_context(|| format!("setting mcp.{name}"))?;
+                tx = tx.with_edit(SourceEdit {
+                    origin: origin.clone(),
+                    config_path: vec!["mcp".to_string(), name.clone()],
+                    operation: ConfigEditOperation::Set {
+                        value: entry_json,
+                        raw_json: Some(raw_json),
+                    },
+                });
+                any_edit = true;
+            }
+            McpJsoncOp::Remove => {
+                let exists = crate::jsonc::parse(&working)
+                    .ok()
+                    .and_then(|doc| doc.value.get("mcp").and_then(|m| m.get(name)).cloned())
+                    .is_some();
+                if !exists {
+                    continue;
+                }
+                working = crate::jsonc::apply_edit(
+                    &crate::jsonc::parse(&working)?,
+                    &JsoncEdit {
+                        pointer: JsoncPointer {
+                            path: vec![PathSegment::key("mcp"), PathSegment::key(name.clone())],
+                            owning_node: None,
+                        },
+                        operation: EditOperation::Remove,
+                    },
+                )
+                .with_context(|| format!("removing mcp.{name}"))?;
+                tx = tx.with_edit(SourceEdit {
+                    origin: origin.clone(),
+                    config_path: vec!["mcp".to_string(), name.clone()],
+                    operation: ConfigEditOperation::Remove,
+                });
+                any_edit = true;
+            }
+        }
+    }
+
+    if !any_edit {
+        return Ok(None);
+    }
+
+    tx.expected_projection = crate::jsonc::parse(&working)
+        .context("parsing the edited document to compute the expected projection")?
+        .value;
+
+    Ok(Some(tx))
+}
+
 /// Build a guarded transaction that sets (adds or updates) `mcp.<name>` in
 /// the raw JSONC file at `target`.
 ///
@@ -148,57 +272,17 @@ fn apply_set(text: &str, path: &[String], raw_json: &str) -> Result<String> {
 /// writing against the resolved projection would either report drift on
 /// every pass or bake a resolved (and possibly empty) value back into the
 /// file.
+///
+/// A thin single-op wrapper over [`set_transaction_batch`]; callers touching
+/// more than one server in the same file must use that directly (or, in the
+/// domain layer, [`crate::domains::mcp`]'s batching), not one call per
+/// server, or the plan-time precondition race described there recurs.
 pub fn set_transaction(target: &Path, name: &str, server: &McpServer) -> Result<ConfigTransaction> {
-    let (original, precondition) = read_guarded(target)?;
-    let entry_json = server_to_json(server);
-    let raw_json = serde_json::to_string(&entry_json)?;
-
-    // `set_exact_json` refuses to insert a value whose parent does not exist,
-    // so a file with no top-level `mcp` object yet needs that object created
-    // first. A file that already has one, even with other servers in it, is
-    // edited in place: inserting a new member into `mcp` never touches its
-    // siblings.
-    let has_mcp_object = crate::jsonc::parse(&original)
-        .ok()
-        .and_then(|doc| doc.value.get("mcp").cloned())
-        .is_some_and(|v| v.is_object());
-
-    let origin_hash = compute_sha256(original.as_bytes());
-    let origin = ConfigOrigin::new(target.to_path_buf(), ConfigScope::Global, 0, origin_hash);
-
-    let mut tx = ConfigTransaction::new(Value::Null)
-        .with_source(GuardedSource::new(target.to_path_buf(), precondition));
-
-    let mut working = original;
-    if !has_mcp_object {
-        working = apply_set(&working, &["mcp".to_string()], "{}")
-            .context("creating the top-level mcp object")?;
-        tx = tx.with_edit(SourceEdit {
-            origin: origin.clone(),
-            config_path: vec!["mcp".to_string()],
-            operation: ConfigEditOperation::Set {
-                value: serde_json::json!({}),
-                raw_json: Some("{}".to_string()),
-            },
-        });
-    }
-
-    let final_text = apply_set(&working, &["mcp".to_string(), name.to_string()], &raw_json)
-        .with_context(|| format!("setting mcp.{name}"))?;
-    tx = tx.with_edit(SourceEdit {
-        origin,
-        config_path: vec!["mcp".to_string(), name.to_string()],
-        operation: ConfigEditOperation::Set {
-            value: entry_json,
-            raw_json: Some(raw_json),
-        },
-    });
-
-    tx.expected_projection = crate::jsonc::parse(&final_text)
-        .context("parsing the edited document to compute the expected projection")?
-        .value;
-
-    Ok(tx)
+    Ok(set_transaction_batch(
+        target,
+        &[(name.to_string(), McpJsoncOp::Set(Box::new(server.clone())))],
+    )?
+    .expect("a Set op always produces an edit"))
 }
 
 /// Build a guarded transaction that removes `mcp.<name>` from the raw JSONC
@@ -208,46 +292,7 @@ pub fn set_transaction(target: &Path, name: &str, server: &McpServer) -> Result<
 /// `name` is already absent from it. Both are a no-op rather than an error —
 /// removal racing an external change to "already gone" is not a failure.
 pub fn remove_transaction(target: &Path, name: &str) -> Result<Option<ConfigTransaction>> {
-    if !target.is_file() {
-        return Ok(None);
-    }
-    let bytes = std::fs::read(target).with_context(|| format!("reading {}", target.display()))?;
-    let hash = compute_sha256(&bytes);
-    let text = String::from_utf8(bytes)
-        .with_context(|| format!("{} is not valid UTF-8", target.display()))?;
-    let doc = crate::jsonc::parse(&text)?;
-    let exists = doc.value.get("mcp").and_then(|m| m.get(name)).is_some();
-    if !exists {
-        return Ok(None);
-    }
-
-    let final_text = crate::jsonc::apply_edit(
-        &doc,
-        &JsoncEdit {
-            pointer: JsoncPointer {
-                path: vec![PathSegment::key("mcp"), PathSegment::key(name.to_string())],
-                owning_node: None,
-            },
-            operation: EditOperation::Remove,
-        },
-    )
-    .with_context(|| format!("removing mcp.{name}"))?;
-    let expected_projection = crate::jsonc::parse(&final_text)
-        .context("parsing the edited document to compute the expected projection")?
-        .value;
-
-    let origin = ConfigOrigin::new(target.to_path_buf(), ConfigScope::Global, 0, hash);
-    let tx = ConfigTransaction::new(expected_projection)
-        .with_source(GuardedSource::new(
-            target.to_path_buf(),
-            FilePrecondition::Sha256(compute_sha256(text.as_bytes())),
-        ))
-        .with_edit(SourceEdit {
-            origin,
-            config_path: vec!["mcp".to_string(), name.to_string()],
-            operation: ConfigEditOperation::Remove,
-        });
-    Ok(Some(tx))
+    set_transaction_batch(target, &[(name.to_string(), McpJsoncOp::Remove)])
 }
 
 #[cfg(test)]
@@ -404,6 +449,82 @@ mod write_tests {
         // A ConfigTransaction has no argv/binary to invoke; its only effect is
         // the guarded file write asserted by the tests above.
         assert!(tx.sources.iter().any(|s| s.path == target));
+    }
+
+    #[test]
+    fn a_batch_of_three_new_servers_into_a_missing_file_is_one_transaction_with_one_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+
+        let ops = vec![
+            ("a".to_string(), McpJsoncOp::Set(Box::new(stdio("a")))),
+            ("b".to_string(), McpJsoncOp::Set(Box::new(stdio("b")))),
+            ("c".to_string(), McpJsoncOp::Set(Box::new(stdio("c")))),
+        ];
+        let mut tx = set_transaction_batch(&target, &ops).unwrap().unwrap();
+        assert_eq!(
+            tx.sources.len(),
+            1,
+            "one file must carry exactly one guarded source, however many servers land in it"
+        );
+        tx.execute().unwrap();
+
+        let doc = crate::jsonc::parse(&std::fs::read_to_string(&target).unwrap()).unwrap();
+        for name in ["a", "b", "c"] {
+            assert_eq!(
+                doc.value["mcp"][name]["command"][0], "node",
+                "{name} missing after the batched write"
+            );
+        }
+    }
+
+    #[test]
+    fn a_batch_composing_a_set_and_a_remove_in_one_file_preserves_comments_and_siblings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        std::fs::write(
+            &target,
+            "{\n  // keep me\n  \"mcp\": { \"stale\": { \"type\": \"local\", \"command\": [\"old\"] }, \"other\": { \"type\": \"local\", \"command\": [\"x\"] } }\n}\n",
+        )
+        .unwrap();
+
+        let ops = vec![
+            (
+                "fresh".to_string(),
+                McpJsoncOp::Set(Box::new(stdio("fresh"))),
+            ),
+            ("stale".to_string(), McpJsoncOp::Remove),
+        ];
+        let mut tx = set_transaction_batch(&target, &ops).unwrap().unwrap();
+        assert_eq!(tx.sources.len(), 1);
+        tx.execute().unwrap();
+
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("// keep me"), "{text}");
+        let doc = crate::jsonc::parse(&text).unwrap();
+        assert_eq!(doc.value["mcp"]["fresh"]["command"][0], "node");
+        assert!(doc.value["mcp"].get("stale").is_none());
+        assert_eq!(
+            doc.value["mcp"]["other"]["command"][0], "x",
+            "an untouched sibling must survive the compound write"
+        );
+    }
+
+    #[test]
+    fn a_batch_where_every_op_is_a_no_op_removal_yields_no_transaction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("opencode.jsonc");
+        std::fs::write(
+            &target,
+            r#"{"mcp":{"other":{"type":"local","command":["x"]}}}"#,
+        )
+        .unwrap();
+
+        let ops = vec![
+            ("gone".to_string(), McpJsoncOp::Remove),
+            ("also-gone".to_string(), McpJsoncOp::Remove),
+        ];
+        assert!(set_transaction_batch(&target, &ops).unwrap().is_none());
     }
 }
 

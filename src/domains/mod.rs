@@ -147,15 +147,22 @@ impl World {
     /// Turn accepted rows into an ordered plan.
     pub fn plan(&self, rows: &[Row]) -> Plan {
         let mut plan = Plan::default();
+        // Every MCP row's guarded JSONC edits are queued here rather than
+        // pushed straight onto the plan, so that N servers landing in the
+        // same target file compose into ONE `ConfigTransaction` instead of N
+        // transactions that each capture the same plan-time hash and then
+        // race each other's precondition at apply time.
+        let mut mcp_batch = mcp::JsoncBatch::new();
         for row in rows.iter().filter(|r| r.accepted && r.actionable()) {
             match row.domain {
-                Domain::Mcp => mcp::plan_row(self, row, &mut plan),
+                Domain::Mcp => mcp::plan_row(self, row, &mut plan, &mut mcp_batch),
                 Domain::Skills => skills::plan_row(self, row, &mut plan),
                 Domain::Instructions => instructions::plan_row(self, row, &mut plan),
                 Domain::Plugins => plugins::plan_row(self, row, &mut plan),
                 Domain::Hooks => hooks::plan_row(self, row, &mut plan),
             }
         }
+        mcp_batch.finalize(&mut plan);
         hooks::plan_substitution_cleanup(self, &mut plan);
         plan.finalize();
         plan

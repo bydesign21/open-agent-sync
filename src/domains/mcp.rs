@@ -11,6 +11,7 @@ use crate::core::diff::{
 use crate::core::model::{Cap, McpServer, Scope, ScopeKind, Transport, short_repo};
 use crate::core::plan::{ManifestOp, Plan, Step};
 use crate::hosts::Host;
+use crate::hosts::opencode_family::mcp::McpJsoncOp;
 use crate::manifest::{McpEntry, secrets};
 
 use super::World;
@@ -552,7 +553,127 @@ fn present_of(capable: &[String], missing: &[String]) -> Vec<String> {
 // Planning
 // ---------------------------------------------------------------------------
 
-pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
+/// Accumulates every guarded JSONC edit destined for a `mcp.jsonc`-family
+/// target file, across every accepted MCP row, so that a target file touched
+/// by more than one server composes into ONE [`Step::ConfigTransaction`].
+///
+/// This exists because [`crate::hosts::opencode_family::mcp::set_transaction`]
+/// (and its removal counterpart) each record the file's hash *at plan time* as
+/// their precondition. Building one such transaction per server, per row,
+/// means every transaction touching the same file carries the same original
+/// hash: at apply time the first write changes the file and every later
+/// transaction's precondition then fails. Queuing every op bound for one file
+/// here, and flushing them all as a single transaction in [`Self::finalize`],
+/// is what OW-002 invariant 6 ("MCP ... edits in one file compose into one
+/// write") requires.
+#[derive(Default)]
+pub(super) struct JsoncBatch {
+    order: Vec<PathBuf>,
+    ops: BTreeMap<PathBuf, Vec<(String, McpJsoncOp)>>,
+    meta: BTreeMap<PathBuf, (String, Scope)>,
+}
+
+impl JsoncBatch {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    fn touch(&mut self, target: &PathBuf, host: &str, scope: &Scope) {
+        if !self.ops.contains_key(target) {
+            self.order.push(target.clone());
+            self.meta
+                .insert(target.clone(), (host.to_string(), scope.clone()));
+        }
+    }
+
+    fn set(&mut self, target: PathBuf, host: &str, scope: &Scope, name: &str, server: McpServer) {
+        self.touch(&target, host, scope);
+        self.ops
+            .entry(target)
+            .or_default()
+            .push((name.to_string(), McpJsoncOp::Set(Box::new(server))));
+    }
+
+    fn remove(&mut self, target: PathBuf, host: &str, scope: &Scope, name: &str) {
+        self.touch(&target, host, scope);
+        self.ops
+            .entry(target)
+            .or_default()
+            .push((name.to_string(), McpJsoncOp::Remove));
+    }
+
+    /// Flush every queued file's ops as one `ConfigTransaction` step each.
+    pub(super) fn finalize(self, plan: &mut Plan) {
+        for target in self.order {
+            let Some(ops) = self.ops.get(&target) else {
+                continue;
+            };
+            let (host, scope) = self
+                .meta
+                .get(&target)
+                .expect("every queued path has metadata");
+
+            match crate::hosts::opencode_family::mcp::set_transaction_batch(&target, ops) {
+                Ok(Some(tx)) => {
+                    let sets: Vec<&str> = ops
+                        .iter()
+                        .filter(|(_, op)| matches!(op, McpJsoncOp::Set(_)))
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    let removes: Vec<&str> = ops
+                        .iter()
+                        .filter(|(_, op)| matches!(op, McpJsoncOp::Remove))
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    let mut parts = Vec::new();
+                    if !sets.is_empty() {
+                        parts.push(format!("set {}", sets.join(", ")));
+                    }
+                    if !removes.is_empty() {
+                        parts.push(format!("remove {}", removes.join(", ")));
+                    }
+                    let label = format!("{} on {host} ({scope})", parts.join("; "));
+                    plan.push(label, Step::ConfigTransaction(tx));
+                }
+                Ok(None) => {}
+                Err(e) => plan.note(format!(
+                    "cannot build {host} config edit for {} \u{2014} {e:#}",
+                    target.display()
+                )),
+            }
+        }
+    }
+}
+
+/// Queue removal of `name` at `scope` on `host`. A JSONC-write host's removal
+/// is queued into `batch` so it composes with any other edit bound for the
+/// same file; every other host removes via a CLI call, which has no such
+/// composition to worry about and is pushed straight onto the plan.
+fn queue_removal(
+    host: &Host,
+    name: &str,
+    scope: &Scope,
+    plan: &mut Plan,
+    batch: &mut JsoncBatch,
+) -> Result<()> {
+    if host.uses_jsonc_mcp_write() {
+        let target = host.mcp_jsonc_target(scope)?;
+        batch.remove(target, host.name(), scope, name);
+        return Ok(());
+    }
+    let argv = host.mcp_remove_argv(name, scope)?;
+    plan.push(
+        format!("remove {name} from {} ({scope})", host.name()),
+        Step::Host {
+            host: host.name().to_string(),
+            argv,
+            cwd: cwd_for(scope),
+        },
+    );
+    Ok(())
+}
+
+pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan, batch: &mut JsoncBatch) {
     let name = row.name.clone();
     match &row.action().kind {
         ActionKind::Nothing => {}
@@ -589,12 +710,12 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                 // global one lands. Leave alone a host that already holds it at
                 // user scope: removing and re-adding it would only cause churn,
                 // and would briefly delete a correct entry.
-                remove_from_hosts(world, &name, &row.key.host_scopes, plan, |scope| {
+                remove_from_hosts(world, &name, &row.key.host_scopes, plan, batch, |scope| {
                     scope.kind() != ScopeKind::User
                 });
             }
             if *push {
-                push_entry(world, &name, &entry, plan, *promote);
+                push_entry(world, &name, &entry, plan, *promote, batch);
             }
         }
 
@@ -622,7 +743,7 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                     entry: Box::new(entry.clone()),
                 }),
             );
-            push_entry(world, &name, &entry, plan, true);
+            push_entry(world, &name, &entry, plan, true, batch);
         }
 
         ActionKind::Push { hosts } => {
@@ -632,10 +753,10 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
             };
             // Drop definitions at scopes the manifest does not want, first.
             let want = entry.scopes();
-            remove_from_hosts(world, &name, &row.key.host_scopes, plan, |scope| {
+            remove_from_hosts(world, &name, &row.key.host_scopes, plan, batch, |scope| {
                 !want.contains(scope)
             });
-            push_entry_to(world, &name, entry, hosts, plan, true);
+            push_entry_to(world, &name, entry, hosts, plan, true, batch);
         }
 
         ActionKind::Delete {
@@ -658,16 +779,11 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                     continue;
                 }
                 for scope in dedup(&scopes) {
-                    match removal_step(host, &name, &scope) {
-                        Ok(Some(step)) => plan.push(
-                            format!("remove {name} from {} ({scope})", host.name()),
-                            step,
-                        ),
-                        Ok(None) => {}
-                        Err(e) => plan.note(format!(
+                    if let Err(e) = queue_removal(host, &name, &scope, plan, batch) {
+                        plan.note(format!(
                             "{name}: cannot build {} removal \u{2014} {e:#}",
                             host.name()
-                        )),
+                        ));
                     }
                 }
             }
@@ -701,7 +817,7 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
         }
 
         ActionKind::CollapseScope { keep } => {
-            remove_from_hosts(world, &name, &row.key.host_scopes, plan, |scope| {
+            remove_from_hosts(world, &name, &row.key.host_scopes, plan, batch, |scope| {
                 scope != keep
             });
         }
@@ -757,7 +873,7 @@ pub(super) fn plan_row(world: &World, row: &Row, plan: &mut Plan) {
                 }
             };
 
-            push_entry(world, &name, &entry, plan, true);
+            push_entry(world, &name, &entry, plan, true, batch);
             // Not "it is in the backup": the manifest's secret gate means it
             // never writes the literal there, and host config files are never
             // backed up, because we do not own them. This plan is about to
@@ -859,13 +975,20 @@ fn cwd_for(scope: &Scope) -> Option<PathBuf> {
     scope.repo().map(PathBuf::from)
 }
 
-fn push_entry(world: &World, name: &str, entry: &McpEntry, plan: &mut Plan, replace: bool) {
+fn push_entry(
+    world: &World,
+    name: &str,
+    entry: &McpEntry,
+    plan: &mut Plan,
+    replace: bool,
+    batch: &mut JsoncBatch,
+) {
     let hosts: Vec<String> = world
         .detected()
         .map(|(h, _)| h.name().to_string())
         .filter(|h| entry.targets_host(h))
         .collect();
-    push_entry_to(world, name, entry, &hosts, plan, replace);
+    push_entry_to(world, name, entry, &hosts, plan, replace, batch);
 }
 
 /// Emit `add` steps for each target host at each manifest scope.
@@ -882,6 +1005,7 @@ fn push_entry_to(
     hosts: &[String],
     plan: &mut Plan,
     replace: bool,
+    batch: &mut JsoncBatch,
 ) {
     let Ok(server) = entry.to_server(name) else {
         plan.note(format!("{name}: manifest entry is not a valid server"));
@@ -922,13 +1046,13 @@ fn push_entry_to(
                 // subcommand, so add and remove must share one write
                 // mechanism rather than mixing a CLI add with a JSONC-edit
                 // removal.
-                match host.mcp_jsonc_target(scope).and_then(|target| {
-                    crate::hosts::opencode_family::mcp::set_transaction(&target, name, &server)
-                }) {
-                    Ok(tx) => plan.push(
-                        format!("set {name} on {hname} ({scope})"),
-                        Step::ConfigTransaction(tx),
-                    ),
+                //
+                // Queued into `batch` rather than built and pushed here: two
+                // servers landing in the same target file must become one
+                // `ConfigTransaction`, not two independent ones that would
+                // race each other's plan-time precondition at apply time.
+                match host.mcp_jsonc_target(scope) {
+                    Ok(target) => batch.set(target, &hname, scope, name, server.clone()),
                     Err(e) => plan.note(format!(
                         "{name}: cannot build {hname} config edit \u{2014} {e:#}"
                     )),
@@ -996,6 +1120,7 @@ fn remove_from_hosts(
     name: &str,
     scopes: &[Scope],
     plan: &mut Plan,
+    batch: &mut JsoncBatch,
     keep: impl Fn(&Scope) -> bool,
 ) {
     for (host, snap) in world.detected() {
@@ -1003,40 +1128,14 @@ fn remove_from_hosts(
             if !keep(&scope) || snap.mcp_at(&scope, name).is_none() {
                 continue;
             }
-            match removal_step(host, name, &scope) {
-                Ok(Some(step)) => plan.push(
-                    format!("remove {name} from {} ({scope})", host.name()),
-                    step,
-                ),
-                Ok(None) => {}
-                Err(e) => plan.note(format!(
+            if let Err(e) = queue_removal(host, name, &scope, plan, batch) {
+                plan.note(format!(
                     "{name}: cannot build {} removal \u{2014} {e:#}",
                     host.name()
-                )),
+                ));
             }
         }
     }
-}
-
-/// Build the removal step for `name` at `scope` on `host`, through whichever
-/// write mechanism the host declares.
-///
-/// `Ok(None)` means there is nothing to remove: a jsonc-write host whose file
-/// has already lost the entry (a race with an external change, or an earlier
-/// step in the same plan already dropped it), which is a no-op rather than an
-/// error.
-fn removal_step(host: &Host, name: &str, scope: &Scope) -> Result<Option<Step>> {
-    if host.uses_jsonc_mcp_write() {
-        let target = host.mcp_jsonc_target(scope)?;
-        let tx = crate::hosts::opencode_family::mcp::remove_transaction(&target, name)?;
-        return Ok(tx.map(Step::ConfigTransaction));
-    }
-    let argv = host.mcp_remove_argv(name, scope)?;
-    Ok(Some(Step::Host {
-        host: host.name().to_string(),
-        argv,
-        cwd: cwd_for(scope),
-    }))
 }
 
 /// Capabilities the manifest entry needs, for `doctor`.

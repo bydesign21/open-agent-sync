@@ -1316,6 +1316,324 @@ fn kilo_mcp_converges_after_two_passes() {
     mcp_family_converges_after_two_passes("kilo", "kilo_mcp_jsonc_v1", "kilo_mcp_project_jsonc_v1");
 }
 
+// ---------------------------------------------------------------------------
+// Regression: syncing N MCP servers to a guarded-JSONC host must apply all N,
+// not just the first. Reported live: pushing 6 servers to both OpenCode and
+// Kilo applied only the first per host and failed the other 5 per host (12
+// failures total) with "precondition failed ... expected Sha256(...), actual
+// Some(...)" — because the old code built one `ConfigTransaction` per server,
+// each stamped with the SAME plan-time file hash. The first write changed the
+// file underneath the rest. Every existing test up to this point seeded only
+// ONE server, so none of them could see this.
+// ---------------------------------------------------------------------------
+
+/// Build a `(host, mcp entries)` fixture for `name` with `server_names.len()`
+/// distinct stdio servers, all wanted at user scope.
+fn many_mcp_entries(server_names: &[&str]) -> BTreeMap<String, McpEntry> {
+    server_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            (
+                n.to_string(),
+                McpEntry {
+                    transport: "stdio".into(),
+                    command: Some(format!("server-{i}")),
+                    args: vec![format!("--port"), format!("{}", 9000 + i)],
+                    env: BTreeMap::new(),
+                    env_from: vec![],
+                    url: None,
+                    headers: BTreeMap::new(),
+                    bearer_token_env: None,
+                    scope: ScopeKind::User,
+                    repos: vec![],
+                    hosts: None,
+                },
+            )
+        })
+        .collect()
+}
+
+/// Test 1 (the direct regression) and test 3 (two-pass convergence at N>=3),
+/// combined: three servers, applied to both OpenCode and Kilo in one plan,
+/// must all land with zero failed steps, and a second full pass must not
+/// touch mcp again.
+#[test]
+fn three_mcp_servers_sync_to_both_opencode_and_kilo_in_one_pass() {
+    let server_names = ["computer-use", "node_repl", "pulumi"];
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let repos = vec![repo.display().to_string()];
+    let manifest_path = root.join("manifest.toml");
+
+    let manifest = Manifest {
+        mcp: many_mcp_entries(&server_names),
+        ..Manifest::default()
+    };
+
+    // One isolated descriptor + user file per host, exactly like
+    // `mcp_family_converges_after_two_passes`, so this never touches the
+    // machine running the test.
+    let families = [
+        (
+            "opencode",
+            "opencode_mcp_jsonc_v1",
+            "opencode_mcp_project_jsonc_v1",
+        ),
+        ("kilo", "kilo_mcp_jsonc_v1", "kilo_mcp_project_jsonc_v1"),
+    ];
+    let user_files: Vec<PathBuf> = families
+        .iter()
+        .map(|(name, ..)| root.join(format!("{name}.jsonc")))
+        .collect();
+    let descriptors: Vec<String> = families
+        .iter()
+        .zip(&user_files)
+        .map(|((name, parser_user, parser_project), user_file)| {
+            opencode_family_descriptor(
+                name,
+                parser_user,
+                parser_project,
+                user_file,
+                &format!("{{repo}}/.{name}/{name}.jsonc"),
+            )
+        })
+        .collect();
+    let make_hosts = || {
+        families
+            .iter()
+            .zip(&descriptors)
+            .map(|((name, ..), text)| Host {
+                descriptor: descriptor::parse(text, name).unwrap(),
+                bin: Some(PathBuf::from(format!("/usr/bin/{name}"))),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // ---- pass 1: neither host has anything yet ----
+    let hosts1 = make_hosts();
+    let snapshots1: Vec<HostSnapshot> = hosts1.iter().map(|h| h.read(&repos).unwrap()).collect();
+    for snap in &snapshots1 {
+        assert!(
+            snap.mcp.is_empty(),
+            "{}: host file does not exist yet",
+            snap.host
+        );
+    }
+
+    let world1 = World {
+        manifest: manifest.clone(),
+        manifest_path: manifest_path.clone(),
+        hosts: hosts1,
+        snapshots: snapshots1,
+        repos: repos.clone(),
+        warnings: Vec::new(),
+    };
+    let mut rows1 = world1.rows();
+    for row in rows1.iter_mut() {
+        if row.domain == Domain::Mcp && server_names.contains(&row.name.as_str()) {
+            row.accepted = true;
+        }
+    }
+    let plan1 = world1.plan(&rows1);
+
+    // ---- test 2: N servers into ONE file must be ONE ConfigTransaction, not N ----
+    let tx_labels: Vec<&str> = plan1
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::ConfigTransaction(_)))
+        .map(|s| s.label.as_str())
+        .collect();
+    assert_eq!(
+        tx_labels.len(),
+        2,
+        "3 servers into each of 2 hosts' single files must be exactly one \
+         ConfigTransaction PER HOST (2 total), not one per server (6): {tx_labels:?}"
+    );
+
+    let mut manifest_after_1 = world1.manifest.clone();
+    let report1 = apply::run(
+        &plan1,
+        &mut manifest_after_1,
+        &manifest_path,
+        &world1.hosts,
+        |_| {},
+    );
+    assert_eq!(
+        report1.count(Outcome::Failed),
+        0,
+        "applying 3 servers to each host must not fail any step: {:?}",
+        report1.results
+    );
+
+    // ---- all three servers must be present in EACH host's config ----
+    let hosts2 = make_hosts();
+    let snapshots2: Vec<HostSnapshot> = hosts2.iter().map(|h| h.read(&repos).unwrap()).collect();
+    for (snap, user_file) in snapshots2.iter().zip(&user_files) {
+        for name in &server_names {
+            assert!(
+                snap.mcp.contains_key(&(Scope::User, name.to_string())),
+                "{}: {name} missing after apply — file contents:\n{}",
+                snap.host,
+                std::fs::read_to_string(user_file).unwrap_or_default()
+            );
+        }
+    }
+
+    // ---- test 3: a second full pass must not touch mcp again ----
+    let world2 = World {
+        manifest: manifest_after_1.clone(),
+        manifest_path: manifest_path.clone(),
+        hosts: hosts2,
+        snapshots: snapshots2,
+        repos: repos.clone(),
+        warnings: Vec::new(),
+    };
+    let mut rows2 = world2.rows();
+    for name in &server_names {
+        let row = rows2
+            .iter()
+            .find(|r| r.name == *name && r.domain == Domain::Mcp)
+            .unwrap_or_else(|| panic!("a row for {name}"));
+        assert_eq!(
+            row.severity,
+            agentsync::core::diff::Severity::Synced,
+            "{name}: {} ({})",
+            row.headline,
+            row.detail
+        );
+    }
+    for row in rows2.iter_mut() {
+        if row.actionable() {
+            row.accepted = true;
+        }
+    }
+    let plan2 = world2.plan(&rows2);
+    let mutations: Vec<&str> = plan2
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::ConfigTransaction(_) | Step::Host { .. }))
+        .map(|s| s.label.as_str())
+        .collect();
+    assert!(
+        mutations.is_empty(),
+        "the second full plan must not touch mcp again: {mutations:?}"
+    );
+}
+
+/// A plan that both sets new servers and removes an unmanaged one from the
+/// same guarded JSONC file must compose into a single transaction — there is
+/// no `opencode mcp remove`/`kilo mcp remove`, so a set and a remove aimed at
+/// the same file can never be split across two writes without one of them
+/// racing the other's plan-time precondition.
+#[test]
+fn mixed_set_and_remove_in_one_file_compose_into_one_transaction() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let repo = root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let repos = vec![repo.display().to_string()];
+    let manifest_path = root.join("manifest.toml");
+    let user_file = root.join("opencode.jsonc");
+
+    // Pre-seed the host file with an unmanaged server ("stale") plus a
+    // comment that must survive the compound write untouched.
+    std::fs::write(
+        &user_file,
+        "{\n  // keep me\n  \"mcp\": { \"stale\": { \"type\": \"local\", \"command\": [\"old\"] } }\n}\n",
+    )
+    .unwrap();
+
+    let descriptor_text = opencode_family_descriptor(
+        "opencode",
+        "opencode_mcp_jsonc_v1",
+        "opencode_mcp_project_jsonc_v1",
+        &user_file,
+        "{repo}/.opencode/opencode.jsonc",
+    );
+    let make_host = || Host {
+        descriptor: descriptor::parse(&descriptor_text, "opencode").unwrap(),
+        bin: Some(PathBuf::from("/usr/bin/opencode")),
+    };
+
+    let manifest = Manifest {
+        mcp: many_mcp_entries(&["fresh"]),
+        ..Manifest::default()
+    };
+
+    let host = make_host();
+    let snap = host.read(&repos).unwrap();
+    assert!(
+        snap.mcp.contains_key(&(Scope::User, "stale".to_string())),
+        "the fixture must read back the pre-seeded stale server"
+    );
+
+    let world = World {
+        manifest,
+        manifest_path: manifest_path.clone(),
+        hosts: vec![host],
+        snapshots: vec![snap],
+        repos: repos.clone(),
+        warnings: Vec::new(),
+    };
+    let mut rows = world.rows();
+    for row in rows.iter_mut() {
+        if row.domain != Domain::Mcp {
+            continue;
+        }
+        match row.name.as_str() {
+            "fresh" => row.accepted = true,
+            "stale" => {
+                row.chosen = row
+                    .actions
+                    .iter()
+                    .position(|a| matches!(a.kind, ActionKind::Delete { .. }))
+                    .expect("a delete action for the unmanaged stale server");
+                row.accepted = true;
+            }
+            _ => {}
+        }
+    }
+
+    let plan = world.plan(&rows);
+    let tx_steps: Vec<_> = plan
+        .steps
+        .iter()
+        .filter(|s| matches!(s.step, Step::ConfigTransaction(_)))
+        .collect();
+    assert_eq!(
+        tx_steps.len(),
+        1,
+        "a set and a remove aimed at the same file must compose into one transaction: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+
+    let mut manifest_after = world.manifest.clone();
+    let report = apply::run(
+        &plan,
+        &mut manifest_after,
+        &manifest_path,
+        &world.hosts,
+        |_| {},
+    );
+    assert_eq!(report.count(Outcome::Failed), 0, "{:?}", report.results);
+
+    let text = std::fs::read_to_string(&user_file).unwrap();
+    assert!(text.contains("// keep me"), "{text}");
+    let doc = agentsync::jsonc::parse(&text).unwrap();
+    assert!(
+        doc.value["mcp"]["fresh"].is_object(),
+        "fresh must have been added: {text}"
+    );
+    assert!(
+        doc.value["mcp"].get("stale").is_none(),
+        "stale must have been removed: {text}"
+    );
+}
+
 static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
 /// Captures the current value of each named environment variable and puts it
