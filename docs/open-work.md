@@ -1228,6 +1228,31 @@ no-matcher baseline so it cannot pass for the wrong reason.
 Mutation-verified: disabling the guard fails the new test. The live gate still
 exits 0 with 17 proved-live afterwards.
 
+## KNOWN DEFECT — a failed transaction leaves an empty claimed directory
+
+Found by the OW-012 reviewer. When a transaction claims a fresh directory via
+`ClaimFreshDirectory` and a **later** operation in the same transaction fails,
+rollback correctly removes the `.agentsync-owned` marker but does **not** remove
+the now-unmarked directory it created.
+
+Not a security defect: `is_agentsync_owned` correctly reports the leftover
+directory as unowned afterwards, so nothing can be written into it by accident.
+The consequence is a robustness gap — a retried transaction finds the directory
+pre-existing and will permanently refuse to re-claim it, because
+`ClaimFreshDirectory` is legal only when the directory is absent.
+
+**Deliberately not fixed for `v0.0.9`.** Changing rollback semantics this late
+carries more risk than the robustness it buys, and the reviewer independently
+assessed it non-exploitable and non-blocking. Fix by tracking created
+directories alongside `created_files` so rollback removes them in reverse order.
+
+### Related, also unfixed
+
+`host_read_exercises_the_real_plugin_target_wiring_for_opencode` restores
+`XDG_CONFIG_HOME` with a manual `match` rather than an `EnvRestore` guard. If
+the call it wraps ever panicked, the mutex would release but leave a corrupted
+value behind it. Pre-existing, flagged by the reviewer for completeness.
+
 ## KNOWN DEFECT — cross-domain apply ordering
 
 When a plugin `local` target and a hook bridge target the same plugin-scan
