@@ -545,7 +545,48 @@ Commit intent: `Add OpenCode and Kilo built-ins`.
 
 ## OW-005 — Native OpenCode and Kilo MCP reconciliation
 
-**State: designed, not implemented. Release blocker. Depends on OW-003.**
+**State: read path and canonical model implemented and self-verified. The write
+path, diff gates, and two-pass convergence gates are NOT done. Release blocker.
+Depends on OW-003.**
+
+Delivered on `master` as `877f63a` "Reconcile OpenCode family MCP servers":
+
+- `McpServer` extended with `enabled`, `timeout_json`, `cwd`, and an explicit
+  `OAuthState` (`Unspecified` / `Disabled` / `Automatic` / `Client`);
+- `Transport` gained a `Default` so the extension did not require rewriting
+  every construction site by hand;
+- `McpServer::needs_oauth_login()` added **beside** the existing
+  `needs_interactive_login()` rather than replacing it. The old method infers
+  "needs login" from a missing credential, which is right for Codex but wrong
+  here; changing it in place would have silently altered Codex behaviour;
+- four parsers registered: `opencode_mcp_jsonc_v1`,
+  `opencode_mcp_project_jsonc_v1`, `kilo_mcp_jsonc_v1`,
+  `kilo_mcp_project_jsonc_v1`;
+- 13 contract tests in `hosts::opencode_family::mcp`.
+
+Behaviour pinned by those tests: JSONC comments parse; command arrays never
+shell-split; literal env values and `{env:NAME}` references stay distinct; an
+env key reading a differently named variable is **blocked rather than flattened
+into a literal**, because flattening would push the placeholder text verbatim
+into other hosts; a bearer env reference is distinct from a plain header; a
+*literal* `Authorization` header is not laundered into a bearer reference and
+stays visible to the secret gate; absent fields stay absent instead of
+defaulting; OAuth follow-up is emitted only for explicit OAuth state; an OAuth
+client secret is carried only as an env reference and the warning does not echo
+the secret; Kilo project-scope env references are blocked; malformed servers are
+skipped with a warning and never invented.
+
+**Still open for this task**, all release-blocking:
+
+1. The write path. Add/update/remove must go through origin-aware
+   `ConfigTransaction` edits against the raw JSONC. **Removal must be an exact
+   JSONC origin removal** — measured: `opencode mcp` offers only `add`, `list`,
+   `auth`, `logout`, `debug`, so there is no removal command to call.
+2. `cargo test --test diff opencode_mcp` and `--test diff kilo_mcp`.
+3. `cargo test --test apply_e2e opencode_mcp_converges_after_two_passes` and the
+   Kilo equivalent.
+4. Doctor must report an `{env:NAME}` reference that resolves to empty as
+   *unresolved*, never as configured.
 
 Extend the canonical and manifest MCP models with optional:
 
@@ -586,7 +627,7 @@ Commit intent: `Reconcile OpenCode family MCP servers`.
 {
   "id": "OW-005",
   "title": "Native OpenCode and Kilo MCP reconciliation",
-  "state": "designed-not-implemented",
+  "state": "partially-implemented",
   "release_blocker": true,
   "depends_on": ["OW-003"]
 }
