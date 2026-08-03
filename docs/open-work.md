@@ -496,13 +496,25 @@ project `.<id>/skill` directory.
    currently names only the default global location and the profile-aware
    resolution still has to be applied by the layer engine.
 
-**Unresolved tension for OW-011.** The shared skill write target
-`~/.agents/skills` is HOME-rooted, but the live gate rule forbids repurposing
-`HOME`. A probe confirmed the host resolves that directory through `HOME`. So
-the live gate cannot isolate shared skills without breaking its own rule. Decide
-one of: accept the real `~/.agents/skills` in the live gate and assert only
-non-destructively, or add an agentsync-level override for the shared skill root.
-Do not silently repurpose `HOME`.
+**Resolved: shared skills stay HOME-rooted.** The shared skill write target
+`~/.agents/skills` is HOME-rooted, and a probe confirmed the host resolves it
+through `HOME`. The live gate rule still forbids repurposing `HOME`, so the two
+cannot both be satisfied by isolation.
+
+Decision (owner, this session): **keep the real `~/.agents/skills`**. No
+agentsync-level override is added. `HOME` is still never repurposed — OW-011
+rule 5 stands unchanged.
+
+The condition attached to that decision is that the directory stays clean and
+orderly, which makes the following binding on OW-011 and OW-013:
+
+- the live gate may only create entries it owns, under clearly agentsync-named
+  paths, and must remove every one of them on exit, including on failure;
+- it must never delete, overwrite, or rename a pre-existing entry it did not
+  create;
+- it must assert non-destructively against anything already present;
+- a leftover entry after a run is a gate FAILURE, not cosmetic. Assert the
+  directory returns to its exact prior listing.
 
 Add `opencode.toml` and `kilo.toml` built-ins and register them. Detect
 `opencode` and `kilo` separately.
