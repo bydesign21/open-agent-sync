@@ -2213,9 +2213,12 @@ fn opencode_hooks_pre_tool_use_handler() -> agentsync::core::model::HookHandler 
         group: 0,
         index: 0,
     };
-    let mut h = agentsync::core::model::HookHandler::new(id, "PreToolUse", "true");
-    h.matcher = Some("Bash".to_string());
-    h
+    // Deliberately no matcher. A matcher is compared against Claude's
+    // `tool_name`/`tool_input` keys, but a live OpenCode/Kilo tool callback
+    // supplies `tool`/`sessionID`/`callID`, so a matchered handler is reported
+    // blocked rather than bridged into something that silently never fires.
+    // See `a_matchered_handler_is_blocked_rather_than_bridged_into_silence`.
+    agentsync::core::model::HookHandler::new(id, "PreToolUse", "true")
 }
 
 fn opencode_hooks_world(cfg_home: &Path) -> World {

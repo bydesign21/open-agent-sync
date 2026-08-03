@@ -3003,9 +3003,11 @@ fn pre_tool_use_handler() -> HookHandler {
         group: 0,
         index: 0,
     };
-    let mut h = HookHandler::new(id, "PreToolUse", "true");
-    h.matcher = Some("Bash".to_string());
-    h
+    // Deliberately no matcher: a matchered handler is blocked for the
+    // OpenCode family, because the matcher is compared against Claude's ctx
+    // key names and would silently never fire on a live host. See
+    // `a_matchered_handler_is_blocked_rather_than_bridged_into_silence`.
+    HookHandler::new(id, "PreToolUse", "true")
 }
 
 #[test]
@@ -3329,4 +3331,51 @@ fn kilo_hooks_production_sidecar_carries_the_callback_name_not_the_claude_event(
         "expected to find a generated Kilo sidecar in the planned transaction: {:?}",
         tx.operations
     );
+}
+
+/// A hook matcher is compared against Claude's `tool_name`/`tool_input` keys,
+/// but a live OpenCode/Kilo `tool.execute.*` ctx supplies `tool`, `sessionID`
+/// and `callID`. Bridging a matchered handler installs a hook that silently
+/// never fires: no error, clean doctor, dead hook. It must be blocked instead.
+#[test]
+fn a_matchered_handler_is_blocked_rather_than_bridged_into_silence() {
+    let bridge_row = |handler: HookHandler| -> Vec<(String, Severity)> {
+        let world = opencode_hooks_world(handler, Manifest::default());
+        world
+            .rows()
+            .into_iter()
+            .filter(|r| r.domain == Domain::Hooks && r.key.source_host.is_some())
+            .map(|r| (r.headline.clone(), r.severity))
+            .collect()
+    };
+
+    // Baseline: without a matcher the handler IS bridgeable. Without this the
+    // test could pass because the fixture is unbridgeable for some other reason.
+    let plain = bridge_row(pre_tool_use_handler());
+    assert!(
+        !plain.is_empty() && plain.iter().all(|(_, sev)| *sev != Severity::Blocked),
+        "the no-matcher baseline must be bridgeable, got {plain:?}"
+    );
+
+    for field in ["matcher", "if_pattern"] {
+        let mut handler = pre_tool_use_handler();
+        match field {
+            "matcher" => handler.matcher = Some("Bash".to_string()),
+            _ => handler.if_pattern = Some("Bash(git commit:*)".to_string()),
+        }
+        let rows = bridge_row(handler);
+        assert!(!rows.is_empty(), "{field}: expected a hook row");
+        for (headline, severity) in &rows {
+            assert_eq!(
+                *severity,
+                Severity::Blocked,
+                "{field}: a matchered handler must be blocked, not bridged into \
+                 something that silently never fires: {headline}"
+            );
+            assert!(
+                headline.contains("never fire"),
+                "{field}: the reason must say it would never fire: {headline}"
+            );
+        }
+    }
 }

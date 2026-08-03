@@ -694,6 +694,34 @@ fn opencode_bridge_row(
         marketplace: Some(handler.id.source.clone()),
         ..Default::default()
     };
+    // MEASURED against the live runtimes: the bridged matcher is compared with
+    // Claude-shaped ctx keys (`tool_name`, `tool_input`), but a real
+    // OpenCode `tool.execute.*` ctx supplies `tool`, `sessionID` and
+    // `callID`. A handler carrying a matcher therefore never fires on a live
+    // host, and it fails SILENTLY: the bridge installs, doctor stays clean, and
+    // the hook simply never runs. Report it blocked rather than shipping
+    // something that renders as healthy while doing nothing.
+    if handler.matcher.as_deref().is_some_and(|m| !m.is_empty())
+        || handler.if_pattern.as_deref().is_some_and(|p| !p.is_empty())
+    {
+        return Some(Row {
+            domain: Domain::Hooks,
+            name: handler.id.short(),
+            headline: format!(
+                "{target_name} cannot honour this hook's matcher, so it would never fire"
+            ),
+            detail: format!(
+                "the matcher is compared against Claude's `tool_name`/`tool_input` keys, but \
+                 a live {target_name} tool callback supplies `tool`/`sessionID`/`callID`; \
+                 bridging it would install a hook that silently never runs"
+            ),
+            severity: Severity::Blocked,
+            actions: vec![Action::new("nothing to do", ActionKind::Nothing)],
+            chosen: 0,
+            accepted: false,
+            key,
+        });
+    }
     if crate::shim::bridges::opencode::already_converged(
         &input,
         crate::shim::bridges::opencode::PINNED_VERSION,
@@ -868,6 +896,34 @@ fn kilo_bridge_row(
         marketplace: Some(handler.id.source.clone()),
         ..Default::default()
     };
+    // MEASURED against the live runtimes: the bridged matcher is compared with
+    // Claude-shaped ctx keys (`tool_name`, `tool_input`), but a real
+    // Kilo `tool.execute.*` ctx supplies `tool`, `sessionID` and
+    // `callID`. A handler carrying a matcher therefore never fires on a live
+    // host, and it fails SILENTLY: the bridge installs, doctor stays clean, and
+    // the hook simply never runs. Report it blocked rather than shipping
+    // something that renders as healthy while doing nothing.
+    if handler.matcher.as_deref().is_some_and(|m| !m.is_empty())
+        || handler.if_pattern.as_deref().is_some_and(|p| !p.is_empty())
+    {
+        return Some(Row {
+            domain: Domain::Hooks,
+            name: handler.id.short(),
+            headline: format!(
+                "{target_name} cannot honour this hook's matcher, so it would never fire"
+            ),
+            detail: format!(
+                "the matcher is compared against Claude's `tool_name`/`tool_input` keys, but \
+                 a live {target_name} tool callback supplies `tool`/`sessionID`/`callID`; \
+                 bridging it would install a hook that silently never runs"
+            ),
+            severity: Severity::Blocked,
+            actions: vec![Action::new("nothing to do", ActionKind::Nothing)],
+            chosen: 0,
+            accepted: false,
+            key,
+        });
+    }
     if kilo_already_converged(&input) {
         let mut row = Row::synced(
             Domain::Hooks,
