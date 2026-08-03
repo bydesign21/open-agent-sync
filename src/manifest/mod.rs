@@ -163,6 +163,7 @@ impl McpEntry {
         Ok(McpServer {
             name: name.to_string(),
             transport,
+            ..Default::default()
         })
     }
 

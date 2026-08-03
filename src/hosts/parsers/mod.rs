@@ -66,6 +66,10 @@ pub fn read_mcp(parser: &str, text: &str, ctx: &ParseCtx) -> Result<McpRead> {
         "claude_json_v1" => mcp::claude_json_v1(text, ctx),
         "mcp_json_v1" => mcp::mcp_json_v1(text, ctx),
         "codex_toml_v1" => mcp::codex_toml_v1(text, ctx),
+        "opencode_mcp_jsonc_v1" => mcp::opencode_mcp_jsonc_v1(text, ctx),
+        "opencode_mcp_project_jsonc_v1" => mcp::opencode_mcp_project_jsonc_v1(text, ctx),
+        "kilo_mcp_jsonc_v1" => mcp::kilo_mcp_jsonc_v1(text, ctx),
+        "kilo_mcp_project_jsonc_v1" => mcp::kilo_mcp_project_jsonc_v1(text, ctx),
         other => bail!("unknown mcp parser {other:?} (see `agentsync hosts --parsers`)"),
     }
 }
@@ -122,6 +126,22 @@ pub fn registry() -> Vec<(&'static str, &'static str)> {
             "mcp: <repo>/.mcp.json (committed project scope)",
         ),
         ("codex_toml_v1", "mcp: ~/.codex/config.toml [mcp_servers.*]"),
+        (
+            "opencode_mcp_jsonc_v1",
+            "mcp: <xdg config>/opencode/opencode.jsonc [mcp.*] (global)",
+        ),
+        (
+            "opencode_mcp_project_jsonc_v1",
+            "mcp: <repo>/.opencode/opencode.jsonc [mcp.*] (project)",
+        ),
+        (
+            "kilo_mcp_jsonc_v1",
+            "mcp: <xdg config>/kilo/kilo.jsonc [mcp.*] (global)",
+        ),
+        (
+            "kilo_mcp_project_jsonc_v1",
+            "mcp: <repo>/.kilo/kilo.jsonc [mcp.*] (project)",
+        ),
         (
             "claude_plugins_v1",
             "plugins: ~/.claude/plugins/installed_plugins.json",

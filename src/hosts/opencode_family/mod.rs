@@ -10,3 +10,4 @@
 //! (`opencode 1.18.11`, `kilo 7.4.17`) rather than taken from documentation.
 
 pub mod layers;
+pub mod mcp;

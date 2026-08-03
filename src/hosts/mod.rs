@@ -824,6 +824,7 @@ parser = "claude_hooks_json_v1"
                 args: vec!["/x/index.js".into()],
                 ..Default::default()
             }),
+            ..Default::default()
         };
         let argv = h.mcp_add_argv(&server, &Scope::User).unwrap();
         assert_eq!(argv[0], "mcp");
@@ -845,6 +846,7 @@ parser = "claude_hooks_json_v1"
                 env: BTreeMap::from([("LOG_LEVEL".to_string(), "info".to_string())]),
                 env_from: vec![],
             }),
+            ..Default::default()
         };
         let argv = h.mcp_add_argv(&server, &Scope::User).unwrap();
         assert_eq!(
@@ -873,6 +875,7 @@ parser = "claude_hooks_json_v1"
                 headers: BTreeMap::new(),
                 bearer_token_env: None,
             }),
+            ..Default::default()
         };
         let argv = h.mcp_add_argv(&server, &Scope::User).unwrap();
         assert_eq!(
@@ -897,6 +900,7 @@ parser = "claude_hooks_json_v1"
                 headers: BTreeMap::new(),
                 bearer_token_env: Some("TOK".into()),
             }),
+            ..Default::default()
         };
         let argv = h.mcp_add_argv(&server, &Scope::User).unwrap();
         assert_eq!(argv[argv.len() - 2], "--bearer-token-env-var");

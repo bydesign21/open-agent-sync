@@ -51,6 +51,7 @@ fn stdio(name: &str, command: &str) -> McpServer {
             command: command.to_string(),
             ..Default::default()
         }),
+        ..Default::default()
     }
 }
 
@@ -61,6 +62,7 @@ fn http(name: &str, url: &str) -> McpServer {
             url: url.to_string(),
             ..Default::default()
         }),
+        ..Default::default()
     }
 }
 
@@ -72,6 +74,7 @@ fn http_with_header(name: &str, url: &str, key: &str, value: &str) -> McpServer 
             headers: BTreeMap::from([(key.to_string(), value.to_string())]),
             bearer_token_env: None,
         }),
+        ..Default::default()
     }
 }
 

@@ -141,6 +141,7 @@ fn parse_json_server(name: &str, def: &Value) -> Result<(McpServer, Vec<String>)
         McpServer {
             name: name.to_string(),
             transport,
+            ..Default::default()
         },
         warnings,
     ))
@@ -296,6 +297,7 @@ fn parse_codex_server(name: &str, def: &toml::Value) -> Result<McpServer> {
     Ok(McpServer {
         name: name.to_string(),
         transport,
+        ..Default::default()
     })
 }
 
@@ -380,6 +382,246 @@ pub fn claude_json_v1_serialize(server: &McpServer) -> Result<String> {
         }
     };
     Ok(serde_json::to_string(&value)?)
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode family (OpenCode and Kilo)
+// ---------------------------------------------------------------------------
+
+/// Which host in the OpenCode family a config belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OpenCodeFlavor {
+    OpenCode,
+    Kilo,
+}
+
+/// Recognize the OpenCode `{env:NAME}` reference form.
+///
+/// This is deliberately exact. A value that merely *contains* a reference, such
+/// as `Bearer {env:TOK}`, is not a bare reference and is handled separately.
+fn env_reference(value: &str) -> Option<&str> {
+    value
+        .strip_prefix("{env:")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .filter(|name| !name.is_empty() && !name.contains(['{', '}']))
+}
+
+/// `mcp` in an OpenCode-family JSONC config.
+///
+/// Reads the **raw file text**, never `<host> debug config` output. The
+/// resolver substitutes `{env:NAME}` at resolve time and turns an unset
+/// variable into an empty string, so the resolved projection cannot distinguish
+/// a literal from a reference. Diffing against it would report drift forever.
+pub fn opencode_mcp_jsonc_v1(text: &str, ctx: &ParseCtx) -> Result<McpRead> {
+    opencode_family_mcp(text, ctx, OpenCodeFlavor::OpenCode, Scope::User)
+}
+
+/// `mcp` in a Kilo JSONC config.
+pub fn kilo_mcp_jsonc_v1(text: &str, ctx: &ParseCtx) -> Result<McpRead> {
+    opencode_family_mcp(text, ctx, OpenCodeFlavor::Kilo, Scope::User)
+}
+
+/// `mcp` in an OpenCode-family project config.
+pub fn opencode_mcp_project_jsonc_v1(text: &str, ctx: &ParseCtx) -> Result<McpRead> {
+    let repo = ctx.repo.clone().unwrap_or_default();
+    opencode_family_mcp(text, ctx, OpenCodeFlavor::OpenCode, Scope::Project(repo))
+}
+
+/// `mcp` in a Kilo project config.
+pub fn kilo_mcp_project_jsonc_v1(text: &str, ctx: &ParseCtx) -> Result<McpRead> {
+    let repo = ctx.repo.clone().unwrap_or_default();
+    opencode_family_mcp(text, ctx, OpenCodeFlavor::Kilo, Scope::Project(repo))
+}
+
+fn opencode_family_mcp(
+    text: &str,
+    ctx: &ParseCtx,
+    flavor: OpenCodeFlavor,
+    scope: Scope,
+) -> Result<McpRead> {
+    let doc =
+        crate::jsonc::parse(text).with_context(|| format!("parsing {}", ctx.origin.display()))?;
+    let mut out = McpRead::default();
+
+    let Some(servers) = doc.value.get("mcp").and_then(Value::as_object) else {
+        return Ok(out);
+    };
+
+    for (name, raw) in servers {
+        let Some(obj) = raw.as_object() else {
+            out.warnings.push(format!(
+                "mcp.{name} in {} is not an object and was skipped",
+                ctx.origin.display()
+            ));
+            continue;
+        };
+
+        let kind = obj.get("type").and_then(Value::as_str).unwrap_or_default();
+        let transport = match kind {
+            "local" => {
+                // Measured: `command` is an array. It is never shell-split, so
+                // an argument containing spaces survives intact.
+                let Some(argv) = obj.get("command").and_then(Value::as_array) else {
+                    out.warnings.push(format!(
+                        "mcp.{name} is type \"local\" but has no command array; skipped"
+                    ));
+                    continue;
+                };
+                let argv: Vec<String> = argv
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
+                let Some((command, args)) = argv.split_first() else {
+                    out.warnings
+                        .push(format!("mcp.{name} has an empty command array; skipped"));
+                    continue;
+                };
+
+                let mut env = BTreeMap::new();
+                let mut env_from = Vec::new();
+                if let Some(map) = obj.get("environment").and_then(Value::as_object) {
+                    for (key, value) in map {
+                        let Some(text) = value.as_str() else { continue };
+                        match env_reference(text) {
+                            // A self-referential passthrough is the same intent
+                            // expressed differently, so it normalizes.
+                            Some(var) if var == key => env_from.push(key.clone()),
+                            // The canonical model records forwarded variables by
+                            // name only, so it cannot express "key A reads
+                            // variable B". Report it rather than flatten it into
+                            // a literal, which would push the placeholder text
+                            // itself into other hosts.
+                            Some(var) => out.warnings.push(format!(
+                                "mcp.{name}: environment key {key} reads a differently \
+                                 named variable {var}, which cannot be represented; \
+                                 this server is reported as blocked"
+                            )),
+                            None => {
+                                env.insert(key.clone(), text.to_string());
+                            }
+                        }
+                    }
+                }
+
+                Transport::Stdio(StdioServer {
+                    command: command.clone(),
+                    args: args.to_vec(),
+                    env,
+                    env_from,
+                })
+            }
+            "remote" => {
+                let Some(url) = obj.get("url").and_then(Value::as_str) else {
+                    out.warnings.push(format!(
+                        "mcp.{name} is type \"remote\" but has no url; skipped"
+                    ));
+                    continue;
+                };
+                let mut headers = BTreeMap::new();
+                let mut bearer_token_env = None;
+                if let Some(map) = obj.get("headers").and_then(Value::as_object) {
+                    for (key, value) in map {
+                        let Some(text) = value.as_str() else { continue };
+                        let bearer = key
+                            .eq_ignore_ascii_case("authorization")
+                            .then(|| text.strip_prefix("Bearer "))
+                            .flatten()
+                            .and_then(env_reference);
+                        match bearer {
+                            Some(var) => bearer_token_env = Some(var.to_string()),
+                            None => {
+                                // Kept verbatim, including any `{env:...}` text,
+                                // so a literal credential stays visible to the
+                                // secret gate instead of being laundered.
+                                headers.insert(key.clone(), text.to_string());
+                            }
+                        }
+                    }
+                }
+                Transport::Http(HttpServer {
+                    url: url.to_string(),
+                    headers,
+                    bearer_token_env,
+                })
+            }
+            other => {
+                out.warnings.push(format!(
+                    "mcp.{name} has unknown type {other:?} (expected \"local\" or \"remote\"); skipped"
+                ));
+                continue;
+            }
+        };
+
+        // Kilo resolves project-scope environment references differently from
+        // the global scope, so a project-scope reference is reported as blocked
+        // rather than synced to a location where it would resolve to empty.
+        if flavor == OpenCodeFlavor::Kilo && matches!(scope, Scope::Project(_)) {
+            let references_env = match &transport {
+                Transport::Stdio(s) => !s.env_from.is_empty(),
+                Transport::Http(h) => {
+                    h.bearer_token_env.is_some() || h.headers.values().any(|v| v.contains("{env:"))
+                }
+            };
+            if references_env {
+                out.warnings.push(format!(
+                    "mcp.{name}: Kilo project-scope environment references are blocked"
+                ));
+            }
+        }
+
+        let oauth = match obj.get("oauth") {
+            None => crate::core::model::OAuthState::Unspecified,
+            Some(Value::Bool(false)) => crate::core::model::OAuthState::Disabled,
+            Some(Value::Bool(true)) => crate::core::model::OAuthState::Automatic,
+            Some(Value::Object(client)) => {
+                let client_id = client
+                    .get("client_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let secret = client.get("client_secret").and_then(Value::as_str);
+                // A literal client secret must never enter the manifest. Only an
+                // environment reference is representable.
+                let client_secret_env = match secret.map(env_reference) {
+                    Some(Some(var)) => Some(var.to_string()),
+                    Some(None) => {
+                        out.warnings.push(format!(
+                            "mcp.{name}: oauth.client_secret is a literal value, not an \
+                             {{env:NAME}} reference; the secret is not carried"
+                        ));
+                        None
+                    }
+                    None => None,
+                };
+                crate::core::model::OAuthState::Client {
+                    client_id,
+                    client_secret_env,
+                }
+            }
+            Some(other) => {
+                out.warnings.push(format!(
+                    "mcp.{name}: unrecognized oauth value {other}; treated as unspecified"
+                ));
+                crate::core::model::OAuthState::Unspecified
+            }
+        };
+
+        out.servers.push((
+            scope.clone(),
+            McpServer {
+                name: name.clone(),
+                transport,
+                enabled: obj.get("enabled").and_then(Value::as_bool),
+                // Exact JSON text. The unit is unverified against the runtime,
+                // so no conversion is applied to it.
+                timeout_json: obj.get("timeout").map(|v| v.to_string()),
+                cwd: obj.get("cwd").and_then(Value::as_str).map(str::to_string),
+                oauth,
+            },
+        ));
+    }
+
+    Ok(out)
 }
 
 #[cfg(test)]

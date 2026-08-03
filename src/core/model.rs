@@ -363,10 +363,55 @@ pub enum Transport {
     Http(HttpServer),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+impl Default for Transport {
+    fn default() -> Self {
+        Transport::Stdio(StdioServer::default())
+    }
+}
+
+/// Explicit OAuth intent for a server.
+///
+/// `Unspecified` is deliberately distinct from `Disabled`. A definition that
+/// says nothing about OAuth is not requesting it, so no login follow-up is
+/// emitted for it. Treating every credential-less HTTP server as "needs OAuth"
+/// reports work the user never asked for.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum OAuthState {
+    /// The definition carries no OAuth intent.
+    #[default]
+    Unspecified,
+    /// OAuth is explicitly turned off for this server.
+    Disabled,
+    /// The host performs automatic OAuth discovery.
+    Automatic,
+    /// An explicit OAuth client.
+    ///
+    /// The secret is held as the **name of an environment variable**, never a
+    /// literal. A client secret pasted into a synced manifest would be copied
+    /// verbatim into every host config; there is no code path here that can
+    /// carry one.
+    Client {
+        client_id: String,
+        client_secret_env: Option<String>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct McpServer {
     pub name: String,
     pub transport: Transport,
+    /// Whether the host should load this server. Absent means the host default
+    /// applies, which is not the same as `Some(true)`.
+    pub enabled: Option<bool>,
+    /// The host's `timeout` value, preserved as **exact JSON text**.
+    ///
+    /// The unit could not be established against the pinned runtimes, so no
+    /// seconds/milliseconds conversion is applied. Carrying the exact token
+    /// round-trips the value without inventing a meaning for it.
+    pub timeout_json: Option<String>,
+    /// Working directory for a local server.
+    pub cwd: Option<String>,
+    pub oauth: OAuthState,
 }
 
 impl McpServer {
@@ -393,6 +438,18 @@ impl McpServer {
             }
         }
         caps
+    }
+
+    /// True only when the definition **explicitly** asks for OAuth.
+    ///
+    /// Unlike [`Self::needs_interactive_login`], this never infers intent from
+    /// the absence of a credential. A public HTTP MCP server that needs no
+    /// authentication must not generate an OAuth follow-up action.
+    pub fn needs_oauth_login(&self) -> bool {
+        matches!(
+            self.oauth,
+            OAuthState::Automatic | OAuthState::Client { .. }
+        )
     }
 
     /// True when the definition carries no credential of its own, so the host
@@ -686,6 +743,7 @@ mod tests {
                 command: command.into(),
                 ..Default::default()
             }),
+            ..Default::default()
         }
     }
 
@@ -698,6 +756,7 @@ mod tests {
                 headers: BTreeMap::from([("X-Key".to_string(), "${K}".to_string())]),
                 bearer_token_env: None,
             }),
+            ..Default::default()
         };
         assert!(s.required_caps().contains(&Cap::Headers));
     }
@@ -717,6 +776,7 @@ mod tests {
         let b = McpServer {
             name: "x".into(),
             transport: Transport::Http(HttpServer::default()),
+            ..Default::default()
         };
         let diffs = a.diff(&b);
         assert_eq!(diffs.len(), 1);
@@ -731,6 +791,7 @@ mod tests {
                 url: "https://mcp.sentry.dev/mcp".into(),
                 ..Default::default()
             }),
+            ..Default::default()
         };
         assert!(oauth.needs_interactive_login());
 
@@ -741,6 +802,7 @@ mod tests {
                 bearer_token_env: Some("TOK".into()),
                 ..Default::default()
             }),
+            ..Default::default()
         };
         assert!(!with_env.needs_interactive_login());
 
@@ -751,6 +813,7 @@ mod tests {
                 headers: BTreeMap::from([("X-Key".to_string(), "${K}".to_string())]),
                 bearer_token_env: None,
             }),
+            ..Default::default()
         };
         assert!(!with_header.needs_interactive_login());
 
