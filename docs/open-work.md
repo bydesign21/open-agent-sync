@@ -969,32 +969,33 @@ Commit intent: `Generate Kilo hook bridges`.
 
 ---
 
-## RELEASE BLOCKER — the bridge runtime dispatcher does not exist
+## RELEASE BLOCKER — the Kilo bridge invokes a command that does not exist
 
-Both generated bridges shell out to:
+**Corrected finding.** An earlier version of this entry said the dispatcher was
+missing for both hosts. That was wrong. The two bridges diverged:
 
-    agentsync bridge-shim --index <index.json> --callback <name>
+| Bridge | Invokes | Exists? |
+|---|---|---|
+| OpenCode (`bridges/opencode.rs`) | `agentsync hook-shim --spec <path>` | **yes** — `Command::HookShim` in `src/main.rs:66` |
+| Kilo (`bridges/kilo.rs`) | `agentsync bridge-shim --index <index.json> --callback <name>` | **no** — not registered anywhere |
 
-**That subcommand does not exist in the CLI.** Verified by grepping `src/main.rs`
-and `src/tui/`: no `bridge-shim` handler is registered.
+OW-008 correctly reused the existing Codex `hook-shim` contract. OW-009
+invented a second one, despite both briefs saying to reuse the existing scheme
+and not build a parallel mechanism.
 
-Consequence, stated precisely: `bun build` compiles the generated TypeScript and
-passes, because bundling never executes it. So the OW-008/OW-009 Bun gates are
-green over a bridge that would fail at runtime with an unknown subcommand the
-moment a real host invoked it.
+Why the gates did not catch it: `bun build` bundles the TypeScript, it never
+executes it. A bridge calling a nonexistent subcommand bundles perfectly and
+fails only when a real host invokes it. This is a green gate over a path
+nothing executes.
 
-This is shared infrastructure for both hosts. It **blocks OW-011 and OW-013**:
-no live sentinel can ever fire until it exists. It does not block the unit or
-diff gates, which is exactly why it could pass unnoticed — a green gate over a
-path nothing executes.
+**Required fix:** make the Kilo bridge use `hook-shim --spec`, matching Codex
+and OpenCode. Do not implement `bridge-shim` — a second dispatcher contract is
+the defect, not the cure.
 
-Required before any live proof:
-
-1. Implement the `bridge-shim` subcommand: read the index, resolve the callback
-   to its sidecar spec, validate the artifact contract, run the handler, and
-   emit the typed bridge action through the host's output strategy.
-2. Prove it by EXECUTING the generated bridge under `bun`, not merely bundling
-   it. A build-only gate is not evidence of runtime behaviour.
+**Required proof:** EXECUTE a generated bridge under `bun` against a real
+built `agentsync` binary and assert a sentinel actually appears. Bundling is
+not evidence of runtime behaviour. Until that exists, no OW-011 or OW-013 live
+claim can be made.
 
 ## OW-009 — bridge generated, not wired
 
