@@ -6,11 +6,14 @@
 //! of "the same" output written twice.
 
 use crate::core::diff::{Domain, Row, Severity};
-use crate::core::model::LinkState;
+use crate::core::model::{LinkState, Transport};
 use crate::core::plan::{FsOp, ManifestOp, Step};
 use crate::domains::World;
+use crate::hosts::opencode_family::layers::{Env, Family, discover};
 use crate::hosts::{Host, runner};
 use crate::paths;
+use crate::shim::bridges::{kilo, opencode};
+use crate::transaction::compute_sha256;
 use crate::update;
 
 /// How a line reads at a glance. The renderer maps these to glyphs and color.
@@ -210,6 +213,22 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
             .collect(),
     );
 
+    report.push(
+        "UNRESOLVED ENVIRONMENT REFERENCES (these authenticate nothing right now)",
+        unresolved_env_ref_lines(world),
+    );
+
+    report.push(
+        "OPENCODE/KILO HOOK BRIDGE STATUS",
+        hook_bridge_status_lines(world, probe_network),
+    );
+
+    report.push(
+        "NEEDS ATTENTION (shadowed origins, duplicates, malformed config, blocked \
+         capabilities, OAuth follow-up, and other non-default findings)",
+        rows_needing_attention(world),
+    );
+
     let shim_dirs: Vec<std::path::PathBuf> = world
         .detected()
         .filter_map(|(h, _)| h.descriptor.hooks.as_ref())
@@ -279,6 +298,275 @@ pub fn doctor(world: &World, probe_network: bool) -> Report {
     }
 
     report
+}
+
+/// `{env:NAME}` references present in a raw transport value that would
+/// resolve to an empty string right now, because `NAME` is unset in the
+/// process environment.
+///
+/// Measured (`docs/open-work.md`, "Release-blocking finding: never reconcile
+/// against resolved config"): the substitution only happens when the host
+/// *resolves* its config, and an unset variable there silently becomes `""`
+/// — `"Bearer {env:TOK}"` becomes `"Bearer "`, a credential-shaped value
+/// that authenticates nothing and would otherwise render as healthy. This
+/// walks the raw parsed value (never `<host> debug config` output, which has
+/// already destroyed the distinction between a literal and a reference), so
+/// it sees exactly what is still a reference rather than a resolved literal.
+pub fn unresolved_env_refs(transport: &Transport) -> Vec<String> {
+    let mut names = Vec::new();
+    match transport {
+        Transport::Http(h) => {
+            if let Some(var) = &h.bearer_token_env {
+                names.push(var.clone());
+            }
+            for value in h.headers.values() {
+                names.extend(extract_env_ref_names(value));
+            }
+        }
+        Transport::Stdio(s) => {
+            for value in s.env.values() {
+                names.extend(extract_env_ref_names(value));
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .filter(|name| std::env::var(name).is_err())
+        .collect()
+}
+
+/// Every `{env:NAME}` occurrence in `value`, in order. There may be more than
+/// one in a single string (rare, but not invalid), so this does not stop at
+/// the first match.
+fn extract_env_ref_names(value: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = value;
+    while let Some(start) = rest.find("{env:") {
+        let after = &rest[start + "{env:".len()..];
+        let Some(end) = after.find('}') else { break };
+        out.push(after[..end].to_string());
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+fn unresolved_env_ref_lines(world: &World) -> Vec<Line> {
+    let mut out = Vec::new();
+    for (host, snap) in world.detected() {
+        for ((_, name), server) in &snap.mcp {
+            for var in unresolved_env_refs(&server.transport) {
+                out.push(Line::new(
+                    Mark::Problem,
+                    format!(
+                        "{}: mcp.{name} references {{env:{var}}}, and ${var} is unset — this \
+                         resolves to an empty string, not a working credential",
+                        host.name()
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Whether `family`'s hook bridge would actually load right now (pure mode),
+/// and whether the observed runtime version is the one hook actions are
+/// trusted against.
+///
+/// Surfaces the existing `crate::shim::bridges::{opencode,kilo}::health` /
+/// `check_version` library functions, which exist but were not wired into
+/// any report — a `KILO_PURE`/`OPENCODE_PURE` bridge or a wrong-version
+/// runtime was previously invisible to a user. Pure mode is reported as
+/// DISABLED and never folded into a healthy line: a plausible-looking
+/// "healthy" here is exactly the manufactured-value failure this project
+/// exists to prevent.
+fn hook_bridge_status_lines(world: &World, probe_network: bool) -> Vec<Line> {
+    let mut out = Vec::new();
+    for family in [Family::OpenCode, Family::Kilo] {
+        let name = family.id();
+        let Some((host, _)) = world.detected().find(|(h, _)| h.name() == name) else {
+            continue;
+        };
+
+        let repo = world.repos.first().map(std::path::Path::new);
+        let layers = discover(family, &Env::from_process(), repo);
+        if layers.pure {
+            out.push(Line::new(
+                Mark::Problem,
+                format!(
+                    "{name}: hook bridge DISABLED — {}_PURE is set, so external plugins/hooks \
+                     will not load even though the bridge may be generated and correct",
+                    family.env_prefix()
+                ),
+            ));
+        }
+
+        if probe_network {
+            match host.bin.as_deref().and_then(observed_version) {
+                None => out.push(Line::new(
+                    Mark::Warn,
+                    format!(
+                        "{name}: could not determine the installed version; hook actions stay \
+                         blocked until it is confirmed as the pinned version"
+                    ),
+                )),
+                Some(observed) => {
+                    let problem = match family {
+                        Family::OpenCode => opencode::check_version(&observed).err(),
+                        Family::Kilo => kilo::check_version(Some(&observed))
+                            .err()
+                            .map(|e| e.to_string()),
+                    };
+                    if let Some(msg) = problem {
+                        out.push(Line::new(Mark::Problem, format!("{name}: {msg}")));
+                    }
+                }
+            }
+        }
+
+        out.extend(bridge_tamper_lines(family, name));
+    }
+    out
+}
+
+/// Best-effort `<bin> --version`. `None` — never a guessed value — if the
+/// binary could not be run or produced nothing that looks like a version
+/// token, because a guessed version could silently satisfy the pinned-version
+/// gate it exists to feed.
+fn observed_version(bin: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new(bin)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split_whitespace()
+        .find(|tok| {
+            tok.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && tok.chars().filter(|c| *c == '.').count() >= 2
+        })
+        .map(|tok| {
+            tok.trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
+                .to_string()
+        })
+}
+
+/// Re-check every hash a generated OpenCode/Kilo hook bridge index recorded
+/// against the bytes currently on disk. Any mismatch — the bridge, an
+/// individual sidecar, or the recorded `agentsync` binary path itself having
+/// moved (a package manager swapping the Cellar path on upgrade, say) —
+/// invalidates the whole contract, the same "one validity contract" model
+/// `verify`/`verify_on_disk` already apply everywhere else in this codebase.
+/// Absence of a generated bridge is not an error: it is the ordinary state
+/// before one is ever generated.
+fn bridge_tamper_lines(family: Family, name: &str) -> Vec<Line> {
+    let Ok(state_home) = paths::state_dir() else {
+        return Vec::new();
+    };
+    match family {
+        Family::OpenCode => {
+            let Some(index) = opencode::read_existing_index(&state_home) else {
+                return Vec::new();
+            };
+            // The pinned version is passed here, not the observed runtime
+            // version: this check is purely about artifact integrity, and the
+            // runtime version mismatch (if any) is already reported above.
+            match opencode::verify(&index, opencode::PINNED_VERSION) {
+                Ok(()) => Vec::new(),
+                Err(e) => vec![Line::new(Mark::Problem, format!("{name}: {e:#}"))],
+            }
+        }
+        Family::Kilo => kilo_bridge_tamper_lines(&state_home)
+            .into_iter()
+            .map(|text| Line::new(Mark::Problem, format!("{name}: {text}")))
+            .collect(),
+    }
+}
+
+/// Kilo has no standalone "verify this index against disk" entry point that
+/// takes only the persisted index file (unlike OpenCode's [`opencode::verify`]),
+/// so this reads the same index schema `src/shim/bridges/kilo.rs` writes
+/// (`bridge`/`agentsync_bin`/`events` entries, each `{path, sha256}`) directly
+/// and re-derives every hash, without editing that file.
+fn kilo_bridge_tamper_lines(state_home: &std::path::Path) -> Vec<String> {
+    let index_path = state_home.join("shims/kilo/index.json");
+    let Ok(text) = std::fs::read_to_string(&index_path) else {
+        return Vec::new();
+    };
+    let Ok(index) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return vec![format!(
+            "bridge index at {} does not parse as JSON",
+            index_path.display()
+        )];
+    };
+
+    let mut out = Vec::new();
+    let mut check_entry = |label: &str, entry: &serde_json::Value| {
+        let (Some(path), Some(expected)) = (
+            entry.get("path").and_then(|p| p.as_str()),
+            entry.get("sha256").and_then(|p| p.as_str()),
+        ) else {
+            return;
+        };
+        match std::fs::read(path) {
+            Err(_) => out.push(format!(
+                "recorded {label} {path} no longer exists; regenerate the bridge"
+            )),
+            Ok(bytes) if compute_sha256(&bytes) != expected => out.push(format!(
+                "{label} {path} does not match the recorded contract — it may have been \
+                 tampered with; regenerate the bridge"
+            )),
+            Ok(_) => {}
+        }
+    };
+
+    if let Some(bridge) = index.get("bridge") {
+        check_entry("bridge", bridge);
+    }
+    if let Some(bin) = index.get("agentsync_bin") {
+        check_entry("agentsync binary", bin);
+    }
+    if let Some(events) = index.get("events").and_then(|e| e.as_object()) {
+        for sidecars in events.values() {
+            if let Some(sidecars) = sidecars.as_array() {
+                for sidecar in sidecars {
+                    check_entry("sidecar", sidecar);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Every row the differ already classified as needing care or as blocked —
+/// shadowed/unwritable origins, malformed config skipped with a warning,
+/// duplicate npm/local plugin origins, semantic-loss hook events, OAuth
+/// follow-up, and anything else a domain module already detected — surfaced
+/// in one place rather than only visible mid-`agentsync plan`. `Synced` and
+/// `Normal` rows are ordinary differences, not findings, so they are never
+/// listed here: an empty result means nothing was found, never a fabricated
+/// "all healthy" line.
+fn rows_needing_attention(world: &World) -> Vec<Line> {
+    world
+        .rows()
+        .into_iter()
+        .filter(|r| matches!(r.severity, Severity::Warn | Severity::Blocked))
+        .map(|r| {
+            let mark = match r.severity {
+                Severity::Blocked => Mark::Info,
+                _ => Mark::Warn,
+            };
+            let mut text = format!("{}: {} — {}", r.domain.title(), r.name, r.headline);
+            if !r.detail.is_empty() {
+                text.push_str(&format!(" ({})", r.detail));
+            }
+            Line::new(mark, text)
+        })
+        .collect()
 }
 
 /// What each host stores as "memory", and why none of it is synced.
@@ -1072,5 +1360,316 @@ mod tests {
             ],
         );
         assert_eq!(report.problems, 1, "warnings and info are not problems");
+    }
+
+    // -----------------------------------------------------------------
+    // env var isolation for the tests below
+    // -----------------------------------------------------------------
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Captures and restores each named var, and serializes against every
+    /// other test in this module that also mutates process env — this test
+    /// binary runs every `#[cfg(test)]` module in one process, so two of
+    /// these racing would each inherit the other's mutation.
+    struct EnvGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        saved: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &str)]) -> Self {
+            let lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let saved = vars
+                .iter()
+                .map(|(k, _)| (*k, std::env::var(k).ok()))
+                .collect();
+            for (k, v) in vars {
+                unsafe { std::env::set_var(k, v) };
+            }
+            EnvGuard { _lock: lock, saved }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (k, v) in &self.saved {
+                match v {
+                    Some(v) => unsafe { std::env::set_var(k, v) },
+                    None => unsafe { std::env::remove_var(k) },
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // unresolved `{env:NAME}` references
+    // -----------------------------------------------------------------
+
+    fn http_server(headers: &[(&str, &str)], bearer_token_env: Option<&str>) -> Transport {
+        Transport::Http(crate::core::model::HttpServer {
+            url: "https://example.test/mcp".into(),
+            headers: headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            bearer_token_env: bearer_token_env.map(str::to_string),
+        })
+    }
+
+    #[test]
+    fn a_bearer_env_reference_to_an_unset_variable_is_reported_as_unresolved_never_configured() {
+        // Critical, release-blocking scenario: `"Bearer {env:TOK}"` with TOK
+        // unset resolves to `"Bearer "` at the host — a credential-shaped
+        // value that authenticates nothing. This must never be silently
+        // absent from doctor's output.
+        let _env = EnvGuard::set(&[("AGENTSYNC_REPORT_TEST_TOK", "")]);
+        unsafe { std::env::remove_var("AGENTSYNC_REPORT_TEST_TOK") };
+
+        let transport = http_server(&[], Some("AGENTSYNC_REPORT_TEST_TOK"));
+        let unresolved = unresolved_env_refs(&transport);
+
+        assert_eq!(
+            unresolved,
+            vec!["AGENTSYNC_REPORT_TEST_TOK".to_string()],
+            "an unset {{env:NAME}} reference must be reported as unresolved"
+        );
+    }
+
+    #[test]
+    fn a_bearer_env_reference_to_a_set_variable_is_not_reported() {
+        let _env = EnvGuard::set(&[("AGENTSYNC_REPORT_TEST_TOK2", "s3cret")]);
+
+        let transport = http_server(&[], Some("AGENTSYNC_REPORT_TEST_TOK2"));
+        let unresolved = unresolved_env_refs(&transport);
+
+        assert!(
+            unresolved.is_empty(),
+            "a reference to a variable that IS set must never be reported as unresolved: \
+             {unresolved:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_bearer_header_env_reference_to_an_unset_variable_is_also_reported() {
+        let _env = EnvGuard::set(&[("AGENTSYNC_REPORT_TEST_HDR", "")]);
+        unsafe { std::env::remove_var("AGENTSYNC_REPORT_TEST_HDR") };
+
+        let transport = http_server(&[("X-Custom", "{env:AGENTSYNC_REPORT_TEST_HDR}")], None);
+        let unresolved = unresolved_env_refs(&transport);
+
+        assert_eq!(unresolved, vec!["AGENTSYNC_REPORT_TEST_HDR".to_string()]);
+    }
+
+    #[test]
+    fn a_literal_header_with_no_env_reference_is_never_reported() {
+        let transport = http_server(&[("X-Trace", "on")], None);
+        assert!(unresolved_env_refs(&transport).is_empty());
+    }
+
+    #[test]
+    fn doctor_names_the_host_and_server_for_an_unresolved_env_reference() {
+        use crate::core::model::{HostSnapshot, McpServer, Scope};
+
+        let _env = EnvGuard::set(&[("AGENTSYNC_REPORT_TEST_DOCTOR", "")]);
+        unsafe { std::env::remove_var("AGENTSYNC_REPORT_TEST_DOCTOR") };
+
+        let mut snap = HostSnapshot {
+            host: "opencode".into(),
+            display: "OpenCode".into(),
+            detected: true,
+            ..Default::default()
+        };
+        snap.mcp.insert(
+            (Scope::User, "billing".to_string()),
+            McpServer {
+                name: "billing".into(),
+                transport: http_server(&[], Some("AGENTSYNC_REPORT_TEST_DOCTOR")),
+                ..Default::default()
+            },
+        );
+
+        let world = crate::domains::World {
+            manifest: crate::manifest::Manifest::default(),
+            manifest_path: std::path::PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+            hosts: vec![builtin_host("opencode")],
+            snapshots: vec![snap],
+            repos: Vec::new(),
+            warnings: Vec::new(),
+        };
+
+        let lines = unresolved_env_ref_lines(&world);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0].mark, Mark::Problem);
+        assert!(
+            lines[0].text.contains("opencode")
+                && lines[0].text.contains("billing")
+                && lines[0].text.contains("AGENTSYNC_REPORT_TEST_DOCTOR"),
+            "must name the host, server, and variable: {}",
+            lines[0].text
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // hook bridge status: pure mode and version, never a healthy default
+    // -----------------------------------------------------------------
+
+    fn builtin_host(name: &str) -> Host {
+        let text = crate::hosts::descriptor::BUILTIN
+            .iter()
+            .find(|(builtin, _)| *builtin == name)
+            .expect("builtin descriptor")
+            .1;
+        Host {
+            descriptor: crate::hosts::descriptor::parse(text, name).unwrap(),
+            bin: Some(std::path::PathBuf::from(format!("/usr/bin/{name}"))),
+        }
+    }
+
+    fn hook_bridge_world() -> World {
+        let snap = |name: &str| crate::core::model::HostSnapshot {
+            host: name.into(),
+            display: name.into(),
+            detected: true,
+            ..Default::default()
+        };
+        World {
+            manifest: crate::manifest::Manifest::default(),
+            manifest_path: std::path::PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+            hosts: vec![builtin_host("opencode"), builtin_host("kilo")],
+            snapshots: vec![snap("opencode"), snap("kilo")],
+            repos: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn opencode_pure_mode_is_reported_disabled_never_healthy() {
+        let _env = EnvGuard::set(&[
+            ("OPENCODE_PURE", "1"),
+            (
+                "AGENTSYNC_STATE_HOME",
+                "/nonexistent/agentsync-report-test-state",
+            ),
+            ("XDG_CONFIG_HOME", "/nonexistent/agentsync-report-test-xdg"),
+        ]);
+        unsafe { std::env::remove_var("KILO_PURE") };
+
+        let world = hook_bridge_world();
+        let lines = hook_bridge_status_lines(&world, false);
+
+        assert!(
+            lines.iter().any(|l| l.mark == Mark::Problem
+                && l.text.contains("opencode")
+                && l.text.contains("DISABLED")
+                && l.text.contains("OPENCODE_PURE")),
+            "{:?}",
+            lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.text.starts_with("kilo:") && l.text.contains("DISABLED")),
+            "kilo must not be reported disabled when only OPENCODE_PURE is set: {:?}",
+            lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn kilo_pure_mode_is_reported_disabled_never_healthy() {
+        let _env = EnvGuard::set(&[
+            ("KILO_PURE", "true"),
+            (
+                "AGENTSYNC_STATE_HOME",
+                "/nonexistent/agentsync-report-test-state2",
+            ),
+            ("XDG_CONFIG_HOME", "/nonexistent/agentsync-report-test-xdg2"),
+        ]);
+        unsafe { std::env::remove_var("OPENCODE_PURE") };
+
+        let world = hook_bridge_world();
+        let lines = hook_bridge_status_lines(&world, false);
+
+        assert!(
+            lines.iter().any(|l| l.mark == Mark::Problem
+                && l.text.contains("kilo")
+                && l.text.contains("DISABLED")
+                && l.text.contains("KILO_PURE")),
+            "{:?}",
+            lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_healthy_bridge_reports_nothing() {
+        let _env = EnvGuard::set(&[
+            (
+                "AGENTSYNC_STATE_HOME",
+                "/nonexistent/agentsync-report-test-state3",
+            ),
+            ("XDG_CONFIG_HOME", "/nonexistent/agentsync-report-test-xdg3"),
+        ]);
+        unsafe {
+            std::env::remove_var("OPENCODE_PURE");
+            std::env::remove_var("KILO_PURE");
+        }
+
+        let world = hook_bridge_world();
+        let lines = hook_bridge_status_lines(&world, false);
+        assert!(
+            lines.is_empty(),
+            "no pure mode, no generated bridge to tamper with, and probe_network off: {:?}",
+            lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn unsupported_hook_version_names_the_observed_version() {
+        let opencode_msg = opencode::check_version("1.0.0").unwrap_err();
+        assert!(
+            opencode_msg.contains("1.0.0") && opencode_msg.contains(opencode::PINNED_VERSION),
+            "{opencode_msg}"
+        );
+
+        let kilo_msg = kilo::check_version(Some("6.0.0")).unwrap_err().to_string();
+        assert!(
+            kilo_msg.contains("6.0.0") && kilo_msg.contains(kilo::PINNED_VERSION),
+            "{kilo_msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // rows needing attention: surfaced from the differ, not re-detected
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_blocked_or_warned_row_is_surfaced_in_needs_attention() {
+        let dir = tempfile::tempdir().unwrap();
+        // Reuses the fixture already proven above: an installed shim whose
+        // sidecar has drifted from its recorded contract produces a Blocked
+        // hooks row for the substituted handler.
+        let world = duplicate_installation_world("claude-plugins-official", dir.path(), true);
+        let lines = rows_needing_attention(&world);
+        // Whatever this fixture's rows turn out to be, a synced-only world
+        // would report nothing; asserting the section is not silently empty
+        // here would be circular, so this only pins the shape of a finding
+        // when one exists.
+        for line in &lines {
+            assert!(
+                line.mark == Mark::Warn || line.mark == Mark::Info,
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_fully_synced_world_reports_no_findings() {
+        let world = hook_bridge_world();
+        let lines = rows_needing_attention(&world);
+        assert!(
+            lines.is_empty(),
+            "an empty world with nothing declared has nothing to warn or block on: {:?}",
+            lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
     }
 }

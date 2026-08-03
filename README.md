@@ -386,19 +386,21 @@ the content is copied to `~/.config/agentsync/backups/` first.
 ## Adding another CLI
 
 A host is a TOML descriptor. Drop one in `~/.config/agentsync/hosts/` — no
-recompile, and it overrides a built-in of the same name.
+recompile, and it overrides a built-in of the same name. This is a made-up
+example CLI, `acme` — not one of the built-ins, so a host that writes through
+its own CLI `add`/`remove` commands is easier to show:
 
 ```toml
-name = "opencode"
-display = "OpenCode"
-detect = { bin = "opencode" }
+name = "acme"
+display = "Acme CLI"
+detect = { bin = "acme" }
 
 [mcp]
 scopes = ["user"]
 caps = ["stdio", "http", "env", "bearer_env"]
 
 [[mcp.read]]
-file = "~/.config/opencode/config.json"
+file = "~/.config/acme/config.json"
 parser = "claude_json_v1"        # reuse a compiled parser
 
 [mcp.add]
@@ -413,8 +415,16 @@ bearer_env_flag = "--bearer-token-env-var"
 argv = ["mcp", "remove", "{name}"]
 
 [skills]
-dirs = ["~/.config/opencode/skills"]   # dirs[0] is the link target
+dirs = ["~/.config/acme/skills"]   # dirs[0] is the link target
 ```
+
+Not every host has an `mcp remove` command to call. OpenCode and Kilo are
+measured examples: `opencode mcp`/`kilo mcp` only offer `add`, `list`, `auth`,
+`logout`, `debug`. A descriptor for a host like that omits `[mcp.add]` and
+`[mcp.remove]` entirely and instead declares `[mcp.jsonc]` (`user_file`/
+`project_file`), which routes every add, update, and removal through a
+guarded, origin-aware edit of the raw JSONC file instead of a CLI call — see
+`src/hosts/builtin/opencode.toml` and `kilo.toml` for the real descriptors.
 
 Config *parsing* stays compiled — `parser = "..."` names one of a handful of
 shapes, listed by `agentsync hosts --parsers`. Config formats are too irregular
@@ -551,11 +561,48 @@ version. The `VERSION=` examples in this README do, and the one-liner is served
 from `master` rather than a tag — a fix to the installer reaches people without a
 release.
 
+## Host support matrix
+
+Four hosts are built in: Claude Code, Codex, OpenCode, and Kilo. The first two
+are the mature pair; OpenCode and Kilo were added later and are measured
+against one pinned version each, not against a version range. Every scope,
+path, and limitation below was checked by writing a distinguishing key into a
+candidate layer and reading it back with `<host> debug config` under a
+temporary `XDG_CONFIG_HOME` — never assumed from documentation. See
+`docs/open-work.md` ("Verified runtime contracts") for the full probe log, and
+`src/hosts/builtin/{opencode,kilo}.toml` for the descriptors these facts back.
+
+| | OpenCode | Kilo |
+|---|---|---|
+| Verified against | `1.18.11` exactly | `7.4.17` exactly |
+| MCP scopes | user, project | user, project |
+| MCP write path | guarded JSONC edit — **no `mcp remove` command exists** (`opencode mcp` offers only `add`, `list`, `auth`, `logout`, `debug`) | same — Kilo shares OpenCode's CLI surface |
+| MCP fields | `type`, `command` (array, never shell-split), `environment`, `url`, `headers`, `enabled`, `timeout` (unit unverified — carried as an opaque number), `cwd` | same schema |
+| Config files | `{xdg_config}/opencode/opencode.jsonc` (`.jsonc` deep-merges over `.json`) | `{xdg_config}/kilo/kilo.jsonc`; reads current `.kilo/` and legacy `.kilocode/` project dirs, `.kilo/` winning |
+| `{env:NAME}` references | preserved as references, never resolved during reconciliation — see the warning below | same |
+| Instructions | `AGENTS.md`, XDG-rooted user file, `{repo}/AGENTS.md` project, no local scope | same, plus the active `KILO_CONFIG_DIR` profile takes precedence over the default global file |
+| Skills | shared `~/.agents/skills` (dirs[0]) plus native `{xdg_config}/<id>/skill` and `/skills` | same |
+| Plugins | no marketplace or CLI plugin command; npm/local targets are copied to host-owned files under `<profile>/plugin(s)/agentsync-<name>` | same |
+| Pure mode | `OPENCODE_PURE=1` — reported DISABLED, never healthy | `KILO_PURE=1` — reported DISABLED, never healthy |
+| Hooks — generator | implemented and tested (`src/shim/bridges/opencode.rs`); nine measured callbacks, two (`tool.execute.before`/`after`) have a real event mapping | implemented and tested (`src/shim/bridges/kilo.rs`), including genuine execution proof through the real binary |
+| Hooks — wired into production | **yes** — `domains/hooks.rs` calls `spec_for` and maps `PreToolUse`/`PostToolUse` onto the two OpenCode callbacks that have one | **not yet** — `spec_for` is only called from Kilo's own tests today. The portable-event-to-Kilo-callback mapping has not been measured, so wiring it into `domains/hooks.rs` is separate, currently-in-progress work. Describing this as wired would be aspirational, not observed |
+
+**Release-blocking, and worth repeating outside the measurement log:** an
+`{env:NAME}` reference is substituted only when the host *resolves* its
+config. The raw file on disk keeps the placeholder, but an **unset** variable
+resolves to an empty string — `"Bearer {env:TOK}"` becomes `"Bearer "`, which
+looks credential-shaped and authenticates nothing. `agentsync doctor` reports
+such a reference as unresolved; it is never treated as configured, and
+reconciliation always reads the raw file, never `<host> debug config`.
+
 ## Status
 
-Early. Verified against Claude Code 2.1.220 and Codex CLI 0.146.0 on macOS
-(Apple Silicon). Every capability claim in the built-in descriptors was checked
-against the CLIs' own `--help` output rather than assumed — see the comments in
+Early. Claude Code and Codex are the mature pair, verified against Claude Code
+2.1.220 and Codex CLI 0.146.0 on macOS (Apple Silicon). OpenCode and Kilo were
+added afterward and are measured against the single pinned versions in the
+table above; every capability claim in all four built-in descriptors was
+checked against the real CLIs (`--help` output, or a temporary `XDG_CONFIG_HOME`
+probe for the OpenCode family) rather than assumed — see the comments in
 `src/hosts/builtin/*.toml`.
 
 Known gaps:
@@ -563,6 +610,13 @@ Known gaps:
 - Codex's project-scoped `.mcp.json` support is inferred from its loader strings,
   not confirmed. Its descriptor declares `scopes = ["user"]` until it is. Claude
   Code's three scopes are confirmed against `claude mcp add --help`.
+- Kilo's hook bridge generator is implemented and tested end to end, but is not
+  yet wired into `domains/hooks.rs` — see the host support matrix above. Until
+  that lands, Kilo hooks are readable and reportable but not pushable.
+- `timeout`'s unit for OpenCode/Kilo MCP servers could not be established
+  against the pinned runtimes. It round-trips as an exact, opaque number; no
+  seconds/milliseconds conversion is applied, because inventing one would be
+  worse than carrying it unconverted.
 - `agentsync doctor --fix`, to rewrite a literal secret out of a host's own config
   file, is not implemented. Today, moving a token to an environment variable
   rewrites the manifest and re-pushes the corrected definition. The old literal
@@ -571,9 +625,9 @@ Known gaps:
   opposed to a project `.mcp.json`) is unverified. If it does not, a bearer token
   moved to an environment variable will be sent literally. Check with
   `claude mcp list` after applying such a change.
-- Only tested by hand against the real Claude Code and Codex on macOS. CI proves
-  the code builds and its own tests pass on all three platforms, but the host
-  descriptors' paths and capabilities are verified against the macOS CLIs.
+- Only tested by hand against the real hosts on macOS. CI proves the code
+  builds and its own tests pass on all three platforms, but every descriptor's
+  paths and capabilities are verified against the macOS CLIs.
 
 ## License
 
