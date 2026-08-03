@@ -1261,6 +1261,72 @@ directory in one combined `apply`, the second transaction's
 snapshot. The gate works around it by splitting into two sequential `apply`
 invocations. Not fixed.
 
+## POST-REVIEW: two defects found by running the released binary for real
+
+Both were found only when the user ran the built binary against their live
+machine, after OW-012 had already APPROVED the branch. Both were invisible to
+501 passing tests, the four-host convergence gate, and the live E2E gate.
+
+### Defect A — only the first MCP server of N ever applied (`6737c9a`)
+
+Real user output: `computer-use` succeeded, then six servers failed on both
+hosts with `precondition failed ... expected Sha256(74e4d8f...)`, every failure
+naming the SAME expected hash.
+
+Cause: `domains/mcp.rs` built one `ConfigTransaction` per server, each stamping
+the target file's hash at PLAN time. The first write changed the file, so every
+later transaction's precondition correctly failed. The guard was right; the
+batching was wrong. This violated OW-002 invariant 6 ("MCP and plugin edits in
+one file compose into one write") — the transaction layer already supported it
+and the domain layer simply did not use it.
+
+Fixed with `McpJsoncOp` + `set_transaction_batch`: all edits to one file compose
+into ONE guarded transaction, one plan step, precondition unchanged. Set and
+remove in the same file compose together too.
+
+### Defect B — no env-referencing server could ever sync (`183e742`)
+
+Exposed by fixing A. Real output:
+`verification failed: expected resolver context variable UPSKILLAI_KNOWLEDGE_TOKEN, actual missing`
+— for a variable that WAS set.
+
+Cause: `resolve_string` hard-errored on any `{env:NAME}` it could not resolve,
+and `ConfigTransaction` always carried an empty `ResolverContext`. So every
+server holding a token failed regardless of the environment, and once batched,
+one such server blocked every healthy server writing to that file.
+
+The fix that did NOT work, recorded so it is not retried: populating
+`ResolverContext::from_process()` on the write path. That resolves the OBSERVED
+projection while the DESIRED value keeps its placeholder, so verification
+compares `Bearer {env:TOK}` against `Bearer <secret>`, fails, and rolls back.
+**The new live-gate assertion caught this within one run.**
+
+Correct semantics, now implemented: `{env:NAME}` stays LITERAL on both sides. It
+belongs in the config file — the host resolves it at runtime. An unresolvable
+reference degrades to the literal placeholder rather than aborting, and is never
+expanded to empty (the host turns an unset variable into `""`, so `Bearer ` would
+be a credential-shaped value that renders as healthy). Whether a reference will
+resolve is a doctor concern: `report.rs::unresolved_env_refs`.
+
+### Why every gate missed both
+
+**Every fixture used exactly ONE MCP server, and none used an env reference.**
+A single-item fixture cannot detect a batching defect, and a plain server cannot
+detect a resolver defect. The suite thoroughly verified that one write was
+correct and never verified how multiple writes interact.
+
+Both gaps are now closed in the committed gate: the live fixture seeds three
+plain servers plus one env-referencing server, and asserts the placeholder
+survives verbatim while the variable's VALUE never reaches the config file.
+Live gate now reports 21 proved-live, 0 failures.
+
+### Lesson for the ledger
+
+Cardinality and shape are part of a fixture's contract. "It works" proven at
+N=1 with the simplest input shape is not proven at N>1 or with a realistic one.
+Prefer fixtures that mirror a real user manifest — several entries, at least one
+carrying a secret reference.
+
 ## OW-012 — Whole-branch review, merge, and local release gate
 
 **State: not started. Release blocker. Depends on OW-011.**
