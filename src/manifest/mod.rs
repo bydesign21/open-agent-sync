@@ -306,6 +306,11 @@ pub struct PluginEntry {
     pub marketplace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hosts: Option<Vec<String>>,
+    /// Explicit per-host npm/local mappings for hosts with no marketplace to
+    /// resolve a bare name against (OpenCode, Kilo). Additive: an existing
+    /// manifest with no `targets` table keeps parsing unchanged.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, PluginTarget>,
 }
 
 impl PluginEntry {
@@ -314,6 +319,53 @@ impl PluginEntry {
             None => true,
             Some(list) => list.iter().any(|h| h == host),
         }
+    }
+}
+
+/// An explicit npm or local mapping from a marketplace plugin to one
+/// OpenCode-family host. Neither CLI resolves a bare plugin id for these
+/// hosts and neither has a marketplace to look one up in, so a target here
+/// must be named explicitly — never guessed.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct PluginTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npm: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<String>,
+    #[serde(default = "default_scope")]
+    pub scope: ScopeKind,
+}
+
+/// The one distinct identity a [`PluginTarget`] names. npm and local
+/// identities are never conflated: an npm spec and a local file path live in
+/// different namespaces even if their text happened to collide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginIdentity {
+    Npm(String),
+    Local(String),
+}
+
+impl PluginTarget {
+    /// The identity this target names, or `None` when it names zero or both
+    /// of `npm`/`local`. Ambiguity is a condition to report, never a guess.
+    pub fn identity(&self) -> Option<PluginIdentity> {
+        match (&self.npm, &self.local) {
+            (Some(npm), None) => Some(PluginIdentity::Npm(npm.clone())),
+            (None, Some(local)) => Some(PluginIdentity::Local(local.clone())),
+            _ => None,
+        }
+    }
+
+    /// Resolve a `local` source relative to the manifest's own directory,
+    /// same convention as [`SkillEntry::resolve`]. `None` for an npm target.
+    pub fn resolve_local(&self, manifest_dir: &Path) -> Option<PathBuf> {
+        let source = self.local.as_ref()?;
+        let expanded = paths::expand(source);
+        Some(if expanded.is_absolute() {
+            expanded
+        } else {
+            manifest_dir.join(expanded)
+        })
     }
 }
 
@@ -601,6 +653,117 @@ caps = ["matcher", "timeout", "async_rewake", "if"]
         // Untouched lists survive.
         assert!(!effective.accepts_output(crate::core::model::HookOutputField::RewakeSummary));
         assert!(effective.can_shim());
+    }
+
+    #[test]
+    fn plugin_target_backward_compatible_manifest_without_targets_still_parses() {
+        let text = r#"
+[plugins.superpowers]
+marketplace = "claude-plugins-official"
+"#;
+        let m: Manifest = toml::from_str(text).unwrap();
+        assert!(m.plugins["superpowers"].targets.is_empty());
+        // Round-trips without inventing a `[plugins.superpowers.targets]` table.
+        let rendered = toml::to_string_pretty(&m).unwrap();
+        assert!(!rendered.contains("targets"));
+    }
+
+    #[test]
+    fn plugin_target_parses_the_documented_npm_and_local_examples() {
+        let text = r#"
+[plugins.security-guidance.targets.opencode]
+npm = "@company/opencode-security@1.4.2"
+scope = "user"
+
+[plugins.local-policy.targets.kilo]
+local = "plugins/local-policy.ts"
+scope = "project"
+"#;
+        let m: Manifest = toml::from_str(text).unwrap();
+        let npm_target = &m.plugins["security-guidance"].targets["opencode"];
+        assert_eq!(
+            npm_target.identity(),
+            Some(PluginIdentity::Npm(
+                "@company/opencode-security@1.4.2".into()
+            ))
+        );
+        assert_eq!(npm_target.scope, ScopeKind::User);
+
+        let local_target = &m.plugins["local-policy"].targets["kilo"];
+        assert_eq!(
+            local_target.identity(),
+            Some(PluginIdentity::Local("plugins/local-policy.ts".into()))
+        );
+        assert_eq!(local_target.scope, ScopeKind::Project);
+    }
+
+    #[test]
+    fn plugin_target_npm_and_local_are_distinct_identities_even_with_the_same_text() {
+        let npm = PluginTarget {
+            npm: Some("same-text".into()),
+            local: None,
+            scope: ScopeKind::User,
+        };
+        let local = PluginTarget {
+            npm: None,
+            local: Some("same-text".into()),
+            scope: ScopeKind::User,
+        };
+        assert_ne!(npm.identity(), local.identity());
+    }
+
+    #[test]
+    fn plugin_target_with_neither_npm_nor_local_has_no_identity() {
+        let target = PluginTarget {
+            npm: None,
+            local: None,
+            scope: ScopeKind::User,
+        };
+        assert_eq!(target.identity(), None);
+    }
+
+    #[test]
+    fn plugin_target_with_both_npm_and_local_has_no_identity_rather_than_a_guess() {
+        let target = PluginTarget {
+            npm: Some("pkg".into()),
+            local: Some("plugins/pkg.ts".into()),
+            scope: ScopeKind::User,
+        };
+        assert_eq!(
+            target.identity(),
+            None,
+            "an ambiguous target must never silently pick one of the two"
+        );
+    }
+
+    #[test]
+    fn plugin_target_round_trips_through_save_and_load() {
+        let mut m = Manifest::default();
+        m.plugins.insert(
+            "security-guidance".into(),
+            PluginEntry {
+                marketplace: None,
+                hosts: None,
+                targets: BTreeMap::from([(
+                    "opencode".to_string(),
+                    PluginTarget {
+                        npm: Some("@company/opencode-security@1.4.2".into()),
+                        local: None,
+                        scope: ScopeKind::User,
+                    },
+                )]),
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("manifest.toml");
+        m.save(&path).unwrap();
+        let reloaded = Manifest::load(&path).unwrap();
+        assert_eq!(
+            reloaded.plugins["security-guidance"].targets["opencode"]
+                .npm
+                .as_deref(),
+            Some("@company/opencode-security@1.4.2")
+        );
     }
 
     #[test]

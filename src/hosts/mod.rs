@@ -22,6 +22,7 @@ use crate::core::model::{
 use crate::paths;
 
 use descriptor::{AddStyle, HostDescriptor, ReadSource};
+use opencode_family::layers::{Env, Family};
 use parsers::ParseCtx;
 
 pub struct Host {
@@ -145,6 +146,24 @@ impl Host {
                         .push(format!("catalog {}: {e:#}", path.display())),
                 }
             }
+        }
+
+        // Npm/local plugin targets for the OpenCode family. This does not go
+        // through the generic `[plugins]` `read`/`catalog` machinery above:
+        // that shape is one file, one named parser, which fits Claude's and
+        // Codex's single marketplace-install file. OpenCode and Kilo have no
+        // marketplace or CLI install command at all — their state is a
+        // multi-layer JSONC `plugin` array plus host-owned files scanned from
+        // two directory names, resolved through the same XDG/env-prefix
+        // layer engine already used for MCP and instructions. Gating on
+        // `Family::from_host_name` is the real, if implicit, "this host
+        // participates" declaration; a `[plugins]` table here would be
+        // actively wrong, because it would also enroll these hosts in the
+        // marketplace-resolved install path below, which they cannot use.
+        if let Some(family) = Family::from_host_name(&self.descriptor.name) {
+            let env = Env::from_process();
+            let repo = repos.first().map(|r| Path::new(r.as_str()));
+            snap.plugin_targets = opencode_family::plugins::read_full_state(family, &env, repo);
         }
 
         if let Some(skills) = &self.descriptor.skills {
