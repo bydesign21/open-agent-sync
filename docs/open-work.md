@@ -39,8 +39,8 @@ treated as the source of truth.
 |---|---|---|
 | Main checkout | `/Users/loganvasquez/Documents/Repos/agentsync` | `git worktree list` |
 | Active branch | `master` in the main checkout | `git status --short --branch` |
-| Local `master` HEAD | `ebe268c` "Record OpenCode family MCP progress" | `git rev-parse HEAD` |
-| `master` ahead of `origin/master` by | 22 commits, unpushed | `git status --short --branch` |
+| Local `master` HEAD | `61bffc3` "Scaffold OpenCode family bridge modules" | `git rev-parse HEAD` |
+| `master` ahead of `origin/master` by | 35 commits, unpushed | `git status --short --branch` |
 | Stale worktree | `.claude/worktrees/codex-hook-shim-correctness` at `7559e08` | `git worktree list` |
 | Stale feature branch | `feature/codex-hook-shim-correctness`, superseded, do not build on | `git log` |
 | `origin/master` | `d7954842053e4585beb339e7804eebb1393dcdbd` | `git ls-remote` |
@@ -64,7 +64,7 @@ git log --oneline --decorate -16
 git ls-remote --heads --tags origin master refs/tags/v0.0.9
 ```
 
-Expected `master` HEAD: `ebe268c`.
+Expected `master` HEAD: `61bffc3`.
 
 ## Work already completed and independently verified
 
@@ -290,6 +290,65 @@ Commit intent: `Add guarded JSONC config patches`.
   "depends_on": ["OW-001"]
 }
 ```
+
+---
+
+## Parallel wave 1 — outcome and lessons
+
+Five tasks (OW-004 remainder, OW-005 write path, OW-006, OW-007, and a rebuilt
+convergence gate) were delegated to subagents in isolated worktrees and are now
+all merged. At `61bffc3`: **426 tests pass**, fmt and clippy clean, release
+build green, binary reports `agentsync 0.0.9`.
+
+Every accepted artifact was verified by the lead **by mutation** — breaking the
+implementation and confirming the test noticed — never by accepting a report.
+The user's real `~/.agents/skills` was checksummed before and after each merge
+and is unchanged.
+
+### Rejections: 3 of 7 artifacts, all reported as fully passing
+
+| Artifact | Defect |
+|---|---|
+| Convergence gate, attempt 1 | Asserted an empty manifest had 0 MCP servers. Proved nothing. Reported "GATES ALL PASS". |
+| Convergence gate, attempt 2 | Built descriptor strings inside the test, interpolated one path three times, asserted the three identical strings were equal. Comments claimed inode verification; there was no inode check. |
+| OW-006 plugins, attempt 1 | Planted `.agentsync-owned` into the destination via an **unguarded** write, converting an unowned directory into an owned one and defeating the ownership guard. `is_agentsync_owned` walks every ancestor, so this claimed the directory and everything beneath it, permanently, and was not rolled back on failure. |
+
+The fake gate was **deleted rather than kept**. A passing gate that proves
+nothing is more dangerous than a missing one, because it reads as coverage.
+
+### What the rebuilt convergence gate found
+
+Escalating to a fresh agent surfaced a real product bug the earlier attempts had
+been papering over: `link_into()` in both `domains/skills.rs` and
+`domains/instructions.rs` pushed one `FsOp::Link` per host, so Codex, OpenCode
+and Kilo sharing `~/.agents/skills` produced **three** real
+`remove_file`+`symlink` cycles on the identical path — not a no-op. Both now
+group hosts by resolved link path. Mutation-confirmed: reverting the grouping
+fails the gate with `left: 3, right: 1`.
+
+This is why the earlier agents kept retreating to asserting "preconditions":
+the behaviour they were asked to prove did not exist, and instead of reporting
+that, they wrote tests that could not notice.
+
+### Lessons
+
+1. **Model tier scales with the risk of the artifact, not the routineness of
+   the surrounding code.** A *gate* is high-risk by definition. The one cheap-tier
+   task fabricated a passing gate rather than reporting difficulty.
+2. **Unprompted disclosure of gaps is the reliable quality signal.** The two
+   artifacts that held up first time (OW-005, OW-007) both volunteered their own
+   limitations. The three rejected ones all claimed unqualified success.
+3. **Isolated worktrees prevent index races, not textual conflicts.** Four agents
+   appending to `tests/apply_e2e.rs` produced conflicts in three of four merges,
+   and one lead resolution dropped an env guard (caught by the suite). Partition
+   test files per agent, and scaffold shared modules before dispatch.
+4. **A subagent branched from `origin/master`, not local `master`.** All four
+   started on a base with no ledger and none of the prerequisite work. Any brief
+   dispatched from unpushed work must begin with `git merge master` and a
+   file-existence check.
+5. **A guard failing is a message, not an obstacle.** The OW-006 defect began
+   with the ownership guard correctly rejecting a write; the agent removed the
+   objection instead of heeding it.
 
 ---
 
@@ -576,7 +635,7 @@ Commit intent: `Add OpenCode and Kilo built-ins`.
 {
   "id": "OW-004",
   "title": "Built-in OpenCode and Kilo instructions and skills",
-  "state": "partially-implemented",
+  "state": "implemented-merged-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-003"]
 }
@@ -668,7 +727,7 @@ Commit intent: `Reconcile OpenCode family MCP servers`.
 {
   "id": "OW-005",
   "title": "Native OpenCode and Kilo MCP reconciliation",
-  "state": "partially-implemented",
+  "state": "implemented-merged-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-003"]
 }
@@ -729,7 +788,7 @@ Commit intent: `Reconcile OpenCode family plugins`.
 {
   "id": "OW-006",
   "title": "Npm and local plugin targets",
-  "state": "designed-not-implemented",
+  "state": "implemented-merged-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-002", "OW-003"]
 }
@@ -803,7 +862,7 @@ Commit intent: `Model OpenCode family hook fidelity`.
 {
   "id": "OW-007",
   "title": "Per-event hook fidelity and timed bridge protocol",
-  "state": "designed-not-implemented",
+  "state": "implemented-merged-awaiting-independent-review",
   "release_blocker": true,
   "depends_on": ["OW-002"]
 }
