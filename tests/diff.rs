@@ -3115,3 +3115,218 @@ fn opencode_hooks_a_rewake_configured_handler_is_reported_not_silently_bridged()
         plan.notes
     );
 }
+
+// ---------------------------------------------------------------------------
+// Kilo hook bridge wiring into production (OW-009 gap closure)
+// ---------------------------------------------------------------------------
+//
+// Everything above this point in the Kilo section exercises the bridge
+// GENERATOR (`shim::bridges::kilo`) directly. These tests exercise the actual
+// production path — `domains::hooks::rows()`/`plan_one` — the gap the lead
+// identified: `kilo::spec_for` was reachable only from that module's own
+// tests, never from `World::rows()`/`World::plan()`. Mirrors the
+// `opencode_hooks_*` production-wiring tests directly above, with `kilo`
+// substituted for `opencode` throughout.
+
+fn kilo_hooks_world(handler: HookHandler, manifest: Manifest) -> World {
+    let mut claude_snap = HostSnapshot {
+        host: "claude".to_string(),
+        display: "claude".to_string(),
+        detected: true,
+        ..Default::default()
+    };
+    claude_snap.hooks.insert(handler.id.clone(), handler);
+
+    let kilo_snap = HostSnapshot {
+        host: "kilo".to_string(),
+        display: "kilo".to_string(),
+        detected: true,
+        ..Default::default()
+    };
+
+    World {
+        manifest,
+        manifest_path: PathBuf::from("/tmp/agentsync-test/manifest.toml"),
+        hosts: vec![claude_source_host(), host("kilo")],
+        snapshots: vec![claude_snap, kilo_snap],
+        repos: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
+
+#[test]
+fn kilo_hooks_maps_pre_and_post_tool_use_to_the_measured_callbacks_and_blocks_everything_else() {
+    // PreToolUse/PostToolUse have an honest structural mapping onto Kilo's
+    // measured tool.execute.before/after. Every other Claude event is left
+    // unmapped, so it must be blocked rather than silently ignored.
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = OpenCodeHooksEnvGuard::set(&tmp.path().join("cfg"), &tmp.path().join("state"));
+
+    let world = kilo_hooks_world(pre_tool_use_handler(), Manifest::default());
+    let rows = world.rows();
+    let row = rows
+        .iter()
+        .find(|r| r.domain == Domain::Hooks && r.name.starts_with("demo-plugin"))
+        .expect("a hooks row for the PreToolUse handler");
+    assert_eq!(row.severity, Severity::Normal, "{row:?}");
+    assert!(
+        row.actions.iter().any(
+            |a| matches!(&a.kind, ActionKind::Push { hosts } if hosts == &vec!["kilo".to_string()])
+        ),
+        "must offer to generate the bridge on kilo: {row:?}"
+    );
+
+    // An event with no honest mapping (Stop has no Kilo analog bridged today)
+    // must be blocked, never silently dropped or guessed at.
+    let mut stop_id = HookId {
+        source: "demo-plugin@demo-marketplace:hooks/hooks.json".to_string(),
+        event: "Stop".to_string(),
+        group: 0,
+        index: 0,
+    };
+    stop_id.index = 1;
+    let stop_handler = HookHandler::new(stop_id, "Stop", "true");
+    let world2 = kilo_hooks_world(stop_handler, Manifest::default());
+    let rows2 = world2.rows();
+    let row2 = rows2
+        .iter()
+        .find(|r| r.domain == Domain::Hooks)
+        .expect("a row for the unmapped Stop handler");
+    assert_eq!(row2.severity, Severity::Blocked, "{row2:?}");
+    assert!(
+        row2.headline.contains("Stop"),
+        "the block reason must name the unmapped event: {row2:?}"
+    );
+    assert!(
+        !row2.actionable(),
+        "an unmapped event must not be actionable"
+    );
+}
+
+#[test]
+fn kilo_hooks_every_other_measured_callback_is_blocked_by_name() {
+    // Rule 3 in the task brief: only PreToolUse/PostToolUse are mapped. Every
+    // one of the other seven Claude-shaped events this codebase knows about
+    // must be reported BLOCKED, naming the event, never silently dropped and
+    // never fabricated into one of the seven unmapped Kilo callbacks.
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = OpenCodeHooksEnvGuard::set(&tmp.path().join("cfg"), &tmp.path().join("state"));
+
+    for (n, event) in [
+        "Stop",
+        "SubagentStop",
+        "UserPromptSubmit",
+        "SessionStart",
+        "SessionEnd",
+        "Notification",
+        "PreCompact",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let id = HookId {
+            source: "demo-plugin@demo-marketplace:hooks/hooks.json".to_string(),
+            event: event.to_string(),
+            group: 0,
+            index: n,
+        };
+        let handler = HookHandler::new(id, event, "true");
+        let world = kilo_hooks_world(handler, Manifest::default());
+        let rows = world.rows();
+        let row = rows
+            .iter()
+            .find(|r| r.domain == Domain::Hooks)
+            .unwrap_or_else(|| panic!("a row for the unmapped {event} handler"));
+        assert_eq!(row.severity, Severity::Blocked, "{event}: {row:?}");
+        assert!(
+            row.headline.contains(event),
+            "{event}: block reason must name the event: {row:?}"
+        );
+    }
+}
+
+#[test]
+fn kilo_hooks_plans_a_guarded_file_transaction_never_a_host_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = OpenCodeHooksEnvGuard::set(&tmp.path().join("cfg"), &tmp.path().join("state"));
+
+    let world = kilo_hooks_world(pre_tool_use_handler(), Manifest::default());
+    let mut rows = world.rows();
+    for row in rows.iter_mut() {
+        if row.domain == Domain::Hooks {
+            row.accepted = row.actionable();
+        }
+    }
+    let plan = world.plan(&rows);
+    assert!(
+        plan.steps
+            .iter()
+            .any(|s| matches!(&s.step, Step::FileTransaction(_))),
+        "the Kilo bridge must be a guarded FileTransaction: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+    assert!(
+        plan.steps
+            .iter()
+            .all(|s| !matches!(&s.step, Step::Host { .. })),
+        "Kilo has no marketplace/plugin install command to invoke: {:?}",
+        plan.steps.iter().map(|s| &s.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn kilo_hooks_production_sidecar_carries_the_callback_name_not_the_claude_event() {
+    // This is the exact defect the lead reproduced: a sidecar built by the
+    // PRODUCTION planning path must carry the Kilo callback name
+    // ("tool.execute.before"/"tool.execute.after") in its `event` field, not
+    // the source Claude event name ("PreToolUse") — `src/shim/output.rs`
+    // reads `spec.event` as the callback name for `KiloV1` and hands it
+    // straight to `bridge_output::translate`. Executing a spec whose event is
+    // still "PreToolUse" fails with "PostToolUse/PreToolUse has no measured
+    // output channel".
+    let tmp = tempfile::tempdir().unwrap();
+    let _env = OpenCodeHooksEnvGuard::set(&tmp.path().join("cfg"), &tmp.path().join("state"));
+
+    let world = kilo_hooks_world(pre_tool_use_handler(), Manifest::default());
+    let mut rows = world.rows();
+    for row in rows.iter_mut() {
+        if row.domain == Domain::Hooks {
+            row.accepted = row.actionable();
+        }
+    }
+    let plan = world.plan(&rows);
+    let tx = plan
+        .steps
+        .iter()
+        .find_map(|s| match &s.step {
+            Step::FileTransaction(tx) => Some(tx),
+            _ => None,
+        })
+        .expect("a guarded file transaction for the Kilo bridge");
+
+    let mut found_callback_named_sidecar = false;
+    for op in &tx.operations {
+        if let agentsync::transaction::FileOperation::WriteGenerated { path, content, .. } = op
+            && path.to_string_lossy().contains("/specs/")
+        {
+            let value: serde_json::Value = serde_json::from_slice(content)
+                .unwrap_or_else(|e| panic!("sidecar at {path:?} is not JSON: {e}"));
+            let event = value["event"].as_str().unwrap_or_default();
+            assert_ne!(
+                event, "PreToolUse",
+                "the production sidecar must carry the Kilo callback name, not the source \
+                     Claude event: {value}"
+            );
+            assert_eq!(
+                event, "tool.execute.before",
+                "the production sidecar must carry the measured Kilo callback: {value}"
+            );
+            found_callback_named_sidecar = true;
+        }
+    }
+    assert!(
+        found_callback_named_sidecar,
+        "expected to find a generated Kilo sidecar in the planned transaction: {:?}",
+        tx.operations
+    );
+}

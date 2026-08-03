@@ -71,3 +71,27 @@ dirs = [
   "{xdg_config}/kilo/skill",
   "{xdg_config}/kilo/skills",
 ]
+
+# Kilo has no native hook config format either (it is a fork of OpenCode and
+# shares that property) — every bridged handler always goes through the
+# generated plugin in `src/shim/bridges/kilo.rs`, never a native write. Only
+# the two events with an honest structural mapping onto a measured Kilo
+# callback are listed: PreToolUse -> tool.execute.before, PostToolUse ->
+# tool.execute.after (mirrors OpenCode's mapping; both wrap a tool call and
+# can act on it before/after it runs). `caps`/`output` are intentionally
+# empty for the same reason `opencode.toml` leaves them empty:
+# `crate::domains::hooks` never consults them for a Kilo bridge target (see
+# `is_kilo_bridge_target`), because whether the bridge is already generated is
+# a filesystem question, not a capability-declaration one.
+# `[hooks.shim].marketplace` is unused by the bridge path (kept as
+# documentation of the state root); the real paths are resolved by the active
+# `KILO_CONFIG_DIR` profile (`hosts::opencode_family::layers`) and
+# `crate::paths::state_dir()`.
+[hooks]
+events = ["PreToolUse", "PostToolUse"]
+caps   = []
+output = []
+
+[hooks.shim]
+marketplace = "{agentsync-state}/shims/kilo"
+output_strategy = "kilo_v1"
