@@ -1,5 +1,5 @@
-const RELEASE_VERSION: &str = "0.0.9";
-const RELEASE_TAG: &str = "v0.0.9";
+const RELEASE_VERSION: &str = "0.0.10";
+const RELEASE_TAG: &str = "v0.0.10";
 
 #[test]
 fn package_version_matches_release() {
