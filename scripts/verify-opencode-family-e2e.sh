@@ -571,15 +571,20 @@ run_live_session() {
   (
     cd "$project_dir" &&
       if [ -n "$pure_env" ]; then
-        env "${pure_env}=1" "$real_bin" run "list the files in this directory" \
+        exec env "${pure_env}=1" "$real_bin" run "list the files in this directory" \
           --model "agentsync-e2e-stub/stub-model" --format json --auto --pure \
           >"$out" 2>"$err"
       else
-        "$real_bin" run "list the files in this directory" \
+        exec "$real_bin" run "list the files in this directory" \
           --model "agentsync-e2e-stub/stub-model" --format json --auto \
           >"$out" 2>"$err"
       fi
   ) &
+  # `exec` above replaces the subshell with $real_bin itself, so session_pid
+  # IS the kilo/opencode process (not a bash wrapper watching it). Without
+  # this, `kill "$session_pid"` below only killed the wrapper and orphaned
+  # the real CLI process, which got reparented to PID 1 and kept running
+  # (and burning CPU) indefinitely.
   local session_pid=$!
   BACKGROUND_PIDS+=("$session_pid")
 
